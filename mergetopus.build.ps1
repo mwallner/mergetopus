@@ -28,16 +28,16 @@ Task Pack Build, BuildWin, {
 
 	Remove-Item .\target\mergetopus.*.nupkg -ErrorAction SilentlyContinue
 	Exec {
+		$nuspecPath = 'nuget/mergetopus.portable.nuspec'
 		if ($PSVersionTable.Platform -ne 'Windows') {
-			docker run -t --rm -v "${PWD}:/tmp" -w /tmp chocolatey/choco /bin/bash -c 'choco pack nuget/mergetopus.nuspec'
+			docker run -t --rm -v "${PWD}:/tmp" -w /tmp chocolatey/choco /bin/bash -c "choco pack $nuspecPath"
 		}
 		else {
-			choco pack nuget/mergetopus.portable.nuspec
+			choco pack $nuspecPath
 		}
 	}
 
-	Remove-Item .\target\*.nupkg -ErrorAction SilentlyContinue
-	Move-Item .\mergetopus.*.nupkg .\target\.
+	Move-Item .\mergetopus.*.nupkg .\target\. -Force
 }
 
 Task Clean {

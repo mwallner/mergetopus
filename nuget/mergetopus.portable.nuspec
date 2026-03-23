@@ -5,7 +5,7 @@
     <version>0.2.0</version>
     <title>mergetopus</title>
     <authors>mergetopus contributors</authors>
-    <license type="expression">MIT</license>
+    <licenseUrl>https://github.com/mwallner/mergetopus/blob/v0.2/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <summary>mergetopus is a tool that enables splitting complex Git merges into manageable slices</summary>
     <description>Mergetopus turns a regular Git merge into an integration branch plus optional per-conflict slice branches, making large or risky merges easier to review and land safely.
