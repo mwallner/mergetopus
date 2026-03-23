@@ -1,7 +1,7 @@
 # mergetopus
 
-[![Build Pack (Linux)](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-pack.yml?branch=main&job=pack-linux&label=Build%20Pack%20(Linux))](https://github.com/mwallner/mergetopus/actions/workflows/build-pack.yml)
-[![Build Pack (Windows)](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-pack.yml?branch=main&job=pack-windows&label=Build%20Pack%20(Windows))](https://github.com/mwallner/mergetopus/actions/workflows/build-pack.yml)
+[![Build Linux](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-linux.yml?branch=main&label=Build%20Linux)](https://github.com/mwallner/mergetopus/actions/workflows/build-linux.yml)
+[![Build Windows](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-windows.yml?branch=main&label=Build%20Windows)](https://github.com/mwallner/mergetopus/actions/workflows/build-windows.yml)
 
 ![mergetopus logo](assets/mergetopus-logo.svg)
 
