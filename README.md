@@ -96,6 +96,53 @@ Consolidation is non-destructive: it creates a separate branch `<integration>_co
 choco install mergetopus.portable
 ```
 
+## Platform Support
+
+`mergetopus` works on **Windows**, **macOS**, and **Linux**.
+
+On Windows, the merge tool is invoked via `cmd /c`. On Unix-like systems (macOS, Linux),
+it uses `sh -c`. Both approaches set the same environment variables (`LOCAL`, `BASE`, `REMOTE`, `MERGED`) 
+so your merge tool configuration is cross-platform compatible.
+
+## Branch Naming Conventions
+
+An understanding of branch naming helps prevent accidental misuse:
+
+- **Integration branches** follow the pattern `<original-branch>_mw_int_<source-branch>`.
+  These are temporary working branches that hold the merge result with auto-merged
+  files staged and conflicted files reset to "ours".
+  - Example: `main_mw_int_feature`, `develop_mw_int_release_v1`
+
+- **Slice branches** follow the pattern `<integration-branch>_slice<N>` where `N` is a number (1, 2, 3, ...).
+  These are temporary per-conflict branches for resolving individual conflict groups.
+  - Example: `main_mw_int_feature_slice1`, `main_mw_int_feature_slice2`
+
+- **Consolidated branches** follow the pattern `<integration-branch>_consolidated`.
+  These are optional output branches created after all slices are merged, containing
+  a single merge-commit snapshot.
+  - Example: `main_mw_int_feature_consolidated`
+
+### Branch Filtering
+
+When selecting a source branch for `mergetopus`:
+- **Slice branches** (`*_slice<N>`) are automatically filtered out from the branch picker.
+  They should only be used with `mergetopus resolve`, never as a source for a new merge.
+- Only non-slice branches are available for selection, reducing accidental misuse.
+
+### Integration Branch Redirection
+
+If you accidentally select an integration branch as the source:
+- `mergetopus` automatically detects this and redirects to the correct operation.
+- It extracts the original branch and source from the integration branch name.
+- It checks out the original branch and performs the merge with the actual source.
+- Example: if you select `main_mw_int_feature`, mergetopus will:
+  1. Detect it's an integration branch
+  2. Check out `main`
+  3. Merge `feature` instead
+  4. Create a fresh `main_mw_int_feature` integration branch
+
+This prevents confusion when re-running mergetopus on an existing integration branch.
+
 ## Usage
 
 Interactive source selection (branch picker overlay shown):
@@ -167,10 +214,14 @@ mergetopus resolve --quiet main_mw_int_feature_slice1
    - `LOCAL`  — the file at the remembered HEAD (ours, before the merge)
    - `BASE`   — the file at the common ancestor (merge-base)
    - `REMOTE` — the file at the source commit (theirs)
-4. Executes the configured merge tool via `sh -c <cmd>` with `LOCAL`, `BASE`,
-   `REMOTE`, and `MERGED` set as shell environment variables (same convention
-   as `git mergetool`). `MERGED` points to the working-tree file, so the tool
-   writes the resolution directly into the repository.
+4. Executes the configured merge tool with `LOCAL`, `BASE`, `REMOTE`, and `MERGED`
+   set as environment variables (same convention as `git mergetool`). The command
+   is executed via the appropriate shell:
+   - **Windows**: `cmd /c <cmd>`
+   - **Unix-like systems** (macOS, Linux): `sh -c <cmd>`
+   
+   `MERGED` points to the working-tree file, so the tool writes the resolution
+   directly into the repository.
 5. Stages the resolved file(s) and creates a new commit on the slice branch.
 
 ### Configuring the merge tool

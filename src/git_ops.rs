@@ -283,17 +283,27 @@ pub fn consolidated_branch_name(integration_branch: &str) -> String {
 pub fn create_consolidated_merge_commit_branch(
     integration_branch: &str,
     source_ref: &str,
-    source_sha: &str,
     slice_merge_status: &BTreeMap<String, bool>,
 ) -> Result<String> {
-    let remembered_head = run_git(&["rev-parse", "--verify", &format!("{integration_branch}^1")])
-        .context("failed to determine remembered head from integration branch")?;
-
-    let integration_tree = run_git(&[
-        "rev-parse",
-        "--verify",
-        &format!("{integration_branch}^{{tree}}"),
+    // Derive remembered head and source commit from the initial first-parent
+    // commit on the integration branch (the first partial-merge commit).
+    let initial_commit = run_git(&[
+        "rev-list",
+        "--first-parent",
+        "--reverse",
+        "--max-count=1",
+        integration_branch,
     ])?;
+    let initial_commit = initial_commit.trim();
+    if initial_commit.is_empty() {
+        bail!("integration branch '{}' has no commits", integration_branch);
+    }
+
+    let remembered_head = run_git(&["rev-parse", "--verify", &format!("{initial_commit}^1")])
+        .context("failed to resolve remembered head from initial integration commit")?;
+    let source_sha = run_git(&["rev-parse", "--verify", &format!("{initial_commit}^2")]).context(
+        "failed to resolve source SHA from initial integration commit (expected a merge commit)",
+    )?;
 
     let merged_slices = slice_merge_status
         .iter()
@@ -311,33 +321,24 @@ pub fn create_consolidated_merge_commit_branch(
         }
     );
 
-    let mut commit_cmd = Command::new("git");
-    commit_cmd.args([
-        "commit-tree",
-        &integration_tree,
-        "-p",
-        &remembered_head,
-        "-p",
-        source_sha,
-        "-m",
-        &message,
-    ]);
-
-    let output = commit_cmd
-        .output()
-        .context("failed to execute git commit-tree for consolidation")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("consolidation commit-tree failed: {}", stderr.trim());
-    }
-
-    let commit_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if commit_sha.is_empty() {
-        bail!("consolidation commit-tree returned empty commit id");
-    }
-
     let branch = consolidated_branch_name(integration_branch);
-    run_git(&["branch", "-f", &branch, &commit_sha])?;
+    checkout_new_or_reset(&branch, &remembered_head)?;
+
+    // Start the merge to establish the merge parents on consolidated branch.
+    merge_no_commit(&source_sha)?;
+
+    // Replace staged/worktree content with the resolved integration branch content.
+    run_git(&[
+        "restore",
+        &format!("--source={integration_branch}"),
+        "--staged",
+        "--worktree",
+        "--",
+        ".",
+    ])
+    .context("failed to overlay integration branch content onto consolidated branch")?;
+
+    commit(&message)?;
     Ok(branch)
 }
 
@@ -442,4 +443,26 @@ pub fn select_conflicts_by_list(all_conflicts: &[String], csv: &str) -> Result<V
     selected.sort();
     selected.dedup();
     Ok(selected)
+}
+
+/// Execute a shell command in a cross-platform manner.
+/// On Unix-like systems, uses `sh -c`. On Windows, uses `cmd /c`.
+/// Returns the exit status.
+#[allow(dead_code)]
+pub fn run_shell_command(cmd: &str) -> Result<std::process::ExitStatus> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/c", cmd])
+            .status()
+            .context("failed to execute command via cmd /c")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("sh")
+            .args(["-c", cmd])
+            .status()
+            .context("failed to execute command via sh -c")
+    }
 }

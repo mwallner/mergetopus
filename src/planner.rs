@@ -161,6 +161,41 @@ pub fn create_slice_branches(
     Ok(())
 }
 
+/// Check if a branch name is a slice branch (ends with _slice<digits>).
+pub fn is_slice_branch(branch: &str) -> bool {
+    const SLICE_SUFFIX: &str = "_slice";
+    if let Some(idx) = branch.rfind(SLICE_SUFFIX) {
+        let after = &branch[idx + SLICE_SUFFIX.len()..];
+        !after.is_empty() && after.chars().all(|c| c.is_ascii_digit())
+    } else {
+        false
+    }
+}
+
+/// Check if a branch name is an integration branch (contains _mw_int_).
+#[allow(dead_code)]
+pub fn is_integration_branch(branch: &str) -> bool {
+    branch.contains("_mw_int_")
+}
+
+/// Parse an integration branch name to extract the original branch and source.
+/// Integration branch format: <original>_mw_int_<source>
+/// Returns (original_branch, source) if it's a valid integration branch, None otherwise.
+pub fn parse_integration_branch(branch: &str) -> Option<(String, String)> {
+    const INT_MARKER: &str = "_mw_int_";
+    let parts: Vec<&str> = branch.splitn(2, INT_MARKER).collect();
+
+    if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+        // Check that the source part doesn't end with _slice or _consolidated
+        // (to avoid false positives with slices of integration branches)
+        let source = parts[1];
+        if !source.ends_with("_consolidated") && !is_slice_branch(branch) {
+            return Some((parts[0].to_string(), source.to_string()));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +223,36 @@ mod tests {
             "main_mw_int_x_slice1"
         );
         assert!(slice_branch_name("x", 0).is_err());
+    }
+
+    #[test]
+    fn test_is_slice_branch() {
+        assert!(is_slice_branch("main_mw_int_feature_slice1"));
+        assert!(is_slice_branch("main_mw_int_feature_slice99"));
+        assert!(!is_slice_branch("main_mw_int_feature"));
+        assert!(!is_slice_branch("main_slice"));
+        assert!(!is_slice_branch("slice1"));
+    }
+
+    #[test]
+    fn test_is_integration_branch() {
+        assert!(is_integration_branch("main_mw_int_feature"));
+        assert!(is_integration_branch("develop_mw_int_bugfix"));
+        assert!(!is_integration_branch("main"));
+        assert!(!is_integration_branch("feature_branch"));
+    }
+
+    #[test]
+    fn test_parse_integration_branch() {
+        assert_eq!(
+            parse_integration_branch("main_mw_int_feature"),
+            Some(("main".to_string(), "feature".to_string()))
+        );
+        assert_eq!(
+            parse_integration_branch("develop_mw_int_release_v1"),
+            Some(("develop".to_string(), "release_v1".to_string()))
+        );
+        assert_eq!(parse_integration_branch("main"), None);
+        assert_eq!(parse_integration_branch("main_mw_int_feature_slice1"), None);
     }
 }
