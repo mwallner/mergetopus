@@ -4,7 +4,11 @@ on:
   push:
     branches:
       - main
+      - develop
   pull_request:
+    branches:
+      - main
+      - develop
   workflow_dispatch:
 
 jobs:
@@ -28,11 +32,55 @@ jobs:
           Set-StrictMode -Version Latest
           cargo install --locked cargo-bundle-licenses
 
+      - name: Setup Linux cross-compile prerequisites
+        run: |
+          rustup target add x86_64-pc-windows-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          cargo test
+
       - name: Run Pack task
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           Invoke-Build Pack
+
+      - name: Collect build artifacts
+        if: always()
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+
+          $artifactDir = 'artifacts'
+          New-Item -Path $artifactDir -ItemType Directory -Force | Out-Null
+
+          Get-ChildItem -Path target -Filter 'mergetopus.*.nupkg' -File -ErrorAction SilentlyContinue |
+            Copy-Item -Destination $artifactDir -Force
+
+          $releaseFiles = Get-ChildItem -Path target -Recurse -File -Filter 'mergetopus.*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '[\\/]release[\\/]' }
+
+          if ($releaseFiles) {
+            Compress-Archive -Path $releaseFiles.FullName -DestinationPath "$artifactDir/release-mergetopus-${{ runner.os }}.zip" -Force
+          }
+          else {
+            Write-Host 'No release mergetopus.* files found to zip.'
+          }
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-${{ runner.os }}
+          path: |
+            artifacts/*.nupkg
+            artifacts/*.zip
+          if-no-files-found: warn
 
   pack-windows:
     name: Pack (Windows)
@@ -54,8 +102,46 @@ jobs:
           Set-StrictMode -Version Latest
           cargo install --locked cargo-bundle-licenses
 
+      - name: Run tests
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          cargo test
+
       - name: Run Pack task
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           Invoke-Build Pack
+
+      - name: Collect build artifacts
+        if: always()
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+
+          $artifactDir = 'artifacts'
+          New-Item -Path $artifactDir -ItemType Directory -Force | Out-Null
+
+          Get-ChildItem -Path target -Filter 'mergetopus.*.nupkg' -File -ErrorAction SilentlyContinue |
+            Copy-Item -Destination $artifactDir -Force
+
+          $releaseFiles = Get-ChildItem -Path target -Recurse -File -Filter 'mergetopus.*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '[\\/]release[\\/]' }
+
+          if ($releaseFiles) {
+            Compress-Archive -Path $releaseFiles.FullName -DestinationPath "$artifactDir/release-mergetopus-${{ runner.os }}.zip" -Force
+          }
+          else {
+            Write-Host 'No release mergetopus.* files found to zip.'
+          }
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-${{ runner.os }}
+          path: |
+            artifacts/*.nupkg
+            artifacts/*.zip
+          if-no-files-found: warn

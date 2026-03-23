@@ -20,8 +20,10 @@ Task Build GenerateLicenseInfo, {
 }
 
 Task Pack Build, BuildWin, {
+	$isUnix = $IsLinux -or $IsMacOS -or $PSVersionTable.Platform -eq 'Unix'
+
 	$binPath = '.\target\release'
-	if ($PSVersionTable.Platform -ne 'Windows') {
+	if ($isUnix) {
 		$binPath = '.\target\x86_64-pc-windows-gnu\release'
 	}
 	Copy-Item "$binPath\*.exe" nuget\tools\.
@@ -29,7 +31,7 @@ Task Pack Build, BuildWin, {
 	Remove-Item .\target\mergetopus.*.nupkg -ErrorAction SilentlyContinue
 	Exec {
 		$nuspecPath = 'nuget/mergetopus.portable.nuspec'
-		if ($PSVersionTable.Platform -ne 'Windows') {
+		if ($isUnix) {
 			docker run -t --rm -v "${PWD}:/tmp" -w /tmp chocolatey/choco /bin/bash -c "choco pack $nuspecPath"
 		}
 		else {
