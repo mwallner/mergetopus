@@ -1,5 +1,8 @@
 # mergetopus
 
+[![Build Pack (Linux)](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-pack.yml?branch=main&job=pack-linux&label=Build%20Pack%20(Linux))](https://github.com/mwallner/mergetopus/actions/workflows/build-pack.yml)
+[![Build Pack (Windows)](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-pack.yml?branch=main&job=pack-windows&label=Build%20Pack%20(Windows))](https://github.com/mwallner/mergetopus/actions/workflows/build-pack.yml)
+
 ![mergetopus logo](assets/mergetopus-logo.svg)
 
 `mergetopus` is a Rust TUI tool that helps split difficult Git merges into:

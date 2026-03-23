@@ -1,0 +1,49 @@
+name: Build Pack
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pack-linux:
+    name: Pack (Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PowerShell modules
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          Install-Module InvokeBuild -Scope CurrentUser -Force -AllowClobber
+
+      - name: Run Pack task
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          Invoke-Build Pack
+
+  pack-windows:
+    name: Pack (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PowerShell modules
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          Install-Module InvokeBuild -Scope CurrentUser -Force -AllowClobber
+
+      - name: Run Pack task
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          Invoke-Build Pack
