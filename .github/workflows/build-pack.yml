@@ -22,6 +22,12 @@ jobs:
           Set-StrictMode -Version Latest
           Install-Module InvokeBuild -Scope CurrentUser -Force -AllowClobber
 
+      - name: Setup cargo-bundle-licenses
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          cargo install --locked cargo-bundle-licenses
+
       - name: Run Pack task
         shell: pwsh
         run: |
@@ -41,6 +47,12 @@ jobs:
         run: |
           Set-StrictMode -Version Latest
           Install-Module InvokeBuild -Scope CurrentUser -Force -AllowClobber
+
+      - name: Setup cargo-bundle-licenses
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          cargo install --locked cargo-bundle-licenses
 
       - name: Run Pack task
         shell: pwsh
