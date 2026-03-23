@@ -33,15 +33,23 @@ fn run_git_allow_failure(args: &[&str]) -> Result<(bool, String, String)> {
 }
 
 pub fn ensure_git_context() -> Result<()> {
-    let inside = run_git(&["rev-parse", "--is-inside-work-tree"])?;
-    if inside != "true" {
-        bail!("current directory is not inside a Git working tree");
-    }
+    ensure_git_worktree()?;
 
     let status = run_git(&["status", "--porcelain"])?;
     if !status.is_empty() {
         bail!("working tree is not clean; commit or stash changes before running mergetopus");
     }
+
+    Ok(())
+}
+
+pub fn ensure_git_worktree() -> Result<()> {
+    let inside = run_git(&["rev-parse", "--is-inside-work-tree"])?;
+    if inside != "true" {
+        bail!("current directory is not inside a Git working tree");
+    }
+
+    ensure_longpaths_support()?;
 
     Ok(())
 }
@@ -100,7 +108,35 @@ pub fn checkout_new_or_reset(branch: &str, at: &str) -> Result<()> {
 }
 
 pub fn merge_no_commit(source: &str) -> Result<()> {
-    let _ = run_git_allow_failure(&["merge", "--no-ff", "--no-commit", source])?;
+    let (ok, _, stderr) = run_git_allow_failure(&["merge", "--no-ff", "--no-commit", source])?;
+    if ok {
+        return Ok(());
+    }
+
+    // Expected conflict path: merge exits non-zero but leaves MERGE_HEAD.
+    if merge_in_progress()? {
+        return Ok(());
+    }
+
+    bail!(
+        "git merge failed before entering conflict resolution: {}\n\
+         verify source/history compatibility, then retry (for unrelated histories, merge manually with --allow-unrelated-histories first)",
+        stderr
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_longpaths_support() -> Result<()> {
+    let current = get_git_config("core.longpaths")?.unwrap_or_default();
+    if current.eq_ignore_ascii_case("true") {
+        return Ok(());
+    }
+
+    run_git(&["config", "core.longpaths", "true"]).map(|_| ())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_longpaths_support() -> Result<()> {
     Ok(())
 }
 
@@ -143,6 +179,10 @@ pub fn merge_in_progress() -> Result<bool> {
 
 pub fn commit(message: &str) -> Result<()> {
     run_git(&["commit", "--allow-empty", "-m", message]).map(|_| ())
+}
+
+pub fn commit_strict(message: &str) -> Result<()> {
+    run_git(&["commit", "-m", message]).map(|_| ())
 }
 
 pub fn list_slice_branches_for_integration(integration_branch: &str) -> Result<Vec<String>> {

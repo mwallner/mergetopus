@@ -13,13 +13,16 @@ pub fn run(args: Args) -> Result<()> {
         return Ok(());
     }
 
+    if let Some(Commands::Resolve { branch, commit }) = &args.command {
+        git_ops::ensure_git_worktree()?;
+        let current_branch = git_ops::current_branch()?;
+        let tui_title = format!("Mergetopus [{current_branch}]");
+        return resolve_command(branch.as_deref(), *commit, args.quiet, &tui_title);
+    }
+
     git_ops::ensure_git_context()?;
     let current_branch = git_ops::current_branch()?;
     let tui_title = format!("Mergetopus [{current_branch}]");
-
-    if let Some(Commands::Resolve { branch }) = &args.command {
-        return resolve_command(branch.as_deref(), args.quiet, &tui_title);
-    }
 
     run_merge_workflow(&args, &current_branch, &tui_title)
 }
@@ -233,7 +236,12 @@ fn select_conflicts(
 ///    MERGED points to the actual working-tree file so the tool writes directly
 ///    into the repository.
 /// 3. Stages the resolved file and, once all files are done, commits the result.
-fn resolve_command(branch_arg: Option<&str>, quiet: bool, tui_title: &str) -> Result<()> {
+fn resolve_command(
+    branch_arg: Option<&str>,
+    do_commit: bool,
+    quiet: bool,
+    tui_title: &str,
+) -> Result<()> {
     let slice_branch = if let Some(b) = branch_arg {
         if !git_ops::branch_exists(b)? {
             bail!("branch '{}' does not exist", b);
@@ -383,8 +391,22 @@ fn resolve_command(branch_arg: Option<&str>, quiet: bool, tui_title: &str) -> Re
 
     println!("Resolve complete on '{slice_branch}'");
     println!("  Resolved {} file(s): {}", slice_paths.len(), paths_list);
-    println!("  Changes are staged but not committed.");
-    println!("  Review and commit when ready.");
+
+    if do_commit {
+        if git_ops::staged_has_changes()? {
+            let msg = format!(
+                "Mergetopus resolve: '{slice_branch}'\n\nResolved-Paths: {paths_list}\nSource-Commit: {source_commit}"
+            );
+            git_ops::commit_strict(&msg)?;
+            println!("  Resolution commit created.");
+        } else {
+            println!("  No staged changes to commit.");
+        }
+    } else {
+        println!("  Changes are staged but not committed.");
+        println!("  Review and commit when ready, or re-run with --commit.");
+    }
+
     Ok(())
 }
 

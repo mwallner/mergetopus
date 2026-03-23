@@ -107,6 +107,9 @@ On Windows, the merge tool is invoked via `cmd /c`. On Unix-like systems (macOS,
 it uses `sh -c`. Both approaches set the same environment variables (`LOCAL`, `BASE`, `REMOTE`, `MERGED`) 
 so your merge tool configuration is cross-platform compatible.
 
+When running inside a Git worktree on Windows, mergetopus ensures `core.longpaths=true`
+for the repository so deep path merges remain usable.
+
 ## Branch Naming Conventions
 
 An understanding of branch naming helps prevent accidental misuse:
@@ -195,7 +198,7 @@ mergetopus feature/refactor-auth --quiet --yes
 ## Resolving Conflicts
 
 After mergetopus has created slice branches, use `resolve` to open each slice
-branch in your configured merge tool and commit the resolution:
+branch in your configured merge tool and stage the resolution:
 
 ```bash
 # Interactive slice branch picker (TUI)
@@ -206,6 +209,9 @@ mergetopus resolve main_mw_int_feature_slice1
 
 # Non-interactive (--quiet requires an explicit branch)
 mergetopus resolve --quiet main_mw_int_feature_slice1
+
+# Create a commit automatically after staging
+mergetopus resolve --commit main_mw_int_feature_slice1
 ```
 
 ### What resolve does
@@ -225,7 +231,8 @@ mergetopus resolve --quiet main_mw_int_feature_slice1
    
    `MERGED` points to the working-tree file, so the tool writes the resolution
    directly into the repository.
-5. Stages the resolved file(s) and creates a new commit on the slice branch.
+5. Stages the resolved file(s).
+6. Optional: if `--commit` is passed, creates a commit on the slice branch.
 
 ### Configuring the merge tool
 

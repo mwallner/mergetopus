@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
     long_about = "Mergetopus turns a regular git merge into an integration branch plus optional per-conflict slice branches.\n\nWorkflow:\n  1) Create/reset an integration branch from your current HEAD\n  2) Merge SOURCE into it with --no-commit\n  3) Keep auto-merged files in integration\n  4) Optionally group selected conflicted paths into one explicit slice branch via --select-paths\n\nIf SOURCE is omitted, an interactive branch picker is shown (unless --quiet is set)."
 )]
 #[command(
-    after_help = "Examples:\n  mergetopus origin/main\n  mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs'\n  mergetopus hotfix --yes\n  mergetopus origin/main --quiet"
+    after_help = "Examples:\n  mergetopus origin/main\n  mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs'\n  mergetopus hotfix --yes\n  mergetopus origin/main --quiet\n  mergetopus resolve --commit main_mw_int_feature_slice1"
 )]
 pub struct Args {
     #[command(subcommand)]
@@ -62,9 +62,16 @@ pub enum Commands {
     /// template is taken from `git config mergetool.<tool>.cmd`.
     /// The variables LOCAL, BASE, REMOTE and MERGED are set as shell environment
     /// variables before the command is executed (same convention as git mergetool).
+    ///
+    /// By default, resolved changes are staged but not committed.
+    /// Use --commit to create a commit after staging.
     Resolve {
         /// Slice branch to resolve.  When omitted an interactive TUI picker is shown.
         #[arg(value_name = "BRANCH")]
         branch: Option<String>,
+
+        /// Commit staged resolution changes at the end.
+        #[arg(long, default_value_t = false)]
+        commit: bool,
     },
 }
