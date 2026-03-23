@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Mergetopus logo – V3 Minimal/Professional (960×320) -->
-<svg width="960" height="320" viewBox="0 0 960 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg width="1080" height="320" viewBox="0 0 960 320" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="960" y2="320" gradientUnits="userSpaceOnUse">
       <stop offset="0%"   stop-color="#F8FAFC"/>
@@ -17,7 +17,7 @@
   </defs>
 
   <!-- Background -->
-  <rect width="960" height="320" rx="24" fill="url(#bg)"/>
+  <rect width="980" height="320" rx="24" fill="url(#bg)"/>
 
   <!-- Subtle grid -->
   <g stroke="#D8E4F0" stroke-width="0.8">
