@@ -33,15 +33,23 @@ fn run_git_allow_failure(args: &[&str]) -> Result<(bool, String, String)> {
 }
 
 pub fn ensure_git_context() -> Result<()> {
-    let inside = run_git(&["rev-parse", "--is-inside-work-tree"])?;
-    if inside != "true" {
-        bail!("current directory is not inside a Git working tree");
-    }
+    ensure_git_worktree()?;
 
     let status = run_git(&["status", "--porcelain"])?;
     if !status.is_empty() {
         bail!("working tree is not clean; commit or stash changes before running mergetopus");
     }
+
+    Ok(())
+}
+
+pub fn ensure_git_worktree() -> Result<()> {
+    let inside = run_git(&["rev-parse", "--is-inside-work-tree"])?;
+    if inside != "true" {
+        bail!("current directory is not inside a Git working tree");
+    }
+
+    ensure_longpaths_support()?;
 
     Ok(())
 }
@@ -91,6 +99,18 @@ pub fn list_branch_refs() -> Result<Vec<String>> {
     Ok(branches)
 }
 
+pub fn list_local_branches() -> Result<Vec<String>> {
+    let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
+    let mut branches = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    branches.sort();
+    Ok(branches)
+}
+
 pub fn checkout(branch: &str) -> Result<()> {
     run_git(&["checkout", branch]).map(|_| ())
 }
@@ -100,7 +120,35 @@ pub fn checkout_new_or_reset(branch: &str, at: &str) -> Result<()> {
 }
 
 pub fn merge_no_commit(source: &str) -> Result<()> {
-    let _ = run_git_allow_failure(&["merge", "--no-ff", "--no-commit", source])?;
+    let (ok, _, stderr) = run_git_allow_failure(&["merge", "--no-ff", "--no-commit", source])?;
+    if ok {
+        return Ok(());
+    }
+
+    // Expected conflict path: merge exits non-zero but leaves MERGE_HEAD.
+    if merge_in_progress()? {
+        return Ok(());
+    }
+
+    bail!(
+        "git merge failed before entering conflict resolution: {}\n\
+         verify source/history compatibility, then retry (for unrelated histories, merge manually with --allow-unrelated-histories first)",
+        stderr
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_longpaths_support() -> Result<()> {
+    let current = get_git_config("core.longpaths")?.unwrap_or_default();
+    if current.eq_ignore_ascii_case("true") {
+        return Ok(());
+    }
+
+    run_git(&["config", "core.longpaths", "true"]).map(|_| ())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_longpaths_support() -> Result<()> {
     Ok(())
 }
 
@@ -143,6 +191,10 @@ pub fn merge_in_progress() -> Result<bool> {
 
 pub fn commit(message: &str) -> Result<()> {
     run_git(&["commit", "--allow-empty", "-m", message]).map(|_| ())
+}
+
+pub fn commit_strict(message: &str) -> Result<()> {
+    run_git(&["commit", "-m", message]).map(|_| ())
 }
 
 pub fn list_slice_branches_for_integration(integration_branch: &str) -> Result<Vec<String>> {
@@ -285,19 +337,10 @@ pub fn create_consolidated_merge_commit_branch(
     source_ref: &str,
     slice_merge_status: &BTreeMap<String, bool>,
 ) -> Result<String> {
-    // Derive remembered head and source commit from the initial first-parent
-    // commit on the integration branch (the first partial-merge commit).
-    let initial_commit = run_git(&[
-        "rev-list",
-        "--first-parent",
-        "--reverse",
-        "--max-count=1",
-        integration_branch,
-    ])?;
-    let initial_commit = initial_commit.trim();
-    if initial_commit.is_empty() {
-        bail!("integration branch '{}' has no commits", integration_branch);
-    }
+    // Derive remembered head and source commit from the first mergetopus
+    // partial-merge commit on the integration branch, not from the oldest
+    // reachable ancestor in the repository history.
+    let initial_commit = initial_integration_merge_commit(integration_branch)?;
 
     let remembered_head = run_git(&["rev-parse", "--verify", &format!("{initial_commit}^1")])
         .context("failed to resolve remembered head from initial integration commit")?;
@@ -324,7 +367,8 @@ pub fn create_consolidated_merge_commit_branch(
     let branch = consolidated_branch_name(integration_branch);
     checkout_new_or_reset(&branch, &remembered_head)?;
 
-    // Start the merge to establish the merge parents on consolidated branch.
+    // Start the merge to establish the correct merge parents, then replace the
+    // index/worktree content with the final integration tree before committing.
     merge_no_commit(&source_sha)?;
 
     // Replace staged/worktree content with the resolved integration branch content.
@@ -340,6 +384,30 @@ pub fn create_consolidated_merge_commit_branch(
 
     commit(&message)?;
     Ok(branch)
+}
+
+fn initial_integration_merge_commit(integration_branch: &str) -> Result<String> {
+    let out = run_git(&[
+        "log",
+        integration_branch,
+        "--first-parent",
+        "--reverse",
+        "--format=%H%x1f%s",
+    ])?;
+
+    for line in out.lines() {
+        let mut parts = line.splitn(2, '\u{1f}');
+        let sha = parts.next().unwrap_or("").trim();
+        let subject = parts.next().unwrap_or("").trim();
+        if subject.starts_with("Mergetopus: partial merge '") {
+            return Ok(sha.to_string());
+        }
+    }
+
+    bail!(
+        "failed to locate initial mergetopus partial-merge commit on integration branch '{}'",
+        integration_branch
+    )
 }
 
 pub fn three_way_diff(path: &str, source_ref: &str) -> Result<String> {
@@ -367,6 +435,34 @@ pub fn get_git_config(key: &str) -> Result<Option<String>> {
 /// Return the full commit message of the tip commit on `branch`.
 pub fn branch_tip_commit_message(branch: &str) -> Result<String> {
     run_git(&["log", "-1", "--format=%B", branch])
+}
+
+pub fn commit_message(rev: &str) -> Result<String> {
+    run_git(&["show", "-s", "--format=%B", rev])
+}
+
+pub fn commit_parent_shas(rev: &str) -> Result<Vec<String>> {
+    let out = run_git(&["show", "-s", "--format=%P", rev])?;
+    Ok(out
+        .split_whitespace()
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+pub fn first_parent_oldest_commit(branch: &str) -> Result<String> {
+    let out = run_git(&[
+        "rev-list",
+        "--first-parent",
+        "--reverse",
+        "--max-count=1",
+        branch,
+    ])?;
+    let commit = out.trim();
+    if commit.is_empty() {
+        bail!("branch '{}' has no commits", branch);
+    }
+    Ok(commit.to_string())
 }
 
 /// Return the SHA of the first parent of `rev` (i.e. `rev^`).
