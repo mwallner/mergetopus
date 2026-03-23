@@ -444,25 +444,3 @@ pub fn select_conflicts_by_list(all_conflicts: &[String], csv: &str) -> Result<V
     selected.dedup();
     Ok(selected)
 }
-
-/// Execute a shell command in a cross-platform manner.
-/// On Unix-like systems, uses `sh -c`. On Windows, uses `cmd /c`.
-/// Returns the exit status.
-#[allow(dead_code)]
-pub fn run_shell_command(cmd: &str) -> Result<std::process::ExitStatus> {
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd")
-            .args(["/c", cmd])
-            .status()
-            .context("failed to execute command via cmd /c")
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("sh")
-            .args(["-c", cmd])
-            .status()
-            .context("failed to execute command via sh -c")
-    }
-}

@@ -172,12 +172,6 @@ pub fn is_slice_branch(branch: &str) -> bool {
     }
 }
 
-/// Check if a branch name is an integration branch (contains _mw_int_).
-#[allow(dead_code)]
-pub fn is_integration_branch(branch: &str) -> bool {
-    branch.contains("_mw_int_")
-}
-
 /// Parse an integration branch name to extract the original branch and source.
 /// Integration branch format: <original>_mw_int_<source>
 /// Returns (original_branch, source) if it's a valid integration branch, None otherwise.
@@ -232,14 +226,6 @@ mod tests {
         assert!(!is_slice_branch("main_mw_int_feature"));
         assert!(!is_slice_branch("main_slice"));
         assert!(!is_slice_branch("slice1"));
-    }
-
-    #[test]
-    fn test_is_integration_branch() {
-        assert!(is_integration_branch("main_mw_int_feature"));
-        assert!(is_integration_branch("develop_mw_int_bugfix"));
-        assert!(!is_integration_branch("main"));
-        assert!(!is_integration_branch("feature_branch"));
     }
 
     #[test]
