@@ -237,3 +237,59 @@ fn release_a_fails_fast_on_unrelated_histories() -> TestResult<()> {
 
     Ok(())
 }
+
+#[test]
+fn consolidation_uses_original_and_source_as_parents_and_integration_tree() -> TestResult<()> {
+    let repo = setup_single_conflict_repo()?;
+
+    let source_sha = git(&repo, &["rev-parse", "feature"])?;
+    let original_sha = git(&repo, &["rev-parse", "main"])?;
+
+    let create = mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        create.status.success(),
+        "initial mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    git(&repo, &["checkout", "main_mw_int_feature"])?;
+    git(
+        &repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            "merge resolved slice",
+            "main_mw_int_feature_slice1",
+        ],
+    )?;
+
+    git(&repo, &["checkout", "main"])?;
+    let consolidate = mergetopus(&repo, &["feature", "--quiet", "--yes"])?;
+    assert!(
+        consolidate.status.success(),
+        "consolidation run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&consolidate.stdout),
+        String::from_utf8_lossy(&consolidate.stderr)
+    );
+
+    let consolidated_branch = "main_mw_int_feature_consolidated";
+    let consolidated_parents = git(&repo, &["show", "-s", "--format=%P", consolidated_branch])?;
+    let parent_list = consolidated_parents
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(parent_list.len(), 2, "consolidated commit must be a merge commit");
+    assert_eq!(parent_list[0], original_sha, "first parent must be original branch head");
+    assert_eq!(parent_list[1], source_sha, "second parent must be source branch head used for integration");
+
+    let consolidated_tree = git(&repo, &["rev-parse", &format!("{consolidated_branch}^{{tree}}")])?;
+    let integration_tree = git(&repo, &["rev-parse", "main_mw_int_feature^{tree}"])?;
+    assert_eq!(
+        consolidated_tree, integration_tree,
+        "consolidated commit tree must match final integration branch state"
+    );
+
+    Ok(())
+}

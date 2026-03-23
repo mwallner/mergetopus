@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
     long_about = "Mergetopus turns a regular git merge into an integration branch plus optional per-conflict slice branches.\n\nWorkflow:\n  1) Create/reset an integration branch from your current HEAD\n  2) Merge SOURCE into it with --no-commit\n  3) Keep auto-merged files in integration\n  4) Optionally group selected conflicted paths into one explicit slice branch via --select-paths\n\nIf SOURCE is omitted, an interactive branch picker is shown (unless --quiet is set)."
 )]
 #[command(
-    after_help = "Examples:\n  mergetopus origin/main\n  mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs'\n  mergetopus hotfix --yes\n  mergetopus origin/main --quiet\n  mergetopus resolve --commit main_mw_int_feature_slice1"
+    after_help = "Examples:\n  mergetopus origin/main\n  mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs'\n  mergetopus hotfix --yes\n  mergetopus origin/main --quiet\n  mergetopus resolve --commit main_mw_int_feature_slice1\n  mergetopus status feature/refactor-auth"
 )]
 pub struct Args {
     #[command(subcommand)]
@@ -73,5 +73,14 @@ pub enum Commands {
         /// Commit staged resolution changes at the end.
         #[arg(long, default_value_t = false)]
         commit: bool,
+    },
+
+    /// Show integration branch and slice progress status.
+    ///
+    /// SOURCE may be either a merge source ref (e.g. feature/foo) or a full
+    /// integration branch name (e.g. main_mw_int_feature_foo).
+    Status {
+        #[arg(value_name = "SOURCE")]
+        source: Option<String>,
     },
 }

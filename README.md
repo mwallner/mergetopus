@@ -193,7 +193,30 @@ mergetopus feature/refactor-auth --quiet --select-paths src/a.rs,src/b.rs
 
 # Quiet mode + auto-consolidate when eligible
 mergetopus feature/refactor-auth --quiet --yes
+
+# Show slice/integration progress status
+mergetopus status feature/refactor-auth
 ```
+
+## Status Reporting
+
+Use `mergetopus status` to inspect an integration branch and its slice progress.
+
+```bash
+# Status by source ref
+mergetopus status feature/refactor-auth
+
+# Status by integration branch name
+mergetopus status main_mw_int_feature_refactor-auth
+```
+
+The status output includes:
+
+- integration branch
+- source ref and source SHA (when derivable from integration history)
+- merged/pending slice counts
+- pending slice details with detected affected paths (when available)
+- suggested next commands
 
 ## Resolving Conflicts
 
