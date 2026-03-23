@@ -38,17 +38,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64
 
-      - name: Run tests
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          cargo test
-
       - name: Run Pack task
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           Invoke-Build Pack
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          cargo test
 
       - name: Collect build artifacts
         if: always()
@@ -102,17 +102,17 @@ jobs:
           Set-StrictMode -Version Latest
           cargo install --locked cargo-bundle-licenses
 
-      - name: Run tests
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          cargo test
-
       - name: Run Pack task
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           Invoke-Build Pack
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          cargo test
 
       - name: Collect build artifacts
         if: always()
