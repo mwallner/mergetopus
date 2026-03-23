@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Mergetopus V3 – Minimal/Professional  (200×200 icon) -->
+<svg width="200" height="200" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="m3bg" x1="100" y1="0" x2="100" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F8FAFC"/>
+      <stop offset="100%" stop-color="#EEF2F7"/>
+    </linearGradient>
+    <linearGradient id="m3body" x1="44" y1="22" x2="156" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6A4DB8"/>
+      <stop offset="100%" stop-color="#4A2E95"/>
+    </linearGradient>
+    <linearGradient id="m3tent" x1="0" y1="128" x2="0" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2BB8A6"/>
+      <stop offset="100%" stop-color="#1A8878"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <circle cx="100" cy="100" r="100" fill="url(#m3bg)"/>
+
+  <!-- Subtle grid -->
+  <g stroke="#D8E4F0" stroke-width="0.8">
+    <line x1="0"   y1="50"  x2="200" y2="50"/>
+    <line x1="0"   y1="100" x2="200" y2="100"/>
+    <line x1="0"   y1="150" x2="200" y2="150"/>
+    <line x1="50"  y1="0"   x2="50"  y2="200"/>
+    <line x1="100" y1="0"   x2="100" y2="200"/>
+    <line x1="150" y1="0"   x2="150" y2="200"/>
+  </g>
+
+  <!-- Tentacles (teal gradient, flat) – 6 arms for 8 total -->
+  <g stroke="url(#m3tent)" stroke-linecap="round" fill="none" stroke-width="9">
+    <path d="M57,128 Q35,150 41,175 Q44,188 37,200"/>
+    <path d="M74,132 Q62,158 66,180 Q68,191 61,200"/>
+    <path d="M91,135 Q91,162 91,184 Q91,194 89,200"/>
+    <path d="M109,135 Q109,162 109,184 Q109,194 111,200"/>
+    <path d="M126,132 Q138,158 134,180 Q132,191 139,200"/>
+    <path d="M143,128 Q165,150 159,175 Q156,188 163,200"/>
+  </g>
+
+  <!-- Side arms (teal) -->
+  <path d="M56,90 Q32,74 20,56 Q14,42 26,36" stroke="#2BB8A6" stroke-width="7" stroke-linecap="round" fill="none"/>
+  <path d="M144,90 Q168,74 180,56 Q186,42 174,36" stroke="#2BB8A6" stroke-width="7" stroke-linecap="round" fill="none"/>
+
+  <!-- Body (flat purple gradient) -->
+  <path d="M100,22 C131,22 156,44 156,70 C156,96 133,118 100,120 C67,118 44,96 44,70 C44,44 69,22 100,22 Z" fill="url(#m3body)"/>
+  <ellipse cx="87" cy="50" rx="30" ry="16" fill="#9070CC" opacity="0.28"/>
+
+  <!-- Headband (amber) -->
+  <path d="M54,47 Q100,33 146,47 L144,62 Q100,49 56,62 Z" fill="#F4A426"/>
+  <text x="100" y="59" text-anchor="middle" font-family="'Courier New',Courier,monospace" font-size="12" font-weight="700" fill="#2A1A00">&lt;/&gt;</text>
+
+  <!-- Eyes (minimal) -->
+  <circle cx="80" cy="78" r="13" fill="white" opacity="0.92"/>
+  <circle cx="120" cy="78" r="13" fill="white" opacity="0.92"/>
+  <circle cx="82" cy="80" r="7.5" fill="#2A1A60"/>
+  <circle cx="122" cy="80" r="7.5" fill="#2A1A60"/>
+  <circle cx="79" cy="76" r="3" fill="white"/>
+  <circle cx="119" cy="76" r="3" fill="white"/>
+
+  <!-- Minimal smile -->
+  <path d="M86,97 Q100,110 114,97" fill="none" stroke="#2A1A60" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Merge node (teal) -->
+  <circle cx="100" cy="164" r="9" fill="#2BB8A6"/>
+  <circle cx="100" cy="164" r="4" fill="white"/>
+
+  <!-- Subtle border -->
+  <circle cx="100" cy="100" r="97" fill="none" stroke="#D0DCE8" stroke-width="2"/>
+</svg>

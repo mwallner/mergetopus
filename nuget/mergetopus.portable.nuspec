@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>mergetopus.portable</id>
+    <version>0.1.0</version>
+    <title>mergetopus</title>
+    <authors>mergetopus contributors</authors>
+    <license type="expression">MIT</license>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <summary>mergetopus is a tool that enables splitting complex Git merges into manageable slices</summary>
+    <description>Mergetopus turns a regular Git merge into an integration branch plus optional per-conflict slice branches, making large or risky merges easier to review and land safely.
+
+Workflow:
+1) Create or reset an integration branch from your current HEAD
+2) Merge SOURCE into it with --no-commit
+3) Keep auto-merged files in integration
+4) Handle conflicted files as individual slices or as explicit grouped slices
+
+Designed for practical day-to-day Git work, Mergetopus supports both interactive TUI flows and non-interactive CI-friendly operation (--quiet, --yes, and --select-paths).</description>
+    <tags>git merge tui devtools cli rust</tags>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+    <file src="..\LICENSE" target="tools\LICENSE" />
+    <file src="..\README.md" target="tools\README.md" />
+  </files>
+</package>
