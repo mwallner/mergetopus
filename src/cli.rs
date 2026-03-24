@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
     long_about = "Mergetopus turns a regular git merge into an integration branch plus optional per-conflict slice branches.\n\nWorkflow:\n  1) Create/reset an integration branch from your current HEAD\n  2) Merge SOURCE into it with --no-commit\n  3) Keep auto-merged files in integration\n  4) Optionally group selected conflicted paths into one explicit slice branch via --select-paths\n\nIf SOURCE is omitted, an interactive branch picker is shown (unless --quiet is set)."
 )]
 #[command(
-    after_help = "Examples:\n  mergetopus origin/main\n  mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs'\n  mergetopus hotfix --yes\n  mergetopus origin/main --quiet\n  mergetopus resolve --commit _mmm/main/feature/slice1\n  mergetopus status feature/refactor-auth"
+    after_help = "Examples:\n  mergetopus origin/main\n  mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs'\n  mergetopus hotfix --yes\n  mergetopus origin/main --quiet\n  mergetopus resolve --commit _mmm/main/feature/slice1\n  mergetopus status feature/refactor-auth\n  mergetopus HERE"
 )]
 pub struct Args {
     #[command(subcommand)]
@@ -91,4 +91,12 @@ pub enum Commands {
     /// interactive confirmation TUI, and deletes them on confirmation.
     /// The kokomeco branch itself is retained.
     Cleanup,
+
+    /// Take over an already in-progress merge and create slices for remaining conflicts.
+    ///
+    /// Use this on the currently checked-out target branch while MERGE_HEAD is
+    /// present. Mergetopus captures already-resolved paths, rebuilds a canonical
+    /// integration branch, and opens conflict grouping for only unresolved paths.
+    #[command(name = "HERE", visible_alias = "here")]
+    Here,
 }

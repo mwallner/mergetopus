@@ -112,6 +112,26 @@ fn setup_remote_conflict_repo_without_local_feature() -> TestResult<std::path::P
     Ok(repo)
 }
 
+fn setup_two_conflicts_repo() -> TestResult<std::path::PathBuf> {
+    let repo = init_repo()?;
+
+    write_file(&repo, "a.txt", "base a\n")?;
+    write_file(&repo, "b.txt", "base b\n")?;
+    commit_all(&repo, "base")?;
+
+    git(&repo, &["checkout", "-b", "feature"])?;
+    write_file(&repo, "a.txt", "feature a\n")?;
+    write_file(&repo, "b.txt", "feature b\n")?;
+    commit_all(&repo, "feature change")?;
+
+    git(&repo, &["checkout", "main"])?;
+    write_file(&repo, "a.txt", "main a\n")?;
+    write_file(&repo, "b.txt", "main b\n")?;
+    commit_all(&repo, "main change")?;
+
+    Ok(repo)
+}
+
 fn configured_copybase_cmd() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -741,6 +761,84 @@ fn conflict_selection_cancellation_cleans_up_integration_branch() -> TestResult<
     assert_eq!(
         current_branch, "main",
         "should be back on main branch after cleanup"
+    );
+
+    Ok(())
+}
+
+/// Ensures HERE fails fast when no merge is currently in progress.
+#[test]
+fn here_requires_in_progress_merge() -> TestResult<()> {
+    let repo = setup_single_conflict_repo()?;
+
+    let out = mergetopus(&repo, &["--quiet", "HERE"])?;
+    assert!(
+        !out.status.success(),
+        "expected HERE to fail without in-progress merge"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("HERE requires an in-progress merge"),
+        "expected precondition error, got:\n{stderr}"
+    );
+
+    Ok(())
+}
+
+/// Ensures HERE takes over an in-progress merge, preserves already-resolved paths,
+/// and creates slices only for remaining unresolved conflicts.
+#[test]
+fn here_takes_over_and_slices_only_remaining_conflicts() -> TestResult<()> {
+    let repo = setup_two_conflicts_repo()?;
+
+    let merge = run(Command::new("git")
+        .args(["merge", "feature"])
+        .current_dir(&repo))?;
+    assert!(
+        !merge.status.success(),
+        "expected manual merge to stop on conflicts"
+    );
+
+    write_file(&repo, "a.txt", "manually resolved a\n")?;
+    git(&repo, &["add", "a.txt"])?;
+
+    let here = mergetopus(&repo, &["--quiet", "--select-paths", "b.txt", "HERE"])?;
+    assert!(
+        here.status.success(),
+        "HERE takeover failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&here.stdout),
+        String::from_utf8_lossy(&here.stderr)
+    );
+
+    let current_branch = git(&repo, &["branch", "--show-current"])?;
+    assert_eq!(current_branch, integration_branch());
+
+    let a_on_integration = git(&repo, &["show", &format!("{}:a.txt", integration_branch())])?;
+    assert_eq!(a_on_integration, "manually resolved a");
+
+    let slice_exists = git(
+        &repo,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/_mmm/main/feature/slice1",
+        ],
+    );
+    assert!(
+        slice_exists.is_ok(),
+        "expected slice branch for remaining conflict"
+    );
+
+    let slice_msg = git(&repo, &["show", "-s", "--format=%B", slice_branch()])?;
+    assert!(
+        slice_msg.contains("* b.txt"),
+        "slice should target remaining unresolved path b.txt:\n{slice_msg}"
+    );
+    assert!(
+        !slice_msg.contains("* a.txt"),
+        "slice should not include already resolved path a.txt:\n{slice_msg}"
     );
 
     Ok(())

@@ -160,6 +160,10 @@ pub fn merge_no_commit(source: &str) -> Result<()> {
     );
 }
 
+pub fn merge_abort() -> Result<()> {
+    run_git(&["merge", "--abort"]).map(|_| ())
+}
+
 #[cfg(target_os = "windows")]
 fn ensure_longpaths_support() -> Result<()> {
     let current = get_git_config("core.longpaths")?.unwrap_or_default();
@@ -199,6 +203,16 @@ pub fn restore_ours(path: &str) -> Result<()> {
 
 pub fn staged_files() -> Result<Vec<String>> {
     let out = run_git(&["diff", "--cached", "--name-only"])?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+pub fn unstaged_files() -> Result<Vec<String>> {
+    let out = run_git(&["diff", "--name-only"])?;
     Ok(out
         .lines()
         .map(str::trim)
@@ -472,6 +486,26 @@ pub fn get_git_config(key: &str) -> Result<Option<String>> {
     } else {
         Ok(None)
     }
+}
+
+pub fn refs_pointing_to(commit: &str) -> Result<Vec<String>> {
+    let out = run_git(&[
+        "for-each-ref",
+        "--format=%(refname:short)",
+        "--points-at",
+        commit,
+        "refs/heads",
+        "refs/remotes",
+    ])?;
+
+    let mut refs = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    refs.sort();
+    Ok(refs)
 }
 
 /// Return the full commit message of the tip commit on `branch`.

@@ -254,6 +254,16 @@ mergetopus status feature/refactor-auth
 
 # Cleanup temporary integration/slice branches (interactive confirmation)
 mergetopus cleanup
+
+# Take over an already in-progress manual merge
+mergetopus HERE
+```
+
+Takeover mode for an in-progress merge:
+
+```bash
+# Optional: non-interactive explicit grouping for remaining conflicts
+mergetopus --quiet --select-paths src/big/file1.cs,src/big/file2.cs HERE
 ```
 
 ## Status Reporting
@@ -318,6 +328,37 @@ mergetopus resolve --commit _mmm/main/feature/slice1
   so the tool writes the resolution directly into the repository.
 6. Stages each resolved file.
 7. Optional: if `--commit` is passed, creates the merge commit on the integration branch.
+
+## Take Over In-Progress Merge (`HERE`)
+
+Use `mergetopus HERE` when you already started a regular `git merge` manually,
+resolved some conflicts, and want Mergetopus to take over only the remaining
+unresolved conflicts.
+
+Typical scenario:
+
+1. You run `git merge <source>` on your target branch.
+2. Git stops with conflicts.
+3. You manually resolve some files.
+4. You run `mergetopus HERE` to continue using slice workflow for what remains.
+
+Behavior of `HERE`:
+
+- requires an active merge (`MERGE_HEAD` must exist)
+- preserves already-resolved file content from your working tree/index
+- aborts the manual merge and rebuilds canonical Mergetopus integration state
+- creates slices only for still-unresolved conflict paths
+- opens normal conflict grouping flow (or uses `--select-paths` in quiet mode)
+
+Command examples:
+
+```bash
+# Interactive takeover
+mergetopus HERE
+
+# Quiet takeover with explicit grouping for remaining conflicts
+mergetopus --quiet --select-paths src/module/a.rs,src/module/b.rs HERE
+```
 
 ### Configuring the merge tool
 
