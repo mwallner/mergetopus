@@ -203,9 +203,97 @@ pub fn confirm(prompt: &str, title: &str) -> Result<bool> {
     }
 }
 
+/// Show a scrollable list of `items` (highlighted in red) above a `prompt`,
+/// and ask the user to confirm (Enter / y) or cancel (Esc / n).
+pub fn confirm_list(items: &[String], prompt: &str, title: &str) -> Result<bool> {
+    let mut guard = TerminalGuard::new(title)?;
+    let mut scroll = 0usize;
+    let mut max_scroll = 0usize;
+
+    loop {
+        guard.terminal.draw(|f| {
+            let size = f.area();
+            let root = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(5),
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                ])
+                .split(size);
+
+            let visible_rows = root[0].height.saturating_sub(2) as usize;
+            max_scroll = items.len().saturating_sub(visible_rows.max(1));
+            scroll = scroll.min(max_scroll);
+
+            let title_str = if items.len() > visible_rows {
+                format!(
+                    "Branches to cleanup ({}/{})",
+                    scroll + visible_rows.min(items.len() - scroll),
+                    items.len()
+                )
+            } else {
+                format!("Branches to cleanup ({})", items.len())
+            };
+
+            let list_items: Vec<ListItem> = items
+                .iter()
+                .skip(scroll)
+                .take(visible_rows)
+                .map(|s| ListItem::new(s.as_str()).style(Style::default().fg(Color::Red)))
+                .collect();
+
+            let list = List::new(list_items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title_str.as_str()),
+            );
+            f.render_widget(list, root[0]);
+
+            f.render_widget(
+                Paragraph::new(prompt)
+                    .block(Block::default().borders(Borders::ALL))
+                    .wrap(Wrap { trim: true }),
+                root[1],
+            );
+
+            render_keybar(
+                f,
+                root[2],
+                &[
+                    ("Up/Down", "Scroll"),
+                    ("Enter/Y", "Delete"),
+                    ("Esc/N", "Cancel"),
+                ],
+            );
+        })?;
+
+        if !event::poll(Duration::from_millis(200))? {
+            continue;
+        }
+
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => return Ok(true),
+            KeyCode::Char('n') | KeyCode::Esc => return Ok(false),
+            KeyCode::Up => scroll = scroll.saturating_sub(1),
+            KeyCode::Down => scroll = (scroll + 1).min(max_scroll),
+            _ => {}
+        }
+    }
+}
+
 pub fn select_conflicts(
     conflicts: &[String],
     diff_provider: impl Fn(&str) -> Result<String>,
+    external_diff_tool: Option<&str>,
+    external_diff_runner: impl Fn(&str) -> Result<()>,
     title: &str,
 ) -> Result<Option<Vec<Vec<String>>>> {
     let mut guard = TerminalGuard::new(title)?;
@@ -322,13 +410,14 @@ pub fn select_conflicts(
                     ("Esc", "Close"),
                 ]
             } else {
+                let f3_action = external_diff_tool.unwrap_or("3-way");
                 vec![
                     ("Tab", "Pane"),
                     ("n", "NewSlice"),
                     ("Space", "Assign"),
                     ("u", "Unassign"),
                     ("d", "DropSlice"),
-                    ("F3", "3-way"),
+                    ("F3", f3_action),
                     ("Enter", "Apply"),
                     ("Esc", "Cancel"),
                 ]
@@ -475,9 +564,13 @@ pub fn select_conflicts(
             }
             KeyCode::F(3) => {
                 if let Some(path) = conflicts.get(left_cursor) {
-                    overlay = Some(diff_provider(path)?);
-                    overlay_scroll = 0;
-                    overlay_max_scroll = 0;
+                    if external_diff_tool.is_some() {
+                        external_diff_runner(path)?;
+                    } else {
+                        overlay = Some(diff_provider(path)?);
+                        overlay_scroll = 0;
+                        overlay_max_scroll = 0;
+                    }
                 }
             }
             KeyCode::Enter => {

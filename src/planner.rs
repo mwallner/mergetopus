@@ -20,28 +20,53 @@ pub fn sanitize_branch_fragment(input: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
+fn sanitize_or_default(input: &str, fallback: &str) -> String {
+    let value = sanitize_branch_fragment(input);
+    if value.is_empty() {
+        fallback.to_string()
+    } else {
+        value
+    }
+}
+
+pub fn integration_branch_family_prefix(current_branch: &str) -> String {
+    format!("_mmm/{}/", sanitize_or_default(current_branch, "current"))
+}
+
+fn integration_branch_prefix(current_branch: &str, merge_source: &str) -> String {
+    format!(
+        "_mmm/{}/{}",
+        sanitize_or_default(current_branch, "current"),
+        sanitize_or_default(merge_source, "source")
+    )
+}
+
 pub fn integration_branch_name(current_branch: &str, merge_source: &str) -> String {
-    let safe_source = {
-        let s = sanitize_branch_fragment(merge_source);
-        if s.is_empty() {
-            "source".to_string()
-        } else {
-            s
-        }
-    };
-    format!("{current_branch}_mw_int_{safe_source}")
+    format!(
+        "{}/integration",
+        integration_branch_prefix(current_branch, merge_source)
+    )
 }
 
 pub fn slice_branch_name(integration_branch: &str, index_one_based: usize) -> Result<String> {
     if index_one_based == 0 {
         bail!("slice index must be one-based");
     }
-    Ok(format!("{integration_branch}_slice{index_one_based}"))
+
+    let prefix = integration_branch
+        .strip_suffix("/integration")
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "integration branch '{integration_branch}' must end with '/integration'"
+            )
+        })?;
+
+    Ok(format!("{prefix}/slice{index_one_based}"))
 }
 
 pub fn create_slice_branches(
     integration_branch: &str,
-    remembered_head: &str,
+    slice_base: &str,
     source_ref: &str,
     source_sha: &str,
     all_conflicts: &[String],
@@ -55,9 +80,10 @@ pub fn create_slice_branches(
             continue;
         }
 
+        let slice_number = slice_index;
         let slice_branch = slice_branch_name(integration_branch, slice_index)?;
         slice_index += 1;
-        git_ops::checkout_new_or_reset(&slice_branch, remembered_head)?;
+        git_ops::checkout_new_or_reset(&slice_branch, slice_base)?;
 
         for path in group {
             explicitly_assigned.insert(path.clone());
@@ -92,9 +118,14 @@ pub fn create_slice_branches(
                 t.join("\n")
             };
 
+            let files_list = group
+                .iter()
+                .map(|p| format!("* {p}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+
             let message = format!(
-                "Mergetopus slice: {} file(s) from '{source_ref}' (theirs)\n\n{trailers}",
-                group.len()
+                "Mergetopus - slice{slice_number} from {source_ref} (theirs)\n\nFiles:\n{files_list}\n\n{trailers}"
             );
 
             git_ops::commit(&message)?;
@@ -112,9 +143,10 @@ pub fn create_slice_branches(
             continue;
         }
 
+        let slice_number = slice_index;
         let slice_branch = slice_branch_name(integration_branch, slice_index)?;
         slice_index += 1;
-        git_ops::checkout_new_or_reset(&slice_branch, remembered_head)?;
+        git_ops::checkout_new_or_reset(&slice_branch, slice_base)?;
 
         if git_ops::path_exists_in_ref(source_ref, path)? {
             git_ops::restore_from_ref(source_ref, path)?;
@@ -148,8 +180,9 @@ pub fn create_slice_branches(
                 t.join("\n")
             };
 
-            let message =
-                format!("Mergetopus slice: '{path}' from '{source_ref}' (theirs)\n\n{trailers}");
+            let message = format!(
+                "Mergetopus - slice{slice_number} from {source_ref} (theirs)\n\nFiles:\n* {path}\n\n{trailers}"
+            );
 
             git_ops::commit_slice(&message, &provenance)?;
             println!("Created default single-file slice branch {slice_branch} for {path}");
@@ -161,33 +194,48 @@ pub fn create_slice_branches(
     Ok(())
 }
 
-/// Check if a branch name is a slice branch (ends with _slice<digits>).
+/// Check if a branch name is a slice branch (ends with /slice<digits>).
 pub fn is_slice_branch(branch: &str) -> bool {
-    const SLICE_SUFFIX: &str = "_slice";
-    if let Some(idx) = branch.rfind(SLICE_SUFFIX) {
-        let after = &branch[idx + SLICE_SUFFIX.len()..];
-        !after.is_empty() && after.chars().all(|c| c.is_ascii_digit())
-    } else {
-        false
-    }
+    let Some((prefix, suffix)) = branch.rsplit_once("/slice") else {
+        return false;
+    };
+
+    branch.starts_with("_mmm/")
+        && !prefix.ends_with('/')
+        && !suffix.is_empty()
+        && suffix.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Parse an integration branch name to extract the original branch and source.
-/// Integration branch format: <original>_mw_int_<source>
+/// Integration branch format: _mmm/<original>/<source>/integration
 /// Returns (original_branch, source) if it's a valid integration branch, None otherwise.
 pub fn parse_integration_branch(branch: &str) -> Option<(String, String)> {
-    const INT_MARKER: &str = "_mw_int_";
-    let parts: Vec<&str> = branch.splitn(2, INT_MARKER).collect();
-
-    if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-        // Check that the source part doesn't end with _slice or _consolidated
-        // (to avoid false positives with slices of integration branches)
-        let source = parts[1];
-        if !source.ends_with("_consolidated") && !is_slice_branch(branch) {
-            return Some((parts[0].to_string(), source.to_string()));
-        }
+    let parts = branch.split('/').collect::<Vec<_>>();
+    if parts.len() == 4
+        && parts[0] == "_mmm"
+        && !parts[1].is_empty()
+        && !parts[2].is_empty()
+        && parts[3] == "integration"
+    {
+        return Some((parts[1].to_string(), parts[2].to_string()));
     }
+
     None
+}
+
+/// Convert a slice branch name to its matching integration branch name.
+/// Slice format: _mmm/<original>/<source>/slice<N>
+/// Integration format: _mmm/<original>/<source>/integration
+pub fn integration_from_slice_branch(slice_branch: &str) -> Option<String> {
+    let (prefix, suffix) = slice_branch.rsplit_once("/slice")?;
+    if !slice_branch.starts_with("_mmm/")
+        || suffix.is_empty()
+        || !suffix.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+
+    Some(format!("{prefix}/integration"))
 }
 
 #[cfg(test)]
@@ -207,38 +255,56 @@ mod tests {
     #[test]
     fn integration_name_uses_default_for_empty_source() {
         let name = integration_branch_name("main", "***");
-        assert_eq!(name, "main_mw_int_source");
+        assert_eq!(name, "_mmm/main/source/integration");
     }
 
     #[test]
     fn slice_name_is_one_based() {
         assert_eq!(
-            slice_branch_name("main_mw_int_x", 1).unwrap(),
-            "main_mw_int_x_slice1"
+            slice_branch_name("_mmm/main/x/integration", 1).unwrap(),
+            "_mmm/main/x/slice1"
         );
         assert!(slice_branch_name("x", 0).is_err());
     }
 
     #[test]
     fn test_is_slice_branch() {
-        assert!(is_slice_branch("main_mw_int_feature_slice1"));
-        assert!(is_slice_branch("main_mw_int_feature_slice99"));
-        assert!(!is_slice_branch("main_mw_int_feature"));
-        assert!(!is_slice_branch("main_slice"));
+        assert!(is_slice_branch("_mmm/main/feature/slice1"));
+        assert!(is_slice_branch("_mmm/main/feature/slice99"));
+        assert!(!is_slice_branch("_mmm/main/feature/integration"));
+        assert!(!is_slice_branch("_mmm/main/feature/kokomeco"));
         assert!(!is_slice_branch("slice1"));
     }
 
     #[test]
     fn test_parse_integration_branch() {
         assert_eq!(
-            parse_integration_branch("main_mw_int_feature"),
+            parse_integration_branch("_mmm/main/feature/integration"),
             Some(("main".to_string(), "feature".to_string()))
         );
         assert_eq!(
-            parse_integration_branch("develop_mw_int_release_v1"),
+            parse_integration_branch("_mmm/develop/release_v1/integration"),
             Some(("develop".to_string(), "release_v1".to_string()))
         );
         assert_eq!(parse_integration_branch("main"), None);
-        assert_eq!(parse_integration_branch("main_mw_int_feature_slice1"), None);
+        assert_eq!(parse_integration_branch("_mmm/main/feature/slice1"), None);
+        assert_eq!(parse_integration_branch("_mmm/main/feature/kokomeco"), None);
+    }
+
+    #[test]
+    fn integration_from_slice_branch_works() {
+        assert_eq!(
+            integration_from_slice_branch("_mmm/main/feature/slice1"),
+            Some("_mmm/main/feature/integration".to_string())
+        );
+        assert_eq!(
+            integration_from_slice_branch("_mmm/main/feature/slice99"),
+            Some("_mmm/main/feature/integration".to_string())
+        );
+        assert_eq!(
+            integration_from_slice_branch("_mmm/main/feature/integration"),
+            None
+        );
+        assert_eq!(integration_from_slice_branch("slice1"), None);
     }
 }

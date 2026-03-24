@@ -84,6 +84,15 @@ fn setup_single_conflict_repo() -> TestResult<std::path::PathBuf> {
     Ok(repo)
 }
 
+fn integration_branch() -> &'static str {
+    "_mmm/main/feature/integration"
+}
+
+fn slice_branch() -> &'static str {
+    "_mmm/main/feature/slice1"
+}
+
+/// Verifies status output for an in-progress integration: source identity, pending slice count, paths, and resolve hint.
 #[test]
 fn release_b_status_reports_integration_and_pending_slice() -> TestResult<()> {
     let repo = setup_single_conflict_repo()?;
@@ -96,7 +105,7 @@ fn release_b_status_reports_integration_and_pending_slice() -> TestResult<()> {
         String::from_utf8_lossy(&create.stderr)
     );
 
-    let status = mergetopus(&repo, &["--quiet", "status", "main_mw_int_feature"])?;
+    let status = mergetopus(&repo, &["--quiet", "status", integration_branch()])?;
     assert!(
         status.status.success(),
         "status command failed:\nstdout:\n{}\nstderr:\n{}",
@@ -105,11 +114,11 @@ fn release_b_status_reports_integration_and_pending_slice() -> TestResult<()> {
     );
 
     let stdout = String::from_utf8_lossy(&status.stdout);
-    assert!(stdout.contains("Integration branch: main_mw_int_feature"));
+    assert!(stdout.contains(&format!("Integration branch: {}", integration_branch())));
     assert!(stdout.contains("Source ref: feature"));
     assert!(stdout.contains("Pending slices: 1"));
     assert!(stdout.contains("detected paths: conflict.txt"));
-    assert!(stdout.contains("mergetopus resolve main_mw_int_feature_slice1"));
+    assert!(stdout.contains(&format!("mergetopus resolve {}", slice_branch())));
 
     Ok(())
 }
