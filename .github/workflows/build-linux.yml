@@ -32,29 +32,39 @@ jobs:
           Set-StrictMode -Version Latest
           cargo install --locked cargo-bundle-licenses
 
-      - name: Run Build task
+      - name: Build + Test
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
-          Invoke-Build Build
+          Invoke-Build Build,Test
 
-  test-linux:
-    name: Test (Linux)
-    runs-on: ubuntu-latest
-    needs: build-linux
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup PowerShell modules
+      - name: Collect build artifacts
+        if: always()
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
-          Install-Module InvokeBuild -Scope CurrentUser -Force -AllowClobber
 
-      - name: Run Test task
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          Invoke-Build Test
+          $artifactDir = 'artifacts'
+          New-Item -Path $artifactDir -ItemType Directory -Force | Out-Null
+
+          if (Test-Path './target/release/mergetopus') {
+            Copy-Item './target/release/mergetopus' "$artifactDir/mergetopus" -Force
+
+            tar -czf "$artifactDir/mergetopus-linux-x64.tar.gz" -C "$artifactDir" mergetopus
+
+            $hash = Get-FileHash "$artifactDir/mergetopus" -Algorithm SHA256
+            "$($hash.Hash.ToLower())  mergetopus" | Out-File -FilePath "$artifactDir/mergetopus-linux-x64.sha256" -Encoding ascii
+          }
+          else {
+            Write-Host 'No target/release/mergetopus file found to collect.'
+          }
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ runner.os }}
+          path: |
+            artifacts/mergetopus-linux-x64.tar.gz
+            artifacts/mergetopus-linux-x64.sha256
+          if-no-files-found: warn
