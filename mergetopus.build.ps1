@@ -19,6 +19,12 @@ Task Build GenerateLicenseInfo, {
 	}
 }
 
+Task Test {
+	Exec {
+		cargo test
+	}
+}
+
 Task Pack Build, BuildWin, {
 	$isUnix = $IsLinux -or $IsMacOS -or $PSVersionTable.Platform -eq 'Unix'
 
