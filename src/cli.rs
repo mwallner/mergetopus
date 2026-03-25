@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
     long_about = "Mergetopus turns a regular git merge into an integration branch plus optional per-conflict slice branches.\n\nWorkflow:\n  1) Create/reset an integration branch from your current HEAD\n  2) Merge SOURCE into it with --no-commit\n  3) Keep auto-merged files in integration\n  4) Optionally group selected conflicted paths into one explicit slice branch via --select-paths\n\nIf SOURCE is omitted, an interactive branch picker is shown (unless --quiet is set)."
 )]
 #[command(
-    after_help = "Examples:\n  mergetopus origin/main\n  mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs'\n  mergetopus hotfix --yes\n  mergetopus origin/main --quiet\n  mergetopus resolve --commit _mmm/main/feature/slice1\n  mergetopus status feature/refactor-auth\n  mergetopus HERE"
+    after_help = "Examples:\n  mergetopus origin/main\n  mergetopus --source resolve\n  mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs'\n  mergetopus hotfix --yes\n  mergetopus origin/main --quiet\n  mergetopus resolve --commit _mmm/main/feature/slice1\n  mergetopus status feature/refactor-auth\n  mergetopus HERE"
 )]
 pub struct Args {
     #[command(subcommand)]
@@ -19,6 +19,18 @@ pub struct Args {
         long_help = "Source branch/ref/commit-ish to merge.\n\nAccepted forms include local branches (feature/foo), remote-tracking refs (origin/main), tags, and commit SHAs.\nIf omitted, Mergetopus opens an interactive branch picker unless --quiet is set."
     )]
     pub source: Option<String>,
+
+    #[arg(
+        long = "source",
+        value_name = "SOURCE",
+        conflicts_with = "source",
+        help = "Optional named source branch/ref to merge (disambiguates command-like names)",
+        long_help = "Optional named source branch/ref/commit-ish to merge.
+
+Use this to disambiguate branch names that collide with subcommands (for example: resolve, here, license).
+Example: --source resolve"
+    )]
+    pub source_opt: Option<String>,
 
     #[arg(
         long,
@@ -43,6 +55,12 @@ pub struct Args {
         long_help = "Assume 'yes' for non-destructive confirmation prompts.\n\nCurrently used when an existing integration branch already has all slices merged and Mergetopus asks whether to create a kokomeco merge-commit branch."
     )]
     pub yes: bool,
+}
+
+impl Args {
+    pub fn effective_source(&self) -> Option<&str> {
+        self.source_opt.as_deref().or(self.source.as_deref())
+    }
 }
 
 #[derive(Subcommand, Debug)]

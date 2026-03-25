@@ -132,6 +132,23 @@ fn setup_two_conflicts_repo() -> TestResult<std::path::PathBuf> {
     Ok(repo)
 }
 
+fn setup_single_conflict_repo_with_named_source(source_branch: &str) -> TestResult<std::path::PathBuf> {
+    let repo = init_repo()?;
+
+    write_file(&repo, "conflict.txt", "base\n")?;
+    commit_all(&repo, "base")?;
+
+    git(&repo, &["checkout", "-b", source_branch])?;
+    write_file(&repo, "conflict.txt", "feature\n")?;
+    commit_all(&repo, "feature change")?;
+
+    git(&repo, &["checkout", "main"])?;
+    write_file(&repo, "conflict.txt", "main\n")?;
+    commit_all(&repo, "main change")?;
+
+    Ok(repo)
+}
+
 fn configured_copybase_cmd() -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -840,6 +857,71 @@ fn here_takes_over_and_slices_only_remaining_conflicts() -> TestResult<()> {
         !slice_msg.contains("* a.txt"),
         "slice should not include already resolved path a.txt:\n{slice_msg}"
     );
+
+    Ok(())
+}
+
+/// Verifies command-like source branch names can be merged with --source.
+#[test]
+fn source_option_disambiguates_branch_named_resolve() -> TestResult<()> {
+    let repo = setup_single_conflict_repo_with_named_source("resolve")?;
+
+    let out = mergetopus(&repo, &["--source", "resolve", "--quiet"])?;
+    assert!(
+        out.status.success(),
+        "run with --source resolve failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let integration_exists = git(
+        &repo,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/_mmm/main/resolve/integration",
+        ],
+    );
+    assert!(integration_exists.is_ok());
+
+    let slice_exists = git(
+        &repo,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/_mmm/main/resolve/slice1",
+        ],
+    );
+    assert!(slice_exists.is_ok());
+
+    Ok(())
+}
+
+/// Verifies positional SOURCE still works for regular non-conflicting names.
+#[test]
+fn positional_source_still_works_for_non_command_name() -> TestResult<()> {
+    let repo = setup_single_conflict_repo_with_named_source("feature_x")?;
+
+    let out = mergetopus(&repo, &["feature_x", "--quiet"])?;
+    assert!(
+        out.status.success(),
+        "run with positional feature_x failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let integration_exists = git(
+        &repo,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/_mmm/main/feature_x/integration",
+        ],
+    );
+    assert!(integration_exists.is_ok());
 
     Ok(())
 }

@@ -288,8 +288,8 @@ fn normalize_merge_source_ref(source_ref: &str) -> Result<String> {
 }
 
 fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) -> Result<()> {
-    let selected_source_ref = match args.source.as_ref() {
-        Some(s) => s.clone(),
+    let selected_source_ref = match args.effective_source() {
+        Some(s) => s.to_string(),
         None => {
             if args.quiet {
                 bail!("--quiet requires SOURCE to be provided explicitly");
