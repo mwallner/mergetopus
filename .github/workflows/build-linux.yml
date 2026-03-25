@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  pack-linux:
-    name: Pack (Linux)
+  build-linux:
+    name: Build (Linux)
     runs-on: ubuntu-latest
 
     steps:
@@ -32,23 +32,11 @@ jobs:
           Set-StrictMode -Version Latest
           cargo install --locked cargo-bundle-licenses
 
-      - name: Setup Linux cross-compile prerequisites
-        run: |
-          rustup target add x86_64-pc-windows-gnu
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64
-
-      - name: Run Pack task
+      - name: Build + Test
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
-          Invoke-Build Pack
-
-      - name: Run tests
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          cargo test
+          Invoke-Build Build,Test
 
       - name: Collect build artifacts
         if: always()
@@ -59,25 +47,24 @@ jobs:
           $artifactDir = 'artifacts'
           New-Item -Path $artifactDir -ItemType Directory -Force | Out-Null
 
-          Get-ChildItem -Path target -Filter 'mergetopus.*.nupkg' -File -ErrorAction SilentlyContinue |
-            Copy-Item -Destination $artifactDir -Force
+          if (Test-Path './target/release/mergetopus') {
+            Copy-Item './target/release/mergetopus' "$artifactDir/mergetopus" -Force
 
-          $releaseFiles = Get-ChildItem -Path target -Recurse -File -Filter 'mergetopus.*' -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match '[\\/]release[\\/]' }
+            tar -czf "$artifactDir/mergetopus-linux-x64.tar.gz" -C "$artifactDir" mergetopus
 
-          if ($releaseFiles) {
-            Compress-Archive -Path $releaseFiles.FullName -DestinationPath "$artifactDir/release-mergetopus-${{ runner.os }}.zip" -Force
+            $hash = Get-FileHash "$artifactDir/mergetopus" -Algorithm SHA256
+            "$($hash.Hash.ToLower())  mergetopus" | Out-File -FilePath "$artifactDir/mergetopus-linux-x64.sha256" -Encoding ascii
           }
           else {
-            Write-Host 'No release mergetopus.* files found to zip.'
+            Write-Host 'No target/release/mergetopus file found to collect.'
           }
 
       - name: Upload build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pack-${{ runner.os }}
+          name: build-${{ runner.os }}
           path: |
-            artifacts/*.nupkg
-            artifacts/*.zip
+            artifacts/mergetopus-linux-x64.tar.gz
+            artifacts/mergetopus-linux-x64.sha256
           if-no-files-found: warn

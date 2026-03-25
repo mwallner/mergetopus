@@ -1,64 +1,64 @@
 #requires -Version 7.4
 
 <#
-    .SYNOPSIS
-    Splits a difficult merge into one integration branch plus per-conflict slice branches.
+	.SYNOPSIS
+	Splits a difficult merge into one integration branch plus per-conflict slice branches.
 
-    .DESCRIPTION
-    Strategy:
+	.DESCRIPTION
+	Strategy:
 
-    1) Remember current HEAD.
-    2) Create: <currentbranch>_integration_<MergeSource>
-    3) Attempt merge of <MergeSource> into integration branch (--no-commit).
-    4) Keep only non-conflicting auto-merged files in the integration merge commit.
-       Conflicted paths are reset to "ours" (remembered HEAD) for this commit.
-    5) For each conflicted file:
-       - Create: <integrationBranch>_slice<num> from remembered HEAD.
-       - Apply only that single file from <MergeSource> ("theirs" for that file).
-       - Create a normal single-parent commit on that slice branch.
-       - Preserve provenance in commit trailers.
-       - Set the slice commit author to the most recent source-side author for that path.
-         The user running the cmdlet remains the committer.
-    6) Team can parallelize resolution by merging slice branches back into integration branch.
+	1) Remember current HEAD.
+	2) Create: _mmm/<currentbranch>/<MergeSource>/integration
+	3) Attempt merge of <MergeSource> into integration branch (--no-commit).
+	4) Keep only non-conflicting auto-merged files in the integration merge commit.
+	   Conflicted paths are reset to "ours" (remembered HEAD) for this commit.
+	5) For each conflicted file:
+	   - Create: _mmm/<currentbranch>/<MergeSource>/slice<num> from merge base (HEAD vs MergeSource).
+	   - Apply only that single file from <MergeSource> ("theirs" for that file).
+	   - Create a normal single-parent commit on that slice branch.
+	   - Preserve provenance in commit trailers.
+	   - Set the slice commit author to the most recent source-side author for that path.
+		 The user running the cmdlet remains the committer.
+	6) Team can parallelize resolution by merging slice branches back into integration branch.
 
-    Notes on authorship:
+	Notes on authorship:
 
-    - Non-conflicting changes are preserved by the normal merge commit on the integration branch.
-    - Slice commits cannot retain original ancestry without changing merge topology.
-    - To preserve attribution, each slice commit:
-        * uses the source-side path author as Git author
-        * keeps the merger as Git committer
-        * adds Co-authored-by and provenance trailers
+	- Non-conflicting changes are preserved by the normal merge commit on the integration branch.
+	- Slice commits cannot retain original ancestry without changing merge topology.
+	- To preserve attribution, each slice commit:
+		* uses the source-side path author as Git author
+		* keeps the merger as Git committer
+		* adds Co-authored-by and provenance trailers
 
-    ASCII overview:
+	ASCII overview:
 
-        (start) current branch @ H
-                 |
-                 +--> integration branch: main_integration_feature_x
-                        |
-                        +-- merge feature/x (partial)
-                        |      - non-conflict files kept
-                        |      - conflict files reset to ours
-                        |
-                        +-- conflict list: A.cs, B.cs, C.cs
-                               |         |         |
-                               |         |         +--> slice3 (from H): only C.cs from source
-                               |         +------------> slice2 (from H): only B.cs from source
-                               +----------------------> slice1 (from H): only A.cs from source
+		(start) current branch @ H
+				 |
+				 +--> integration branch: _mmm/main/feature_x/integration
+						|
+						+-- merge feature/x (partial)
+						|      - non-conflict files kept
+						|      - conflict files reset to ours
+						|
+						+-- conflict list: A.cs, B.cs, C.cs
+							   |         |         |
+							   |         |         +--> slice3 (from merge-base): only C.cs from source
+							   |         +------------> slice2 (from merge-base): only B.cs from source
+							   +----------------------> slice1 (from merge-base): only A.cs from source
 
-        Later:
-            merge slice1, slice2, slice3 -> integration branch
+		Later:
+			merge slice1, slice2, slice3 -> integration branch
 
-    .PARAMETER MergeSource
-    Git ref to merge from (branch, tag, commit, or other valid ref).
+	.PARAMETER MergeSource
+	Git ref to merge from (branch, tag, commit, or other valid ref).
 
-    .EXAMPLE
-    Invoke-TheMergetopus -MergeSource feature/refactor-auth
+	.EXAMPLE
+	Invoke-TheMergetopus -MergeSource feature/refactor-auth
 
-    Creates:
-      - <current>_integration_feature_refactor-auth
-      - <current>_integration_feature_refactor-auth_slice1..N
-    #>
+	Creates:
+	  - _mmm/<current>/feature_refactor-auth/integration
+	  - _mmm/<current>/feature_refactor-auth/slice1..N
+	#>
 [CmdletBinding(SupportsShouldProcess)]
 param(
 	[Parameter(Mandatory, Position = 0)]
@@ -241,13 +241,21 @@ if ($sourceVerify.ExitCode -ne 0) {
 	throw "MergeSource '$MergeSource' is not a valid commit-ish ref."
 }
 $sourceSha = $sourceVerify.Output[0]
+$mergeBaseSha = (Invoke-Git -Arguments @('merge-base', $headSha, $sourceSha)).Output[0]
 
 $safeSource = ConvertTo-SafeBranchFragment -Text $MergeSource
 if ([string]::IsNullOrWhiteSpace($safeSource)) {
 	$safeSource = 'source'
 }
 
-$integrationBranch = "${currentBranch}_integration_${safeSource}"
+$safeCurrent = ConvertTo-SafeBranchFragment -Text $currentBranch
+if ([string]::IsNullOrWhiteSpace($safeCurrent)) {
+	$safeCurrent = 'current'
+}
+
+$branchPrefix = "_mmm/$safeCurrent/$safeSource"
+
+$integrationBranch = "$branchPrefix/integration"
 $sliceBranches = [System.Collections.Generic.List[string]]::new()
 
 if ($PSCmdlet.ShouldProcess($integrationBranch, "Create/reset integration branch at $headSha")) {
@@ -270,7 +278,7 @@ $conflictedFiles = @(
 $slicePlan = @()
 for ($planIndex = 0; $planIndex -lt $conflictedFiles.Count; $planIndex++) {
 	$file = $conflictedFiles[$planIndex]
-	$branch = "${integrationBranch}_slice$($planIndex + 1)"
+	$branch = "$branchPrefix/slice$($planIndex + 1)"
 	$slicePlan += [pscustomobject]@{
 		File   = $file
 		Branch = $branch
@@ -316,14 +324,15 @@ $slicedSection
 	Invoke-Git -Arguments @('commit', '--allow-empty', '-m', $msg) | Out-Null
 }
 
-# Build one slice branch per conflicted file from remembered HEAD.
+# Build one slice branch per conflicted file from merge base.
 $i = 1
 foreach ($path in $conflictedFiles) {
-	$sliceBranch = "${integrationBranch}_slice$i"
+	$sliceNumber = $i
+	$sliceBranch = "$branchPrefix/slice$sliceNumber"
 	$i++
 
-	if ($PSCmdlet.ShouldProcess($sliceBranch, "Create/reset slice branch at $headSha")) {
-		Invoke-Git -Arguments @('checkout', '-B', $sliceBranch, $headSha) | Out-Null
+	if ($PSCmdlet.ShouldProcess($sliceBranch, "Create/reset slice branch at $mergeBaseSha")) {
+		Invoke-Git -Arguments @('checkout', '-B', $sliceBranch, $mergeBaseSha) | Out-Null
 	}
 
 	# "theirs for this one file": take file state from MergeSource.
@@ -351,8 +360,13 @@ foreach ($path in $conflictedFiles) {
 			$trailers += "Co-authored-by: $($provenance.AuthorName) <$($provenance.AuthorEmail)>"
 		}
 
+		$filesList = "* $path"
+
 		$sliceMsg = @"
-TheMergetopus slice: '$path' from '$MergeSource' (theirs)
+Mergetopus - slice$sliceNumber from $MergeSource (theirs)
+
+Files:
+$filesList
 
 $($trailers -join "`n")
 "@
@@ -375,6 +389,7 @@ Invoke-Git -Arguments @('checkout', $integrationBranch) | Out-Null
 [pscustomobject]@{
 	CurrentBranch     = $currentBranch
 	RememberedHead    = $headSha
+	MergeBase         = $mergeBaseSha
 	MergeSource       = $MergeSource
 	SourceCommit      = $sourceSha
 	IntegrationBranch = $integrationBranch

@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
     long_about = "Mergetopus turns a regular git merge into an integration branch plus optional per-conflict slice branches.\n\nWorkflow:\n  1) Create/reset an integration branch from your current HEAD\n  2) Merge SOURCE into it with --no-commit\n  3) Keep auto-merged files in integration\n  4) Optionally group selected conflicted paths into one explicit slice branch via --select-paths\n\nIf SOURCE is omitted, an interactive branch picker is shown (unless --quiet is set)."
 )]
 #[command(
-    after_help = "Examples:\n  mergetopus origin/main\n  mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs'\n  mergetopus hotfix --yes\n  mergetopus origin/main --quiet\n  mergetopus resolve --commit main_mw_int_feature_slice1\n  mergetopus status feature/refactor-auth"
+    after_help = "Examples:\n  mergetopus origin/main\n  mergetopus --source resolve\n  mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs'\n  mergetopus hotfix --yes\n  mergetopus origin/main --quiet\n  mergetopus resolve --commit _mmm/main/feature/slice1\n  mergetopus status feature/refactor-auth\n  mergetopus HERE"
 )]
 pub struct Args {
     #[command(subcommand)]
@@ -21,6 +21,18 @@ pub struct Args {
     pub source: Option<String>,
 
     #[arg(
+        long = "source",
+        value_name = "SOURCE",
+        conflicts_with = "source",
+        help = "Optional named source branch/ref to merge (disambiguates command-like names)",
+        long_help = "Optional named source branch/ref/commit-ish to merge.
+
+Use this to disambiguate branch names that collide with subcommands (for example: resolve, here, license).
+Example: --source resolve"
+    )]
+    pub source_opt: Option<String>,
+
+    #[arg(
         long,
         value_name = "CSV_PATHS",
         help = "Comma-separated conflicted file paths to group into one explicit slice",
@@ -32,7 +44,7 @@ pub struct Args {
         long,
         default_value_t = false,
         help = "Run non-interactively and never open TUI screens",
-        long_help = "Run in non-interactive mode suitable for CI/CD.\n\nBehavior changes:\n- SOURCE must be provided explicitly (no source picker)\n- Consolidation prompts are skipped unless --yes is provided\n- Conflict grouping comes only from --select-paths (no interactive conflict selector)"
+        long_help = "Run in non-interactive mode suitable for CI/CD.\n\nBehavior changes:\n- SOURCE must be provided explicitly (no source picker)\n- Kokomeco prompts are skipped unless --yes is provided\n- Conflict grouping comes only from --select-paths (no interactive conflict selector)"
     )]
     pub quiet: bool,
 
@@ -40,9 +52,15 @@ pub struct Args {
         long,
         default_value_t = false,
         help = "Auto-confirm prompts when safe to proceed",
-        long_help = "Assume 'yes' for non-destructive confirmation prompts.\n\nCurrently used when an existing integration branch already has all slices merged and Mergetopus asks whether to create a consolidated merge-commit branch."
+        long_help = "Assume 'yes' for non-destructive confirmation prompts.\n\nCurrently used when an existing integration branch already has all slices merged and Mergetopus asks whether to create a kokomeco merge-commit branch."
     )]
     pub yes: bool,
+}
+
+impl Args {
+    pub fn effective_source(&self) -> Option<&str> {
+        self.source_opt.as_deref().or(self.source.as_deref())
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -78,9 +96,25 @@ pub enum Commands {
     /// Show integration branch and slice progress status.
     ///
     /// SOURCE may be either a merge source ref (e.g. feature/foo) or a full
-    /// integration branch name (e.g. main_mw_int_feature_foo).
+    /// integration branch name (e.g. _mmm/main/feature_foo/integration).
     Status {
         #[arg(value_name = "SOURCE")]
         source: Option<String>,
     },
+
+    /// Cleanup slice and integration branches once a kokomeco branch exists.
+    ///
+    /// Finds every integration branch (and its associated slice branches) for
+    /// which a consolidated kokomeco branch already exists, lists them in an
+    /// interactive confirmation TUI, and deletes them on confirmation.
+    /// The kokomeco branch itself is retained.
+    Cleanup,
+
+    /// Take over an already in-progress merge and create slices for remaining conflicts.
+    ///
+    /// Use this on the currently checked-out target branch while MERGE_HEAD is
+    /// present. Mergetopus captures already-resolved paths, rebuilds a canonical
+    /// integration branch, and opens conflict grouping for only unresolved paths.
+    #[command(name = "HERE", visible_alias = "here")]
+    Here,
 }

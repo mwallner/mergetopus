@@ -73,6 +73,11 @@ pub fn resolve_commit(rev: &str) -> Result<String> {
         .with_context(|| format!("merge source '{rev}' is not a valid commit-ish ref"))
 }
 
+pub fn resolve_ref(reference: &str) -> Result<String> {
+    run_git(&["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
+        .with_context(|| format!("failed to resolve reference '{reference}' to a commit"))
+}
+
 pub fn branch_exists(branch: &str) -> Result<bool> {
     let (ok, _, _) = run_git_allow_failure(&[
         "show-ref",
@@ -81,6 +86,20 @@ pub fn branch_exists(branch: &str) -> Result<bool> {
         &format!("refs/heads/{branch}"),
     ])?;
     Ok(ok)
+}
+
+pub fn remote_branch_exists(branch: &str) -> Result<bool> {
+    let (ok, _, _) = run_git_allow_failure(&[
+        "show-ref",
+        "--verify",
+        "--quiet",
+        &format!("refs/remotes/{branch}"),
+    ])?;
+    Ok(ok)
+}
+
+pub fn create_tracking_branch(local_branch: &str, remote_branch: &str) -> Result<()> {
+    run_git(&["branch", "--track", local_branch, remote_branch]).map(|_| ())
 }
 
 pub fn list_branch_refs() -> Result<Vec<String>> {
@@ -115,6 +134,10 @@ pub fn checkout(branch: &str) -> Result<()> {
     run_git(&["checkout", branch]).map(|_| ())
 }
 
+pub fn delete_branch(branch: &str) -> Result<()> {
+    run_git(&["branch", "-D", branch]).map(|_| ())
+}
+
 pub fn checkout_new_or_reset(branch: &str, at: &str) -> Result<()> {
     run_git(&["checkout", "-B", branch, at]).map(|_| ())
 }
@@ -135,6 +158,10 @@ pub fn merge_no_commit(source: &str) -> Result<()> {
          verify source/history compatibility, then retry (for unrelated histories, merge manually with --allow-unrelated-histories first)",
         stderr
     );
+}
+
+pub fn merge_abort() -> Result<()> {
+    run_git(&["merge", "--abort"]).map(|_| ())
 }
 
 #[cfg(target_os = "windows")]
@@ -184,9 +211,24 @@ pub fn staged_files() -> Result<Vec<String>> {
         .collect())
 }
 
+pub fn unstaged_files() -> Result<Vec<String>> {
+    let out = run_git(&["diff", "--name-only"])?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
 pub fn merge_in_progress() -> Result<bool> {
     let (ok, _, _) = run_git_allow_failure(&["rev-parse", "-q", "--verify", "MERGE_HEAD"])?;
     Ok(ok)
+}
+
+pub fn merge_head_sha() -> Result<String> {
+    run_git(&["rev-parse", "--verify", "MERGE_HEAD"])
+        .context("failed to resolve MERGE_HEAD for in-progress merge")
 }
 
 pub fn commit(message: &str) -> Result<()> {
@@ -199,7 +241,10 @@ pub fn commit_strict(message: &str) -> Result<()> {
 
 pub fn list_slice_branches_for_integration(integration_branch: &str) -> Result<Vec<String>> {
     let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
-    let prefix = format!("{integration_branch}_slice");
+    let Some(base) = integration_branch.strip_suffix("/integration") else {
+        return Ok(Vec::new());
+    };
+    let prefix = format!("{base}/slice");
     let mut slices = out
         .lines()
         .map(str::trim)
@@ -329,7 +374,11 @@ pub fn show_file_at(reference: &str, path: &str) -> Result<String> {
 }
 
 pub fn consolidated_branch_name(integration_branch: &str) -> String {
-    format!("{integration_branch}_consolidated")
+    if let Some(base) = integration_branch.strip_suffix("/integration") {
+        format!("{base}/kokomeco")
+    } else {
+        format!("{integration_branch}/kokomeco")
+    }
 }
 
 pub fn create_consolidated_merge_commit_branch(
@@ -421,6 +470,13 @@ pub fn three_way_diff(path: &str, source_ref: &str) -> Result<String> {
     ))
 }
 
+pub fn launch_difftool(path: &str, source_ref: &str) -> Result<()> {
+    run_git(&["difftool", "--no-prompt", "HEAD", source_ref, "--", path]).with_context(|| {
+        format!("failed to launch git difftool for '{path}' against '{source_ref}'")
+    })?;
+    Ok(())
+}
+
 /// Read a single git config value; returns `None` when the key is unset or
 /// the value is empty (an empty tool name or command is unusable).
 pub fn get_git_config(key: &str) -> Result<Option<String>> {
@@ -430,6 +486,26 @@ pub fn get_git_config(key: &str) -> Result<Option<String>> {
     } else {
         Ok(None)
     }
+}
+
+pub fn refs_pointing_to(commit: &str) -> Result<Vec<String>> {
+    let out = run_git(&[
+        "for-each-ref",
+        "--format=%(refname:short)",
+        "--points-at",
+        commit,
+        "refs/heads",
+        "refs/remotes",
+    ])?;
+
+    let mut refs = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    refs.sort();
+    Ok(refs)
 }
 
 /// Return the full commit message of the tip commit on `branch`.
@@ -472,23 +548,23 @@ pub fn parent_sha(rev: &str) -> Result<String> {
 }
 
 /// List every local branch that looks like a mergetopus slice branch
-/// (`*_mw_int_*_slice<N>` where N is one or more digits).
+/// (`_mmm/<original>/<source>/slice<N>` where N is one or more digits).
 pub fn list_all_slice_branches() -> Result<Vec<String>> {
     let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
     let mut slices = out
         .lines()
         .map(str::trim)
         .filter(|l| {
-            l.contains("_mw_int_") && {
-                // The suffix after the last "_slice" must be non-empty digits.
-                const SLICE_SUFFIX: &str = "_slice";
-                if let Some(idx) = l.rfind(SLICE_SUFFIX) {
-                    let after = &l[idx + SLICE_SUFFIX.len()..];
-                    !after.is_empty() && after.chars().all(|c| c.is_ascii_digit())
-                } else {
-                    false
-                }
-            }
+            let parts = l.split('/').collect::<Vec<_>>();
+            parts.len() == 4
+                && parts[0] == "_mmm"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3].starts_with("slice")
+                && parts[3]["slice".len()..]
+                    .chars()
+                    .all(|c| c.is_ascii_digit())
+                && parts[3].len() > "slice".len()
         })
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();

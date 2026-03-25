@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::{Context, Result, bail};
 
 use crate::cli::{Args, Commands};
@@ -27,6 +29,20 @@ pub fn run(args: Args) -> Result<()> {
         return status_command(source.as_deref(), args.quiet, &current_branch, &tui_title);
     }
 
+    if let Some(Commands::Cleanup) = &args.command {
+        git_ops::ensure_git_worktree()?;
+        let current_branch = git_ops::current_branch()?;
+        let tui_title = format!("Mergetopus [{current_branch}]");
+        return cleanup_command(args.quiet, &current_branch, &tui_title);
+    }
+
+    if let Some(Commands::Here) = &args.command {
+        git_ops::ensure_git_worktree()?;
+        let current_branch = git_ops::current_branch()?;
+        let tui_title = format!("Mergetopus [{current_branch}]");
+        return here_command(&args, &current_branch, &tui_title);
+    }
+
     git_ops::ensure_git_context()?;
     let current_branch = git_ops::current_branch()?;
     let tui_title = format!("Mergetopus [{current_branch}]");
@@ -42,6 +58,26 @@ fn status_command(
 ) -> Result<()> {
     let integration_branch =
         resolve_status_integration_branch(source_arg, quiet, current_branch, tui_title)?;
+
+    // If a kokomeco consolidated branch already exists for this integration
+    // branch, show the merge suggestion instead of the raw integration status.
+    let kokomeco = git_ops::consolidated_branch_name(&integration_branch);
+    if git_ops::branch_exists(&kokomeco)? {
+        println!("Mergetopus status");
+        println!("  Integration branch:  {integration_branch}");
+        println!("  Consolidated branch: {kokomeco}");
+        println!();
+        println!(
+            "All slices are resolved. The kokomeco branch is ready to merge into '{current_branch}'."
+        );
+        println!();
+        println!("Suggested next command:");
+        println!("  git merge {kokomeco}");
+        println!();
+        println!("To clean up slice and integration branches afterward:");
+        println!("  mergetopus cleanup");
+        return Ok(());
+    }
 
     let initial_commit = git_ops::first_parent_oldest_commit(&integration_branch)?;
     let initial_message = git_ops::commit_message(&initial_commit)?;
@@ -139,7 +175,7 @@ fn resolve_status_integration_branch(
             source.to_string()
         } else if let Some((_, current_source)) = planner::parse_integration_branch(current_branch)
         {
-            if current_source == source {
+            if current_source == planner::sanitize_branch_fragment(source) {
                 current_branch.to_string()
             } else {
                 planner::integration_branch_name(current_branch, source)
@@ -162,13 +198,11 @@ fn resolve_status_integration_branch(
         return Ok(current_branch.to_string());
     }
 
-    let prefix = format!("{current_branch}_mw_int_");
+    let prefix = planner::integration_branch_family_prefix(current_branch);
     let mut candidates = git_ops::list_local_branches()?
         .into_iter()
         .filter(|b| b.starts_with(&prefix))
         .filter(|b| planner::parse_integration_branch(b).is_some())
-        .filter(|b| !planner::is_slice_branch(b))
-        .filter(|b| !b.ends_with("_consolidated"))
         .collect::<Vec<_>>();
 
     match candidates.len() {
@@ -204,9 +238,58 @@ fn parse_partial_merge_source_ref(message: &str) -> Option<String> {
     }
 }
 
+fn normalize_merge_source_ref(source_ref: &str) -> Result<String> {
+    let trimmed = source_ref.trim_start_matches('/');
+
+    if !git_ops::remote_branch_exists(trimmed)? {
+        return Ok(trimmed.to_string());
+    }
+
+    let Some((remote_name, local_candidate)) = trimmed.split_once('/') else {
+        return Ok(trimmed.to_string());
+    };
+
+    if local_candidate.is_empty() {
+        bail!(
+            "selected source '{}' is a remote ref with no local branch name; choose a concrete branch",
+            source_ref
+        );
+    }
+
+    if git_ops::branch_exists(local_candidate)? {
+        // Local branch exists: check if it's in sync with the remote.
+        let local_sha = git_ops::resolve_ref(local_candidate)?;
+        let remote_sha = git_ops::resolve_ref(trimmed)?;
+
+        if local_sha == remote_sha {
+            // Local is in sync with remote; use it.
+            println!("Using existing local branch '{local_candidate}' (in sync with '{trimmed}').");
+            return Ok(local_candidate.to_string());
+        } else {
+            // Local and remote diverge.
+            bail!(
+                "selected source '{}' maps to local branch '{}' which has diverged from its remote counterpart; \
+                 local is at {} while remote is at {}. Synchronize or use a different branch.",
+                source_ref,
+                local_candidate,
+                &local_sha[..8.min(local_sha.len())],
+                &remote_sha[..8.min(remote_sha.len())]
+            );
+        }
+    }
+
+    git_ops::create_tracking_branch(local_candidate, trimmed)?;
+    println!("Using remote source '{trimmed}' via new local tracking branch '{local_candidate}'");
+    println!(
+        "Tip: remote name '{remote_name}' is omitted for this merge context (source = '{local_candidate}')."
+    );
+
+    Ok(local_candidate.to_string())
+}
+
 fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) -> Result<()> {
-    let source_ref = match args.source.as_ref() {
-        Some(s) => s.clone(),
+    let selected_source_ref = match args.effective_source() {
+        Some(s) => s.to_string(),
         None => {
             if args.quiet {
                 bail!("--quiet requires SOURCE to be provided explicitly");
@@ -222,9 +305,10 @@ fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) -> Res
             }
         }
     };
+    let source_ref = normalize_merge_source_ref(&selected_source_ref)?;
 
     // If an integration branch is selected, redirect to the original/source pair.
-    let (actual_source_ref, actual_integration_branch) =
+    let (actual_source_ref, actual_integration_branch, target_branch_for_merge) =
         if let Some((original, source)) = planner::parse_integration_branch(&source_ref) {
             println!("Note: '{source_ref}' is an integration branch.");
             println!("Redirecting: checking out '{original}' and merging '{source}' instead.\n");
@@ -233,14 +317,33 @@ fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) -> Res
             let new_current = git_ops::current_branch()?;
             let new_integration = planner::integration_branch_name(&new_current, &source);
 
-            (source.clone(), new_integration)
+            (source.clone(), new_integration, new_current)
         } else {
             let integration_branch = planner::integration_branch_name(current_branch, &source_ref);
-            (source_ref.clone(), integration_branch)
+            (
+                source_ref.clone(),
+                integration_branch,
+                current_branch.to_string(),
+            )
         };
+
+    let kokomeco_branch = git_ops::consolidated_branch_name(&actual_integration_branch);
+    if git_ops::branch_exists(&kokomeco_branch)? {
+        println!("Kokomeco branch already exists for this merge context: {kokomeco_branch}");
+        println!("To merge it back into your current target branch:");
+        println!("  git checkout {target_branch_for_merge}");
+        println!("  git merge --no-ff {kokomeco_branch}");
+        println!("After promotion, delete it manually when no longer needed:");
+        println!("  git branch -d {kokomeco_branch}");
+        return Ok(());
+    }
 
     let actual_source_sha = git_ops::resolve_commit(&actual_source_ref)?;
     let actual_remembered_head = git_ops::head_sha()?;
+    let actual_merge_base = git_ops::merge_base(&actual_remembered_head, &actual_source_sha)
+        .with_context(|| {
+            "failed before entering conflict resolution: could not compute merge-base between current HEAD and source; verify source/history compatibility, then retry (for unrelated histories, merge manually with --allow-unrelated-histories first)"
+        })?;
 
     if git_ops::branch_exists(&actual_integration_branch)? {
         git_ops::checkout(&actual_integration_branch)?;
@@ -263,12 +366,12 @@ fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) -> Res
                 true
             } else if args.quiet {
                 println!(
-                    "All slice branches are already merged. Skipping consolidation prompt due to --quiet (use --yes to auto-consolidate)."
+                    "All slice branches are already merged. Skipping kokomeco prompt due to --quiet (use --yes to auto-create the kokomeco branch)."
                 );
                 false
             } else {
                 tui::confirm(
-                    "All slice branches are already merged. Create a non-destructive consolidated merge commit branch? (Enter/y=yes, n/Esc=no)",
+                    "All slice branches are already merged. Create a non-destructive kokomeco merge commit branch? (Enter/y=yes, n/Esc=no)",
                     tui_title,
                 )?
             };
@@ -279,7 +382,7 @@ fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) -> Res
                     &actual_source_ref,
                     &status,
                 )?;
-                println!("Created consolidated branch: {consolidated}");
+                println!("Created kokomeco branch: {consolidated}");
                 println!(
                     "Integration branch was not rewritten. Review and promote explicitly if desired."
                 );
@@ -346,10 +449,31 @@ fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) -> Res
         git_ops::commit(&msg)?;
     }
 
-    let explicit_slices = select_conflicts(args, &actual_source_ref, &conflicted_files, tui_title)?;
+    let explicit_slices = match select_conflicts(
+        args,
+        &actual_source_ref,
+        &conflicted_files,
+        tui_title,
+    ) {
+        Ok(slices) => slices,
+        Err(e) => {
+            // Clean up on cancellation: checkout target branch and delete integration branch.
+            if let Err(checkout_err) = git_ops::checkout(&target_branch_for_merge) {
+                eprintln!(
+                    "Warning: failed to checkout '{target_branch_for_merge}' during cleanup: {checkout_err}"
+                );
+            }
+            if let Err(delete_err) = git_ops::delete_branch(&actual_integration_branch) {
+                eprintln!(
+                    "Warning: failed to delete integration branch '{actual_integration_branch}' during cleanup: {delete_err}"
+                );
+            }
+            return Err(e).context("conflict selection canceled; integration branch cleaned up");
+        }
+    };
     planner::create_slice_branches(
         &actual_integration_branch,
-        &actual_remembered_head,
+        &actual_merge_base,
         &actual_source_ref,
         &actual_source_sha,
         &conflicted_files,
@@ -365,6 +489,180 @@ fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) -> Res
     for (idx, group) in explicit_slices.iter().enumerate() {
         println!("  - SliceGroup {}: {} file(s)", idx + 1, group.len());
     }
+
+    Ok(())
+}
+
+fn choose_source_ref_label(source_sha: &str) -> Result<String> {
+    let refs = git_ops::refs_pointing_to(source_sha)?;
+    if let Some(local) = refs.iter().find(|r| !r.contains('/')) {
+        return Ok(local.clone());
+    }
+    if let Some(any) = refs.first() {
+        return Ok(any.clone());
+    }
+    Ok(source_sha[..8.min(source_sha.len())].to_string())
+}
+
+fn snapshot_resolved_paths(paths: &[String]) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
+    let mut snapshots = BTreeMap::new();
+    for path in paths {
+        let content = std::fs::read(path).ok();
+        snapshots.insert(path.clone(), content);
+    }
+    Ok(snapshots)
+}
+
+fn apply_resolved_snapshots(snapshots: &BTreeMap<String, Option<Vec<u8>>>) -> Result<()> {
+    for (path, content) in snapshots {
+        match content {
+            Some(bytes) => {
+                if let Some(parent) = std::path::Path::new(path).parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("failed to create parent directory for '{path}'")
+                    })?;
+                }
+                std::fs::write(path, bytes)
+                    .with_context(|| format!("failed to restore resolved file '{path}'"))?;
+                git_ops::stage_path(path)?;
+            }
+            None => {
+                git_ops::rm_path(path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn here_command(args: &Args, current_branch: &str, tui_title: &str) -> Result<()> {
+    if !git_ops::merge_in_progress()? {
+        bail!("HERE requires an in-progress merge (MERGE_HEAD not found)");
+    }
+
+    let source_sha = git_ops::merge_head_sha()?;
+    let source_ref = choose_source_ref_label(&source_sha)?;
+    let integration_branch = planner::integration_branch_name(current_branch, &source_ref);
+    let kokomeco_branch = git_ops::consolidated_branch_name(&integration_branch);
+
+    if git_ops::branch_exists(&kokomeco_branch)? {
+        bail!(
+            "kokomeco branch already exists for this merge context: {}",
+            kokomeco_branch
+        );
+    }
+    if git_ops::branch_exists(&integration_branch)? {
+        bail!(
+            "integration branch '{}' already exists; use status/resolve or cleanup first",
+            integration_branch
+        );
+    }
+
+    let unresolved_before = git_ops::conflicted_files()?;
+    if unresolved_before.is_empty() {
+        println!("No unresolved conflicts found in current merge. Nothing to slice.");
+        return Ok(());
+    }
+
+    // Preserve already-resolved merge work so takeover does not lose manual progress.
+    let unresolved_set = unresolved_before.iter().cloned().collect::<BTreeSet<_>>();
+    let mut resolved_paths = git_ops::staged_files()?;
+    resolved_paths.extend(git_ops::unstaged_files()?);
+    resolved_paths.retain(|p| !unresolved_set.contains(p));
+    resolved_paths.sort();
+    resolved_paths.dedup();
+    let resolved_snapshots = snapshot_resolved_paths(&resolved_paths)?;
+
+    git_ops::merge_abort()?;
+
+    let remembered_head = git_ops::head_sha()?;
+    let merge_base = git_ops::merge_base(&remembered_head, &source_sha)?;
+
+    git_ops::checkout_new_or_reset(&integration_branch, &remembered_head)?;
+    git_ops::merge_no_commit(&source_sha)?;
+
+    let conflicted_now = git_ops::conflicted_files()?;
+    for path in &conflicted_now {
+        git_ops::restore_ours(path)?;
+    }
+
+    apply_resolved_snapshots(&resolved_snapshots)?;
+
+    let auto_merged_files = git_ops::staged_files()?;
+    let slice_plan = unresolved_before
+        .iter()
+        .enumerate()
+        .map(|(i, file)| {
+            let branch = planner::slice_branch_name(&integration_branch, i + 1)?;
+            Ok(SlicePlanItem {
+                path: file.clone(),
+                branch,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if git_ops::merge_in_progress()? {
+        let merged_section = if auto_merged_files.is_empty() {
+            "* (none)".to_string()
+        } else {
+            auto_merged_files
+                .iter()
+                .map(|f| format!("* {f}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let sliced_section = if slice_plan.is_empty() {
+            "* (none)".to_string()
+        } else {
+            slice_plan
+                .iter()
+                .map(|s| format!("* {} -> {}", s.path, s.branch))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let msg = format!(
+            "Mergetopus: partial merge '{source_ref}' into '{integration_branch}' (conflicts sliced)\n\nmerged:\n{merged_section}\n\nsliced:\n{sliced_section}\n\nTakeover: HERE"
+        );
+        git_ops::commit(&msg)?;
+    }
+
+    let explicit_slices = match select_conflicts(args, &source_ref, &unresolved_before, tui_title) {
+        Ok(slices) => slices,
+        Err(e) => {
+            if let Err(checkout_err) = git_ops::checkout(current_branch) {
+                eprintln!(
+                    "Warning: failed to checkout '{current_branch}' during HERE cleanup: {checkout_err}"
+                );
+            }
+            if let Err(delete_err) = git_ops::delete_branch(&integration_branch) {
+                eprintln!(
+                    "Warning: failed to delete integration branch '{}' during HERE cleanup: {}",
+                    integration_branch, delete_err
+                );
+            }
+            return Err(e)
+                .context("conflict selection canceled during HERE; integration branch cleaned up");
+        }
+    };
+
+    planner::create_slice_branches(
+        &integration_branch,
+        &merge_base,
+        &source_ref,
+        &source_sha,
+        &unresolved_before,
+        &explicit_slices,
+    )?;
+
+    git_ops::checkout(&integration_branch)?;
+    println!("Mergetopus HERE takeover complete");
+    println!("  Integration branch: {integration_branch}");
+    println!("  Source ref: {source_ref} ({source_sha})");
+    println!("  Remaining conflict count: {}", unresolved_before.len());
+    println!("  Explicit slice groups: {}", explicit_slices.len());
 
     Ok(())
 }
@@ -388,9 +686,12 @@ fn select_conflicts(
             if args.quiet {
                 Ok(Vec::new())
             } else {
+                let diff_tool = git_ops::get_git_config("diff.tool")?;
                 match tui::select_conflicts(
                     all_conflicts,
                     |path| git_ops::three_way_diff(path, source_ref),
+                    diff_tool.as_deref(),
+                    |path| git_ops::launch_difftool(path, source_ref),
                     tui_title,
                 )? {
                     Some(groups) => Ok(groups),
@@ -401,18 +702,132 @@ fn select_conflicts(
     }
 }
 
-/// Resolve a merge conflict on a slice branch by invoking the user's merge tool.
+/// Resolve a slice by merging it into the corresponding integration branch with
+/// `--no-commit`, then invoking the configured merge tool for each conflicted
+/// file one-by-one.
 ///
-/// For each file in the slice the function:
-/// 1. Writes three temporary files:
-///    - LOCAL  – the version from the remembered-head (ours, before any merge)
-///    - BASE   – the version from the merge-base commit
-///    - REMOTE – the version from the source commit (theirs)
-/// 2. Sets LOCAL / BASE / REMOTE / MERGED as shell environment variables and
-///    executes the command from `git config mergetool.<tool>.cmd`.
-///    MERGED points to the actual working-tree file so the tool writes directly
-///    into the repository.
-/// 3. Stages the resolved file and, once all files are done, commits the result.
+/// For each conflicted file the function writes three temporary files:
+/// - LOCAL  – the version from the integration branch HEAD before the merge
+/// - BASE   – the merge-base between integration HEAD and the slice tip
+/// - REMOTE – the version from the slice branch tip
+///
+/// It then sets LOCAL / BASE / REMOTE / MERGED as shell environment variables
+/// and executes the command from `git config mergetool.<tool>.cmd`. MERGED
+/// points to the conflicted working-tree file on the integration branch.
+
+/// Parse a command string into program and arguments, handling quoted tokens.
+/// Splits on unquoted whitespace to handle paths and arguments with special characters.
+fn parse_command_string(cmd: &str) -> Result<(String, Vec<String>)> {
+    let mut tokens = Vec::new();
+    let mut current_token = String::new();
+    let mut in_double_quotes = false;
+    let mut in_single_quotes = false;
+
+    for ch in cmd.chars() {
+        match ch {
+            '"' if !in_single_quotes => {
+                in_double_quotes = !in_double_quotes;
+            }
+            '\'' if !in_double_quotes => {
+                in_single_quotes = !in_single_quotes;
+            }
+            ' ' | '\t' if !in_double_quotes && !in_single_quotes => {
+                if !current_token.is_empty() {
+                    tokens.push(current_token.clone());
+                    current_token.clear();
+                }
+            }
+            _ => current_token.push(ch),
+        }
+    }
+
+    if !current_token.is_empty() {
+        tokens.push(current_token);
+    }
+
+    if tokens.is_empty() {
+        bail!("empty merge tool command");
+    }
+
+    let program = tokens.remove(0);
+    Ok((program, tokens))
+}
+
+fn is_windows_shell_builtin(program: &str) -> bool {
+    matches!(
+        program.to_ascii_lowercase().as_str(),
+        "assoc"
+            | "break"
+            | "call"
+            | "cd"
+            | "chcp"
+            | "cls"
+            | "color"
+            | "copy"
+            | "date"
+            | "del"
+            | "dir"
+            | "echo"
+            | "endlocal"
+            | "erase"
+            | "for"
+            | "ftype"
+            | "if"
+            | "md"
+            | "mkdir"
+            | "mklink"
+            | "move"
+            | "path"
+            | "pause"
+            | "popd"
+            | "prompt"
+            | "pushd"
+            | "rd"
+            | "ren"
+            | "rename"
+            | "rmdir"
+            | "set"
+            | "setlocal"
+            | "shift"
+            | "start"
+            | "time"
+            | "title"
+            | "type"
+            | "ver"
+            | "verify"
+            | "vol"
+    )
+}
+
+fn needs_windows_shell(expanded_cmd: &str, program: &str) -> bool {
+    is_windows_shell_builtin(program)
+        || expanded_cmd
+            .chars()
+            .any(|c| matches!(c, '>' | '<' | '|' | '&' | '^'))
+}
+
+fn run_windows_merge_tool(tool_name: &str, expanded_cmd: &str) -> Result<std::process::ExitStatus> {
+    let (program, args) = parse_command_string(expanded_cmd)?;
+
+    match std::process::Command::new(&program).args(&args).status() {
+        Ok(status) => Ok(status),
+        Err(err)
+            if err.kind() == std::io::ErrorKind::NotFound
+                && needs_windows_shell(expanded_cmd, &program) =>
+        {
+            std::process::Command::new("cmd")
+                .args(["/d", "/s", "/c", expanded_cmd])
+                .status()
+                .with_context(|| {
+                    format!("failed to launch merge tool '{tool_name}' via Windows shell fallback")
+                })
+        }
+        Err(err) => Err(err).with_context(|| {
+            format!("failed to launch merge tool '{tool_name}' (program: '{program}')")
+        }),
+    }
+}
+
 fn resolve_command(
     branch_arg: Option<&str>,
     do_commit: bool,
@@ -438,27 +853,54 @@ fn resolve_command(
         }
     };
 
-    let commit_msg = git_ops::branch_tip_commit_message(&slice_branch)?;
-    if !commit_msg.contains("Mergetopus slice:") {
+    let integration_branch = planner::integration_from_slice_branch(&slice_branch).ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not derive integration branch from slice branch '{}' (expected suffix '/slice<N>')",
+            slice_branch
+        )
+    })?;
+    if !git_ops::branch_exists(&integration_branch)? {
         bail!(
-            "'{}' does not appear to be a mergetopus slice branch \
-             (missing 'Mergetopus slice:' in commit message)",
+            "corresponding integration branch '{}' does not exist for slice '{}'",
+            integration_branch,
             slice_branch
         );
     }
 
-    let source_commit = extract_trailer(&commit_msg, "Source-Commit")
-        .ok_or_else(|| anyhow::anyhow!("missing Source-Commit trailer in slice commit"))?;
-    let slice_paths = extract_slice_paths(&commit_msg);
-    if slice_paths.is_empty() {
-        bail!(
-            "could not determine file paths for slice branch '{}'",
-            slice_branch
-        );
-    }
+    let slice_commit = git_ops::resolve_commit(&slice_branch)?;
+    let merge_in_progress = git_ops::merge_in_progress()?;
+    let current_branch = git_ops::current_branch()?;
 
-    let remembered_head = git_ops::parent_sha(&slice_branch)?;
-    let merge_base = git_ops::merge_base(&remembered_head, &source_commit)?;
+    let (local_commit, remote_commit) = if merge_in_progress {
+        if current_branch != integration_branch {
+            bail!(
+                "a merge is already in progress on branch '{}'; resolve or abort it before resolving '{}'",
+                current_branch,
+                slice_branch
+            );
+        }
+
+        let merge_head = git_ops::merge_head_sha()?;
+        if merge_head != slice_commit {
+            bail!(
+                "a different merge is already in progress on '{}' (MERGE_HEAD = {}), not the selected slice '{}'",
+                integration_branch,
+                merge_head,
+                slice_branch
+            );
+        }
+
+        (git_ops::head_sha()?, merge_head)
+    } else {
+        git_ops::ensure_git_context()?;
+        git_ops::checkout(&integration_branch)?;
+        let local = git_ops::head_sha()?;
+        git_ops::merge_no_commit(&slice_branch)?;
+        (local, slice_commit.clone())
+    };
+
+    let merge_base = git_ops::merge_base(&local_commit, &remote_commit)?;
+    let conflicted_paths = git_ops::conflicted_files()?;
 
     let tool_name = match git_ops::get_git_config("merge.tool")? {
         Some(t) => t,
@@ -479,13 +921,34 @@ fn resolve_command(
         || tool_cmd.contains("${MERGED}")
         || tool_cmd.contains("%MERGED%");
 
-    git_ops::checkout(&slice_branch)?;
+    if conflicted_paths.is_empty() {
+        println!(
+            "No conflicted files remain for merge '{}' into '{}'.",
+            slice_branch, integration_branch
+        );
+
+        if do_commit {
+            if git_ops::staged_has_changes()? || git_ops::merge_in_progress()? {
+                let msg =
+                    format!("Mergetopus resolve: '{slice_branch}' into '{integration_branch}'");
+                git_ops::commit_strict(&msg)?;
+                println!("  Merge commit created on '{integration_branch}'.");
+            } else {
+                println!("  No staged changes to commit.");
+            }
+        } else {
+            println!("  Merge result is staged on '{integration_branch}' but not committed.");
+            println!("  Review and commit when ready, or re-run with --commit.");
+        }
+
+        return Ok(());
+    }
 
     let tmp_dir = std::env::temp_dir().join(format!("mergetopus-{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir)
         .context("failed to create temporary directory for merge tool files")?;
 
-    for path in &slice_paths {
+    for path in &conflicted_paths {
         let safe_name = path
             .chars()
             .map(|c| {
@@ -509,9 +972,9 @@ fn resolve_command(
             .to_string_lossy()
             .into_owned();
 
-        git_ops::write_blob_to_path(&remembered_head, path, &local_tmp)?;
+        git_ops::write_blob_to_path(&local_commit, path, &local_tmp)?;
         git_ops::write_blob_to_path(&merge_base, path, &base_tmp)?;
-        git_ops::write_blob_to_path(&source_commit, path, &remote_tmp)?;
+        git_ops::write_blob_to_path(&remote_commit, path, &remote_tmp)?;
 
         let merged_before = std::fs::read(path).ok();
         let base_before = std::fs::read(&base_tmp)
@@ -519,22 +982,27 @@ fn resolve_command(
 
         println!("Resolving '{path}' with '{tool_name}'...");
 
+        // Substitute variables in the command to handle both Unix-style ($VAR, ${VAR})
+        // and Windows-style (%VAR%) variable references consistently across platforms.
+        let expanded_cmd = tool_cmd
+            .replace("$LOCAL", &local_tmp)
+            .replace("${LOCAL}", &local_tmp)
+            .replace("%LOCAL%", &local_tmp)
+            .replace("$BASE", &base_tmp)
+            .replace("${BASE}", &base_tmp)
+            .replace("%BASE%", &base_tmp)
+            .replace("$REMOTE", &remote_tmp)
+            .replace("${REMOTE}", &remote_tmp)
+            .replace("%REMOTE%", &remote_tmp)
+            .replace("$MERGED", path)
+            .replace("${MERGED}", path)
+            .replace("%MERGED%", path);
+
         let status = if cfg!(target_os = "windows") {
-            std::process::Command::new("cmd")
-                .args(["/c", &tool_cmd])
-                .env("LOCAL", &local_tmp)
-                .env("BASE", &base_tmp)
-                .env("REMOTE", &remote_tmp)
-                .env("MERGED", path)
-                .status()
-                .with_context(|| format!("failed to launch merge tool '{tool_name}'"))?
+            run_windows_merge_tool(&tool_name, &expanded_cmd)?
         } else {
             std::process::Command::new("sh")
-                .args(["-c", &tool_cmd])
-                .env("LOCAL", &local_tmp)
-                .env("BASE", &base_tmp)
-                .env("REMOTE", &remote_tmp)
-                .env("MERGED", path)
+                .args(["-c", &expanded_cmd])
                 .status()
                 .with_context(|| format!("failed to launch merge tool '{tool_name}'"))?
         };
@@ -564,26 +1032,97 @@ fn resolve_command(
         git_ops::stage_path(path)?;
     }
 
-    let paths_list = slice_paths.join(", ");
+    let paths_list = conflicted_paths.join(", ");
 
-    println!("Resolve complete on '{slice_branch}'");
-    println!("  Resolved {} file(s): {}", slice_paths.len(), paths_list);
+    println!(
+        "Resolve complete for merge '{}' into '{}'",
+        slice_branch, integration_branch
+    );
+    println!(
+        "  Resolved {} file(s): {}",
+        conflicted_paths.len(),
+        paths_list
+    );
 
     if do_commit {
-        if git_ops::staged_has_changes()? {
+        if git_ops::staged_has_changes()? || git_ops::merge_in_progress()? {
             let msg = format!(
-                "Mergetopus resolve: '{slice_branch}'\n\nResolved-Paths: {paths_list}\nSource-Commit: {source_commit}"
+                "Mergetopus resolve: '{slice_branch}' into '{integration_branch}'\n\nResolved-Paths: {paths_list}\nSource-Commit: {remote_commit}"
             );
             git_ops::commit_strict(&msg)?;
-            println!("  Resolution commit created.");
+            println!("  Merge commit created on '{integration_branch}'.");
         } else {
             println!("  No staged changes to commit.");
         }
     } else {
-        println!("  Changes are staged but not committed.");
+        println!("  Merge result is staged on '{integration_branch}' but not committed.");
         println!("  Review and commit when ready, or re-run with --commit.");
     }
 
+    Ok(())
+}
+
+fn cleanup_command(quiet: bool, current_branch: &str, tui_title: &str) -> Result<()> {
+    let all_local = git_ops::list_local_branches()?;
+
+    let mut branches_to_delete: Vec<String> = Vec::new();
+
+    for branch in &all_local {
+        if planner::parse_integration_branch(branch).is_none() {
+            continue;
+        }
+
+        let kokomeco = git_ops::consolidated_branch_name(branch);
+        if !git_ops::branch_exists(&kokomeco)? {
+            continue;
+        }
+
+        branches_to_delete.push(branch.clone());
+
+        let slices = git_ops::list_slice_branches_for_integration(branch)?;
+        branches_to_delete.extend(slices);
+    }
+
+    if branches_to_delete.is_empty() {
+        println!(
+            "Nothing to clean up: no integration branches with a corresponding kokomeco branch found."
+        );
+        return Ok(());
+    }
+
+    branches_to_delete.sort();
+    branches_to_delete.dedup();
+
+    let do_delete = if quiet {
+        bail!("cleanup requires interactive confirmation; re-run without --quiet to proceed");
+    } else {
+        tui::confirm_list(
+            &branches_to_delete,
+            &format!(
+                "Delete {} branch(es)? The kokomeco branch is retained. This cannot be undone.",
+                branches_to_delete.len()
+            ),
+            tui_title,
+        )?
+    };
+
+    if !do_delete {
+        println!("Cleanup canceled.");
+        return Ok(());
+    }
+
+    let mut deleted = 0usize;
+    for branch in &branches_to_delete {
+        if branch == current_branch {
+            eprintln!("Skipping '{branch}': cannot delete the currently checked-out branch.");
+            continue;
+        }
+        git_ops::delete_branch(branch)?;
+        println!("Deleted: {branch}");
+        deleted += 1;
+    }
+
+    println!("\nCleaned up {deleted} branch(es).");
     Ok(())
 }
 
@@ -657,7 +1196,7 @@ mod tests {
 
     #[test]
     fn parse_partial_merge_source_ref_works() {
-        let msg = "Mergetopus: partial merge 'origin/feature-x' into 'main_mw_int_origin_feature-x' (conflicts sliced)\n\nmerged:\n* a";
+        let msg = "Mergetopus: partial merge 'origin/feature-x' into '_mmm/main/origin_feature-x/integration' (conflicts sliced)\n\nmerged:\n* a";
         assert_eq!(
             parse_partial_merge_source_ref(msg),
             Some("origin/feature-x".to_string())

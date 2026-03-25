@@ -32,6 +32,12 @@ jobs:
           Set-StrictMode -Version Latest
           cargo install --locked cargo-bundle-licenses
 
+      - name: Run Build + Test task
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          Invoke-Build Build,Test
+
       - name: Run Pack task
         shell: pwsh
         run: |
@@ -66,6 +72,14 @@ jobs:
             Write-Host 'No release mergetopus.* files found to zip.'
           }
 
+          if (Test-Path './target/release/mergetopus.exe') {
+            $hash = Get-FileHash './target/release/mergetopus.exe' -Algorithm SHA256
+            "$($hash.Hash.ToLower())  mergetopus.exe" | Out-File -FilePath "$artifactDir/mergetopus.exe.sha256" -Encoding ascii
+          }
+          else {
+            Write-Host 'No target/release/mergetopus.exe file found to checksum.'
+          }
+
       - name: Upload build artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -74,4 +88,5 @@ jobs:
           path: |
             artifacts/*.nupkg
             artifacts/*.zip
+            artifacts/*.sha256
           if-no-files-found: warn
