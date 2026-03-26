@@ -163,6 +163,17 @@ On Unix-like systems (macOS, Linux), command execution uses `sh -c`.
 When running inside a Git worktree on Windows, mergetopus ensures `core.longpaths=true`
 for the repository so deep path merges remain usable.
 
+## Worktree Behavior
+
+Mergetopus supports Git worktrees in a conditional way:
+
+- If your repository has no additional worktrees, Mergetopus keeps the existing default behavior (no automatic worktree creation).
+- If your repository already uses worktrees, Mergetopus prefers running branch operations in branch-specific worktree directories.
+- When Mergetopus needs to create a branch worktree and no suitable branch worktree exists yet, it infers a base directory from existing worktree paths.
+- If a common base cannot be inferred, Mergetopus falls back to the parent of the repository root.
+
+This keeps non-worktree workflows stable while improving branch checkout ergonomics in repositories that already use worktrees.
+
 ## Branch Naming Conventions
 
 An understanding of branch naming helps prevent accidental misuse:

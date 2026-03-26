@@ -37,11 +37,21 @@ fn mergetopus(repo: &Path, args: &[&str]) -> TestResult<Output> {
     run(Command::new(bin).args(args).current_dir(repo))
 }
 
+fn assert_single_default_worktree(repo: &Path) -> TestResult<()> {
+    let out = git(repo, &["worktree", "list", "--porcelain"])?;
+    let count = out.lines().filter(|l| l.starts_with("worktree ")).count();
+    if count != 1 {
+        return Err(format!("expected exactly one worktree, found {count}\n{out}").into());
+    }
+    Ok(())
+}
+
 fn init_repo() -> TestResult<std::path::PathBuf> {
     let repo = unique_temp_repo_dir();
     fs::create_dir_all(&repo)?;
 
     git(&repo, &["init"])?;
+    git(&repo, &["config", "commit.gpgsign", "false"])?;
     git(&repo, &["config", "user.name", "Mergetopus Tests"])?;
     git(&repo, &["config", "user.email", "tests@example.com"])?;
     git(&repo, &["checkout", "-B", "main"])?;
@@ -176,6 +186,7 @@ fn kokomeco_branch() -> &'static str {
 #[test]
 fn release_a_creates_integration_and_slice_and_supports_rerun() -> TestResult<()> {
     let repo = setup_single_conflict_repo()?;
+    assert_single_default_worktree(&repo)?;
 
     let first = mergetopus(&repo, &["feature", "--quiet"])?;
     assert!(
@@ -215,6 +226,7 @@ fn release_a_creates_integration_and_slice_and_supports_rerun() -> TestResult<()
         String::from_utf8_lossy(&rerun.stdout),
         String::from_utf8_lossy(&rerun.stderr)
     );
+    assert_single_default_worktree(&repo)?;
 
     Ok(())
 }

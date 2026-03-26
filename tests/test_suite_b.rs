@@ -40,11 +40,21 @@ fn mergetopus(repo: &Path, args: &[&str]) -> TestResult<Output> {
     run(Command::new(bin).args(args).current_dir(repo))
 }
 
+fn assert_single_default_worktree(repo: &Path) -> TestResult<()> {
+    let out = git(repo, &["worktree", "list", "--porcelain"])?;
+    let count = out.lines().filter(|l| l.starts_with("worktree ")).count();
+    if count != 1 {
+        return Err(format!("expected exactly one worktree, found {count}\n{out}").into());
+    }
+    Ok(())
+}
+
 fn init_repo() -> TestResult<std::path::PathBuf> {
     let repo = unique_temp_repo_dir();
     fs::create_dir_all(&repo)?;
 
     git(&repo, &["init"])?;
+    git(&repo, &["config", "commit.gpgsign", "false"])?;
     git(&repo, &["config", "user.name", "Mergetopus Tests"])?;
     git(&repo, &["config", "user.email", "tests@example.com"])?;
     git(&repo, &["checkout", "-B", "main"])?;
@@ -96,6 +106,7 @@ fn slice_branch() -> &'static str {
 #[test]
 fn release_b_status_reports_integration_and_pending_slice() -> TestResult<()> {
     let repo = setup_single_conflict_repo()?;
+    assert_single_default_worktree(&repo)?;
 
     let create = mergetopus(&repo, &["feature", "--quiet"])?;
     assert!(
@@ -119,6 +130,7 @@ fn release_b_status_reports_integration_and_pending_slice() -> TestResult<()> {
     assert!(stdout.contains("Pending slices: 1"));
     assert!(stdout.contains("detected paths: conflict.txt"));
     assert!(stdout.contains(&format!("mergetopus resolve {}", slice_branch())));
+    assert_single_default_worktree(&repo)?;
 
     Ok(())
 }
