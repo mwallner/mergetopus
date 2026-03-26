@@ -1,7 +1,7 @@
 mod cli;
 mod commands;
 mod git_ops;
-mod license;
+mod helpers;
 mod models;
 mod planner;
 mod tui;
