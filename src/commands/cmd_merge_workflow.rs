@@ -309,7 +309,7 @@ fn create_consolidated_merge_commit_branch(
     // Derive remembered head and source commit from the first mergetopus
     // partial-merge commit on the integration branch, not from the oldest
     // reachable ancestor in the repository history.
-    let initial_commit = initial_integration_merge_commit(integration_branch)?;
+    let initial_commit = git_ops::first_mergetopus_partial_merge_commit(integration_branch)?;
 
     let remembered_head =
         git_ops::run_git(&["rev-parse", "--verify", &format!("{initial_commit}^1")])
@@ -355,28 +355,4 @@ fn create_consolidated_merge_commit_branch(
 
     git_ops::commit(&message)?;
     Ok(branch)
-}
-
-fn initial_integration_merge_commit(integration_branch: &str) -> Result<String> {
-    let out = git_ops::run_git(&[
-        "log",
-        integration_branch,
-        "--first-parent",
-        "--reverse",
-        "--format=%H%x1f%s",
-    ])?;
-
-    for line in out.lines() {
-        let mut parts = line.splitn(2, '\u{1f}');
-        let sha = parts.next().unwrap_or("").trim();
-        let subject = parts.next().unwrap_or("").trim();
-        if subject.starts_with("Mergetopus: partial merge '") {
-            return Ok(sha.to_string());
-        }
-    }
-
-    bail!(
-        "failed to locate initial mergetopus partial-merge commit on integration branch '{}'",
-        integration_branch
-    )
 }

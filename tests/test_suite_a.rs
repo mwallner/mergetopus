@@ -793,3 +793,89 @@ fn positional_source_still_works_for_non_command_name() -> TestResult<()> {
 
     Ok(())
 }
+
+/// Ensures initial partial-merge detection is stable when a non-slice task
+/// branch merge appears between two slice merges on the integration branch.
+#[test]
+fn initial_partial_merge_detection_ignores_task_branch_merge_between_slice_merges() -> TestResult<()>
+{
+    let repo = test_helpers::setup_two_conflicts_repo()?;
+
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        create.status.success(),
+        "initial mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let source_sha = test_helpers::git(&repo, &["rev-parse", "feature"])?;
+
+    // Merge first slice.
+    test_helpers::git(&repo, &["checkout", integration_branch()])?;
+    test_helpers::git(
+        &repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-s",
+            "ours",
+            "-m",
+            "merge resolved slice1",
+            slice_branch(),
+        ],
+    )?;
+
+    // Create and merge a non-slice task branch between the slice merges.
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    test_helpers::git(&repo, &["checkout", "-b", "Task-FeatureX"])?;
+    test_helpers::write_file(&repo, "task.txt", "task branch payload\n")?;
+    test_helpers::commit_all(&repo, "Task-FeatureX change")?;
+
+    test_helpers::git(&repo, &["checkout", integration_branch()])?;
+    test_helpers::git(
+        &repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            "Merge branch 'Task-FeatureX' into integration",
+            "Task-FeatureX",
+        ],
+    )?;
+
+    // Merge second slice after the task branch merge.
+    test_helpers::git(
+        &repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-s",
+            "ours",
+            "-m",
+            "merge resolved slice2",
+            "_mmm/main/feature/slice2",
+        ],
+    )?;
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+
+    // status uses first_mergetopus_partial_merge_commit internally.
+    let status = test_helpers::mergetopus(&repo, &["--quiet", "status", "feature"])?;
+    assert!(
+        status.status.success(),
+        "status command failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(stdout.contains("Source ref: feature"));
+    assert!(stdout.contains(&format!("Source SHA: {source_sha}")));
+    assert!(
+        !stdout.contains("Source ref: (unknown)"),
+        "status must keep source metadata from initial partial merge:\n{stdout}"
+    );
+
+    Ok(())
+}

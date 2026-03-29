@@ -1,8 +1,12 @@
+use anyhow::Context;
+use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 pub fn run(cmd: &mut Command) -> TestResult<Output> {
@@ -25,7 +29,8 @@ pub fn git(repo: &Path, args: &[&str]) -> TestResult<String> {
 }
 
 pub fn mergetopus(repo: &Path, args: &[&str]) -> TestResult<Output> {
-    let bin = env!("CARGO_BIN_EXE_mergetopus");
+    let bin = option_env!("CARGO_BIN_EXE_mergetopus")
+        .ok_or("CARGO_BIN_EXE_mergetopus is not available in this test context")?;
     run(Command::new(bin).args(args).current_dir(repo))
 }
 
@@ -91,7 +96,6 @@ pub fn assert_single_default_worktree(repo: &Path) -> TestResult<()> {
     Ok(())
 }
 
-
 pub fn add_origin_remote_with_feature(repo: &Path) -> TestResult<()> {
     let bare = unique_temp_repo_dir();
     fs::create_dir_all(&bare)?;
@@ -143,7 +147,9 @@ pub fn setup_two_conflicts_repo() -> TestResult<std::path::PathBuf> {
     Ok(repo)
 }
 
-pub fn setup_single_conflict_repo_with_named_source(source_branch: &str) -> TestResult<std::path::PathBuf> {
+pub fn setup_single_conflict_repo_with_named_source(
+    source_branch: &str,
+) -> TestResult<std::path::PathBuf> {
     let repo = init_repo()?;
 
     write_file(&repo, "conflict.txt", "base\n")?;
@@ -160,3 +166,35 @@ pub fn setup_single_conflict_repo_with_named_source(source_branch: &str) -> Test
     Ok(repo)
 }
 
+pub fn cwd_lock() -> &'static Mutex<()> {
+    CWD_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub fn with_repo_cwd<T>(repo: &Path, f: impl FnOnce() -> anyhow::Result<T>) -> TestResult<T> {
+    let _guard = cwd_lock().lock().map_err(|_| "failed to lock cwd mutex")?;
+    let previous = env::current_dir().context("failed to read current working directory")?;
+    env::set_current_dir(repo)
+        .with_context(|| format!("failed to switch to '{}'", repo.display()))?;
+
+    let result = f().map_err(|err| -> Box<dyn std::error::Error> { err.into() });
+    env::set_current_dir(&previous)
+        .with_context(|| format!("failed to restore cwd to '{}'", previous.display()))?;
+    result
+}
+
+pub fn init_repo_with_base_file() -> TestResult<std::path::PathBuf> {
+    let repo = init_repo()?;
+    write_file(&repo, "base.txt", "base\n")?;
+    commit_all(&repo, "base")?;
+    Ok(repo)
+}
+
+pub fn setup_remote_with_feature() -> TestResult<std::path::PathBuf> {
+    let repo = init_repo_with_base_file()?;
+    git(&repo, &["checkout", "-b", "feature"])?;
+    write_file(&repo, "feature.txt", "feature\n")?;
+    commit_all(&repo, "feature commit")?;
+    git(&repo, &["checkout", "main"])?;
+    add_origin_remote_with_feature(&repo)?;
+    Ok(repo)
+}

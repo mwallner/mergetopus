@@ -38,7 +38,7 @@ pub fn status_command(
         return Ok(());
     }
 
-    let initial_commit = git_ops::first_parent_oldest_commit(&integration_branch)?;
+    let initial_commit = git_ops::first_mergetopus_partial_merge_commit(&integration_branch)?;
     let initial_message = git_ops::commit_message(&initial_commit)?;
     let parents = git_ops::commit_parent_shas(&initial_commit)?;
 

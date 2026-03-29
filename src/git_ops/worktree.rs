@@ -270,3 +270,220 @@ pub fn ensure_worktree_for_branch_reset(
 
     Ok(new_path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    mod test_helpers {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/test_helpers.rs"
+        ));
+    }
+
+    type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn parse_worktree_entries_parses_paths_and_branches() {
+        let data = "worktree /tmp/wt1\nHEAD abc\nbranch refs/heads/main\n\nworktree /tmp/wt2\nHEAD def\nbranch refs/heads/feature\n";
+        let entries = parse_worktree_entries(data);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, PathBuf::from("/tmp/wt1"));
+        assert_eq!(entries[0].branch.as_deref(), Some("main"));
+        assert_eq!(entries[1].path, PathBuf::from("/tmp/wt2"));
+        assert_eq!(entries[1].branch.as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn list_worktree_entries_returns_current_repo_entry() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        let entries = test_helpers::with_repo_cwd(&repo, list_worktree_entries)?;
+
+        assert!(!entries.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn has_existing_linked_worktrees_is_true_only_for_more_than_one_entry() {
+        let one = vec![WorktreeEntry {
+            path: PathBuf::from("/tmp/one"),
+            branch: Some("main".to_string()),
+        }];
+        let two = vec![
+            WorktreeEntry {
+                path: PathBuf::from("/tmp/one"),
+                branch: Some("main".to_string()),
+            },
+            WorktreeEntry {
+                path: PathBuf::from("/tmp/two"),
+                branch: Some("feature".to_string()),
+            },
+        ];
+
+        assert!(!has_existing_linked_worktrees(&one));
+        assert!(has_existing_linked_worktrees(&two));
+    }
+
+    #[test]
+    fn find_worktree_for_branch_returns_matching_path() {
+        let entries = vec![
+            WorktreeEntry {
+                path: PathBuf::from("/tmp/one"),
+                branch: Some("main".to_string()),
+            },
+            WorktreeEntry {
+                path: PathBuf::from("/tmp/two"),
+                branch: Some("feature".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            find_worktree_for_branch(&entries, "feature"),
+            Some(PathBuf::from("/tmp/two"))
+        );
+        assert_eq!(find_worktree_for_branch(&entries, "missing"), None);
+    }
+
+    #[test]
+    fn nearest_common_parent_returns_shared_prefix_directory() {
+        let a = Path::new("/tmp/root/a");
+        let b = Path::new("/tmp/root/b");
+        let common = nearest_common_parent(a, b);
+        assert_eq!(common, Some(PathBuf::from("/tmp/root")));
+    }
+
+    #[test]
+    fn normalize_existing_path_keeps_nonexistent_path() {
+        let p = PathBuf::from("/tmp/mergetopus-does-not-exist-xyz");
+        let normalized = normalize_existing_path(&p);
+        assert_eq!(normalized, p);
+    }
+
+    #[test]
+    fn repository_base_dir_matches_repo_root() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        let got = test_helpers::with_repo_cwd(&repo, repository_base_dir)?;
+        assert_eq!(got, repo);
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_worktree_base_dir_is_parent_of_repo_root() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        let expected = repo.parent().ok_or("repo has no parent")?.to_path_buf();
+        let got = test_helpers::with_repo_cwd(&repo, fallback_worktree_base_dir)?;
+        assert_eq!(got, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn infer_worktree_base_dir_prefers_common_parent_of_non_current_entries() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        let base = test_helpers::unique_temp_repo_dir();
+        let wta = base.join("wta");
+        let wtb = base.join("wtb");
+        std::fs::create_dir_all(&wta)?;
+        std::fs::create_dir_all(&wtb)?;
+
+        let entries = vec![
+            WorktreeEntry {
+                path: repo.clone(),
+                branch: Some("main".to_string()),
+            },
+            WorktreeEntry {
+                path: wta,
+                branch: Some("a".to_string()),
+            },
+            WorktreeEntry {
+                path: wtb,
+                branch: Some("b".to_string()),
+            },
+        ];
+
+        let got = test_helpers::with_repo_cwd(&repo, || infer_worktree_base_dir(&entries))?;
+        assert_eq!(got, base);
+        Ok(())
+    }
+
+    #[test]
+    fn branch_to_worktree_leaf_sanitizes_branch_name() {
+        assert_eq!(
+            branch_to_worktree_leaf("feature/refactor auth"),
+            "feature_refactor_auth"
+        );
+        assert_eq!(branch_to_worktree_leaf("***"), "___");
+    }
+
+    #[test]
+    fn pick_new_worktree_path_avoids_known_existing_entry_path() {
+        let base = PathBuf::from("/tmp");
+        let entries = vec![WorktreeEntry {
+            path: base.join("mergetopus-main"),
+            branch: Some("main".to_string()),
+        }];
+
+        let picked = pick_new_worktree_path(&base, "main", &entries);
+        assert_eq!(picked, base.join("mergetopus-main-1"));
+    }
+
+    #[test]
+    fn switch_to_dir_changes_current_directory() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        let child = repo.join("subdir");
+        std::fs::create_dir_all(&child)?;
+
+        let cwd = test_helpers::with_repo_cwd(&repo, || {
+            switch_to_dir(&child)?;
+            Ok(std::env::current_dir()?)
+        })?;
+        assert_eq!(cwd, child);
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_worktree_for_existing_branch_returns_existing_path_without_creation() {
+        let entries = vec![WorktreeEntry {
+            path: PathBuf::from("/tmp/existing"),
+            branch: Some("feature".to_string()),
+        }];
+
+        let got = ensure_worktree_for_existing_branch("feature", &entries)
+            .expect("existing worktree path should be returned");
+        assert_eq!(got, PathBuf::from("/tmp/existing"));
+    }
+
+    #[test]
+    fn ensure_worktree_for_existing_branch_creates_new_worktree_when_missing() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        test_helpers::git(&repo, &["branch", "feature"])?;
+
+        let entries = test_helpers::with_repo_cwd(&repo, list_worktree_entries)?;
+        let path = test_helpers::with_repo_cwd(&repo, || {
+            ensure_worktree_for_existing_branch("feature", &entries)
+        })?;
+
+        let checked_out = test_helpers::git(&path, &["branch", "--show-current"])?;
+        assert_eq!(checked_out, "feature");
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_worktree_for_branch_reset_creates_branch_at_target_commit() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        let at = test_helpers::git(&repo, &["rev-parse", "HEAD"])?;
+        test_helpers::write_file(&repo, "later.txt", "later\n")?;
+        test_helpers::commit_all(&repo, "later")?;
+
+        let entries = test_helpers::with_repo_cwd(&repo, list_worktree_entries)?;
+        let path = test_helpers::with_repo_cwd(&repo, || {
+            ensure_worktree_for_branch_reset("reset-branch", &at, &entries)
+        })?;
+
+        let head = test_helpers::git(&path, &["rev-parse", "HEAD"])?;
+        let branch = test_helpers::git(&path, &["branch", "--show-current"])?;
+        assert_eq!(head, at);
+        assert_eq!(branch, "reset-branch");
+        Ok(())
+    }
+}
