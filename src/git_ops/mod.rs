@@ -82,6 +82,7 @@ fn ensure_longpaths_support() -> Result<()> {
 fn ensure_longpaths_support() -> Result<()> {
     Ok(())
 }
+
 pub fn restore_ours(path: &str) -> Result<()> {
     run_git(&[
         "restore",
@@ -210,10 +211,6 @@ pub fn commit_slice(message: &str, provenance: &PathProvenance) -> Result<()> {
     Ok(())
 }
 
-pub fn merge_base(a: &str, b: &str) -> Result<String> {
-    run_git(&["merge-base", a, b])
-}
-
 pub fn show_file_at(reference: &str, path: &str) -> Result<String> {
     let (ok, out, err) = run_git_allow_failure(&["show", &format!("{reference}:{path}")])?;
     if ok {
@@ -260,57 +257,71 @@ pub fn get_git_config(key: &str) -> Result<Option<String>> {
     }
 }
 
-pub fn refs_pointing_to(commit: &str) -> Result<Vec<String>> {
+fn is_slice_branch_ref(reference: &str) -> bool {
+    let parts = reference.split('/').collect::<Vec<_>>();
+    let Some(idx) = parts.iter().position(|p| *p == "_mmm") else {
+        return false;
+    };
+
+    parts.len().saturating_sub(idx) == 4
+        && !parts[idx + 1].is_empty()
+        && !parts[idx + 2].is_empty()
+        && parts[idx + 3].starts_with("slice")
+        && parts[idx + 3].len() > "slice".len()
+        && parts[idx + 3]["slice".len()..]
+            .chars()
+            .all(|c| c.is_ascii_digit())
+}
+
+/// Return the first Mergetopus partial-merge commit on the integration branch
+/// first-parent history.
+pub fn first_mergetopus_partial_merge_commit(integration_branch: &str) -> Result<String> {
     let out = run_git(&[
-        "for-each-ref",
-        "--format=%(refname:short)",
-        "--points-at",
-        commit,
-        "refs/heads",
-        "refs/remotes",
-    ])?;
-
-    let mut refs = out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    refs.sort();
-    Ok(refs)
-}
-
-/// Return the full commit message of the tip commit on `branch`.
-pub fn branch_tip_commit_message(branch: &str) -> Result<String> {
-    run_git(&["log", "-1", "--format=%B", branch])
-}
-
-pub fn commit_message(rev: &str) -> Result<String> {
-    run_git(&["show", "-s", "--format=%B", rev])
-}
-
-pub fn commit_parent_shas(rev: &str) -> Result<Vec<String>> {
-    let out = run_git(&["show", "-s", "--format=%P", rev])?;
-    Ok(out
-        .split_whitespace()
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
-}
-
-pub fn first_parent_oldest_commit(branch: &str) -> Result<String> {
-    let out = run_git(&[
-        "rev-list",
+        "log",
+        integration_branch,
         "--first-parent",
         "--reverse",
-        "--max-count=1",
-        branch,
+        "--format=%H%x1f%P%x1f%s",
     ])?;
-    let commit = out.trim();
-    if commit.is_empty() {
-        bail!("branch '{}' has no commits", branch);
+
+    for line in out.lines() {
+        let mut parts = line.splitn(3, '\u{1f}');
+        let sha = parts.next().unwrap_or("").trim();
+        let parent_list = parts.next().unwrap_or("").trim();
+        let subject = parts.next().unwrap_or("").trim();
+
+        // First, find the first merge commit on the integration branch that
+        // does not come from a slice branch.
+        let parents = parent_list
+            .split_whitespace()
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>();
+        if parents.len() < 2 {
+            continue;
+        }
+
+        let merged_parent = parents[1];
+        let merged_parent_refs = refs_pointing_to(merged_parent)?;
+        let comes_from_slice = merged_parent_refs.iter().any(|r| is_slice_branch_ref(r));
+        if comes_from_slice {
+            continue;
+        }
+
+        if !subject.starts_with("Mergetopus: partial merge '") {
+            eprintln!(
+                "warning: skipping merge commit '{}' on '{}' because subject does not match expected Mergetopus prefix",
+                sha, integration_branch
+            );
+            continue;
+        }
+
+        return Ok(sha.to_string());
     }
-    Ok(commit.to_string())
+
+    bail!(
+        "failed to locate initial mergetopus partial-merge commit on integration branch '{}'",
+        integration_branch
+    )
 }
 
 /// Return the SHA of the first parent of `rev` (i.e. `rev^`).
@@ -387,4 +398,21 @@ pub fn select_conflicts_by_list(all_conflicts: &[String], csv: &str) -> Result<V
     selected.sort();
     selected.dedup();
     Ok(selected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_slice_branch_ref;
+
+    #[test]
+    fn slice_ref_detection_accepts_local_and_remote() {
+        assert!(is_slice_branch_ref("_mmm/main/feature/slice1"));
+        assert!(is_slice_branch_ref("origin/_mmm/main/feature/slice23"));
+    }
+
+    #[test]
+    fn slice_ref_detection_rejects_non_slice_refs() {
+        assert!(!is_slice_branch_ref("_mmm/main/feature/integration"));
+        assert!(!is_slice_branch_ref("feature"));
+    }
 }

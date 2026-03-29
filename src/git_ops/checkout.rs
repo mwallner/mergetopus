@@ -10,3 +10,83 @@ pub fn checkout(branch: &str) -> Result<()> {
 
     run_git(&["checkout", branch]).map(|_| ())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    mod test_helpers {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/test_helpers.rs"
+        ));
+    }
+
+    type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn checkout_switches_branch_in_standard_single_worktree_repo() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        test_helpers::git(&repo, &["checkout", "-b", "feature"])?;
+        test_helpers::git(&repo, &["checkout", "main"])?;
+
+        test_helpers::with_repo_cwd(&repo, || checkout("feature"))?;
+
+        let current = test_helpers::git(&repo, &["branch", "--show-current"])?;
+        assert_eq!(current, "feature");
+        Ok(())
+    }
+
+    #[test]
+    fn checkout_uses_branch_worktree_when_linked_worktrees_exist() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        test_helpers::git(&repo, &["checkout", "-b", "feature"])?;
+        test_helpers::write_file(&repo, "feature.txt", "feature\n")?;
+        test_helpers::commit_all(&repo, "feature commit")?;
+        test_helpers::git(&repo, &["checkout", "main"])?;
+
+        let helper_path = test_helpers::unique_temp_repo_dir();
+        std::fs::create_dir_all(&helper_path)?;
+        test_helpers::git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "wt_helper",
+                helper_path.to_str().ok_or("invalid helper path")?,
+                "main",
+            ],
+        )?;
+
+        let (cwd_after_checkout, branch_after_checkout) =
+            test_helpers::with_repo_cwd(&repo, || {
+                checkout("feature")?;
+                let cwd = std::env::current_dir()?.display().to_string();
+                let branch = run_git(&["branch", "--show-current"])?;
+                Ok((cwd, branch))
+            })?;
+
+        let wt_out = test_helpers::git(&repo, &["worktree", "list", "--porcelain"])?;
+        let mut feature_worktree_path: Option<String> = None;
+        let mut current_path: Option<String> = None;
+
+        for line in wt_out.lines() {
+            if let Some(rest) = line.strip_prefix("worktree ") {
+                current_path = Some(rest.trim().to_string());
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("branch refs/heads/")
+                && rest.trim() == "feature"
+            {
+                feature_worktree_path = current_path.clone();
+                break;
+            }
+        }
+
+        let expected_path = feature_worktree_path.ok_or("feature worktree path not found")?;
+        assert_eq!(branch_after_checkout, "feature");
+        assert_eq!(cwd_after_checkout, expected_path);
+
+        Ok(())
+    }
+}
