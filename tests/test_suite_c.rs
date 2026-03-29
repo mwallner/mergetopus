@@ -53,6 +53,23 @@ fn worktree_debug_dump(repo: &Path) -> String {
         .unwrap_or_else(|e| format!("<failed to list worktrees: {e}>"))
 }
 
+fn normalize_existing_path(path: &Path) -> PathBuf {
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+    #[cfg(target_os = "windows")]
+    {
+        let canonical_str = canonical.to_string_lossy();
+        if let Some(rest) = canonical_str.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = canonical_str.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+
+    canonical
+}
+
 #[test]
 fn release_c_uses_worktree_mode_only_when_worktrees_already_exist() -> TestResult<()> {
     let repo = setup_single_conflict_repo()?;
@@ -149,11 +166,15 @@ fn release_c_infers_common_base_for_new_worktrees() -> TestResult<()> {
     );
 
     let integration_path = branch_worktree_path(&repo, "_mmm/main/feature/integration")?;
+    let normalized_integration_path = normalize_existing_path(&integration_path);
+    let normalized_inferred_base = normalize_existing_path(&inferred_base);
     assert!(
-        integration_path.starts_with(&inferred_base),
-        "expected integration worktree under inferred common base '{}' but found '{}'\nrepo: {}\nwt_a: {}\nwt_b: {}\nworktrees:\n{}",
+        normalized_integration_path.starts_with(&normalized_inferred_base),
+        "expected integration worktree under inferred common base '{}' but found '{}'\nnormalized inferred base: '{}'\nnormalized integration path: '{}'\nrepo: {}\nwt_a: {}\nwt_b: {}\nworktrees:\n{}",
         inferred_base.display(),
         integration_path.display(),
+        normalized_inferred_base.display(),
+        normalized_integration_path.display(),
         repo.display(),
         wt_a.display(),
         wt_b.display(),
