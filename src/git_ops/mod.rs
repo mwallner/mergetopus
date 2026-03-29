@@ -1,12 +1,26 @@
+use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
-
 use crate::models::PathProvenance;
 
-fn run_git(args: &[&str]) -> Result<String> {
+mod branch;
+mod checkout;
+mod commit;
+mod diff;
+mod merge;
+mod refs;
+mod worktree;
+
+pub use branch::*;
+pub use checkout::*;
+pub use commit::*;
+pub use diff::*;
+pub use merge::*;
+pub use refs::*;
+
+pub fn run_git(args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .output()
@@ -20,7 +34,7 @@ fn run_git(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn run_git_allow_failure(args: &[&str]) -> Result<(bool, String, String)> {
+pub fn run_git_allow_failure(args: &[&str]) -> Result<(bool, String, String)> {
     let output = Command::new("git")
         .args(args)
         .output()
@@ -54,116 +68,6 @@ pub fn ensure_git_worktree() -> Result<()> {
     Ok(())
 }
 
-pub fn current_branch() -> Result<String> {
-    let (ok, out, _) = run_git_allow_failure(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
-    if ok && !out.is_empty() {
-        return Ok(out);
-    }
-
-    let head = head_sha()?;
-    Ok(format!("detached_{}", &head[..8.min(head.len())]))
-}
-
-pub fn head_sha() -> Result<String> {
-    run_git(&["rev-parse", "--verify", "HEAD"])
-}
-
-pub fn resolve_commit(rev: &str) -> Result<String> {
-    run_git(&["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
-        .with_context(|| format!("merge source '{rev}' is not a valid commit-ish ref"))
-}
-
-pub fn resolve_ref(reference: &str) -> Result<String> {
-    run_git(&["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
-        .with_context(|| format!("failed to resolve reference '{reference}' to a commit"))
-}
-
-pub fn branch_exists(branch: &str) -> Result<bool> {
-    let (ok, _, _) = run_git_allow_failure(&[
-        "show-ref",
-        "--verify",
-        "--quiet",
-        &format!("refs/heads/{branch}"),
-    ])?;
-    Ok(ok)
-}
-
-pub fn remote_branch_exists(branch: &str) -> Result<bool> {
-    let (ok, _, _) = run_git_allow_failure(&[
-        "show-ref",
-        "--verify",
-        "--quiet",
-        &format!("refs/remotes/{branch}"),
-    ])?;
-    Ok(ok)
-}
-
-pub fn create_tracking_branch(local_branch: &str, remote_branch: &str) -> Result<()> {
-    run_git(&["branch", "--track", local_branch, remote_branch]).map(|_| ())
-}
-
-pub fn list_branch_refs() -> Result<Vec<String>> {
-    let out = run_git(&[
-        "for-each-ref",
-        "--format=%(refname:short)",
-        "refs/heads",
-        "refs/remotes",
-    ])?;
-    let branches = out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
-        .map(ToOwned::to_owned)
-        .collect();
-    Ok(branches)
-}
-
-pub fn list_local_branches() -> Result<Vec<String>> {
-    let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
-    let mut branches = out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    branches.sort();
-    Ok(branches)
-}
-
-pub fn checkout(branch: &str) -> Result<()> {
-    run_git(&["checkout", branch]).map(|_| ())
-}
-
-pub fn delete_branch(branch: &str) -> Result<()> {
-    run_git(&["branch", "-D", branch]).map(|_| ())
-}
-
-pub fn checkout_new_or_reset(branch: &str, at: &str) -> Result<()> {
-    run_git(&["checkout", "-B", branch, at]).map(|_| ())
-}
-
-pub fn merge_no_commit(source: &str) -> Result<()> {
-    let (ok, _, stderr) = run_git_allow_failure(&["merge", "--no-ff", "--no-commit", source])?;
-    if ok {
-        return Ok(());
-    }
-
-    // Expected conflict path: merge exits non-zero but leaves MERGE_HEAD.
-    if merge_in_progress()? {
-        return Ok(());
-    }
-
-    bail!(
-        "git merge failed before entering conflict resolution: {}\n\
-         verify source/history compatibility, then retry (for unrelated histories, merge manually with --allow-unrelated-histories first)",
-        stderr
-    );
-}
-
-pub fn merge_abort() -> Result<()> {
-    run_git(&["merge", "--abort"]).map(|_| ())
-}
-
 #[cfg(target_os = "windows")]
 fn ensure_longpaths_support() -> Result<()> {
     let current = get_git_config("core.longpaths")?.unwrap_or_default();
@@ -178,17 +82,6 @@ fn ensure_longpaths_support() -> Result<()> {
 fn ensure_longpaths_support() -> Result<()> {
     Ok(())
 }
-
-pub fn conflicted_files() -> Result<Vec<String>> {
-    let out = run_git(&["diff", "--name-only", "--diff-filter=U"])?;
-    Ok(out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
-}
-
 pub fn restore_ours(path: &str) -> Result<()> {
     run_git(&[
         "restore",
@@ -199,44 +92,6 @@ pub fn restore_ours(path: &str) -> Result<()> {
         path,
     ])
     .map(|_| ())
-}
-
-pub fn staged_files() -> Result<Vec<String>> {
-    let out = run_git(&["diff", "--cached", "--name-only"])?;
-    Ok(out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
-}
-
-pub fn unstaged_files() -> Result<Vec<String>> {
-    let out = run_git(&["diff", "--name-only"])?;
-    Ok(out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
-}
-
-pub fn merge_in_progress() -> Result<bool> {
-    let (ok, _, _) = run_git_allow_failure(&["rev-parse", "-q", "--verify", "MERGE_HEAD"])?;
-    Ok(ok)
-}
-
-pub fn merge_head_sha() -> Result<String> {
-    run_git(&["rev-parse", "--verify", "MERGE_HEAD"])
-        .context("failed to resolve MERGE_HEAD for in-progress merge")
-}
-
-pub fn commit(message: &str) -> Result<()> {
-    run_git(&["commit", "--allow-empty", "-m", message]).map(|_| ())
-}
-
-pub fn commit_strict(message: &str) -> Result<()> {
-    run_git(&["commit", "-m", message]).map(|_| ())
 }
 
 pub fn list_slice_branches_for_integration(integration_branch: &str) -> Result<Vec<String>> {
@@ -290,11 +145,6 @@ pub fn restore_from_ref(reference: &str, path: &str) -> Result<()> {
 
 pub fn rm_path(path: &str) -> Result<()> {
     run_git(&["rm", "--ignore-unmatch", "--", path]).map(|_| ())
-}
-
-pub fn staged_has_changes() -> Result<bool> {
-    let (ok, _, _) = run_git_allow_failure(&["diff", "--cached", "--quiet"])?;
-    Ok(!ok)
 }
 
 pub fn path_provenance(source_ref: &str, source_sha: &str, path: &str) -> Result<PathProvenance> {
@@ -379,84 +229,6 @@ pub fn consolidated_branch_name(integration_branch: &str) -> String {
     } else {
         format!("{integration_branch}/kokomeco")
     }
-}
-
-pub fn create_consolidated_merge_commit_branch(
-    integration_branch: &str,
-    source_ref: &str,
-    slice_merge_status: &BTreeMap<String, bool>,
-) -> Result<String> {
-    // Derive remembered head and source commit from the first mergetopus
-    // partial-merge commit on the integration branch, not from the oldest
-    // reachable ancestor in the repository history.
-    let initial_commit = initial_integration_merge_commit(integration_branch)?;
-
-    let remembered_head = run_git(&["rev-parse", "--verify", &format!("{initial_commit}^1")])
-        .context("failed to resolve remembered head from initial integration commit")?;
-    let source_sha = run_git(&["rev-parse", "--verify", &format!("{initial_commit}^2")]).context(
-        "failed to resolve source SHA from initial integration commit (expected a merge commit)",
-    )?;
-
-    let merged_slices = slice_merge_status
-        .iter()
-        .filter(|(_, merged)| **merged)
-        .map(|(name, _)| format!("* {name}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let message = format!(
-        "Mergetopus consolidated merge: '{source_ref}' into '{integration_branch}'\n\nThis commit snapshots the resolved integration tree into one merge commit.\n\nSource-Ref: {source_ref}\nSource-Commit: {source_sha}\nRemembered-Head: {remembered_head}\nMerged-Slices:\n{}",
-        if merged_slices.is_empty() {
-            "* (none)"
-        } else {
-            &merged_slices
-        }
-    );
-
-    let branch = consolidated_branch_name(integration_branch);
-    checkout_new_or_reset(&branch, &remembered_head)?;
-
-    // Start the merge to establish the correct merge parents, then replace the
-    // index/worktree content with the final integration tree before committing.
-    merge_no_commit(&source_sha)?;
-
-    // Replace staged/worktree content with the resolved integration branch content.
-    run_git(&[
-        "restore",
-        &format!("--source={integration_branch}"),
-        "--staged",
-        "--worktree",
-        "--",
-        ".",
-    ])
-    .context("failed to overlay integration branch content onto consolidated branch")?;
-
-    commit(&message)?;
-    Ok(branch)
-}
-
-fn initial_integration_merge_commit(integration_branch: &str) -> Result<String> {
-    let out = run_git(&[
-        "log",
-        integration_branch,
-        "--first-parent",
-        "--reverse",
-        "--format=%H%x1f%s",
-    ])?;
-
-    for line in out.lines() {
-        let mut parts = line.splitn(2, '\u{1f}');
-        let sha = parts.next().unwrap_or("").trim();
-        let subject = parts.next().unwrap_or("").trim();
-        if subject.starts_with("Mergetopus: partial merge '") {
-            return Ok(sha.to_string());
-        }
-    }
-
-    bail!(
-        "failed to locate initial mergetopus partial-merge commit on integration branch '{}'",
-        integration_branch
-    )
 }
 
 pub fn three_way_diff(path: &str, source_ref: &str) -> Result<String> {

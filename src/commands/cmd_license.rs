@@ -44,6 +44,8 @@ fn normalize_license(license: &str) -> String {
     parts.join(" OR ")
 }
 
+/// Prints project and third-party license information in summary, full-text,
+/// or raw JSON form depending on CLI flags.
 pub fn print_license(full: bool, json_output: bool) {
     if json_output {
         println!("{}", JSON_LICENSE_DATA);

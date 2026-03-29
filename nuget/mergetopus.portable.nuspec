@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>mergetopus.portable</id>
-    <version>0.4.0</version>
+    <version>0.5.0</version>
     <title>mergetopus</title>
     <authors>mergetopus contributors</authors>
     <licenseUrl>https://github.com/mwallner/mergetopus/blob/v0.4/LICENSE</licenseUrl>
