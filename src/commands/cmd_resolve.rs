@@ -5,19 +5,17 @@ use crate::helpers;
 use crate::planner;
 use crate::tui;
 
-/// Resolve a slice by merging it into the corresponding integration branch with
-/// `--no-commit`, then invoking the configured merge tool for each conflicted
-/// file one-by-one.
+/// Resolves one slice branch into its integration branch using the configured
+/// git mergetool, stages resolved paths, and optionally creates the merge commit.
 ///
-/// For each conflicted file the function writes three temporary files:
-/// - LOCAL  – the version from the integration branch HEAD before the merge
-/// - BASE   – the merge-base between integration HEAD and the slice tip
-/// - REMOTE – the version from the slice branch tip
-///
-/// It then sets LOCAL / BASE / REMOTE / MERGED as shell environment variables
-/// and executes the command from `git config mergetool.<tool>.cmd`. MERGED
-/// points to the conflicted working-tree file on the integration branch.
-pub(crate) fn resolve_command(
+/// Behavior summary:
+/// - derives the integration branch from the slice name
+/// - reuses an existing in-progress merge when MERGE_HEAD already matches slice
+/// - otherwise checks out the integration branch and runs `git merge --no-commit`
+/// - launches `mergetool.<tool>.cmd` per conflicted path with LOCAL/BASE/REMOTE
+///   temp files and MERGED pointing at the working-tree file
+/// - stages each processed path and, with `do_commit`, commits the merge result
+pub fn resolve_command(
     branch_arg: Option<&str>,
     do_commit: bool,
     quiet: bool,

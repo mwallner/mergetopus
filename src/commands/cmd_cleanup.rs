@@ -4,7 +4,9 @@ use anyhow::{Result, bail};
 use crate::git_ops;
 use crate::planner;
 
-pub(crate) fn cleanup_command(quiet: bool, current_branch: &str, tui_title: &str) -> Result<()> {
+/// Removes resolved Mergetopus integration/slice branches that already have a
+/// corresponding kokomeco branch, after interactive confirmation.
+pub fn cleanup_command(quiet: bool, current_branch: &str, tui_title: &str) -> Result<()> {
     let all_local = git_ops::list_local_branches()?;
 
     let mut branches_to_delete: Vec<String> = Vec::new();

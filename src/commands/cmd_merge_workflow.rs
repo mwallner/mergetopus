@@ -8,55 +8,9 @@ use crate::git_ops;
 use crate::planner;
 use crate::tui;
 
-fn normalize_merge_source_ref(source_ref: &str) -> Result<String> {
-    let trimmed = source_ref.trim_start_matches('/');
-
-    if !git_ops::remote_branch_exists(trimmed)? {
-        return Ok(trimmed.to_string());
-    }
-
-    let Some((remote_name, local_candidate)) = trimmed.split_once('/') else {
-        return Ok(trimmed.to_string());
-    };
-
-    if local_candidate.is_empty() {
-        bail!(
-            "selected source '{}' is a remote ref with no local branch name; choose a concrete branch",
-            source_ref
-        );
-    }
-
-    if git_ops::branch_exists(local_candidate)? {
-        // Local branch exists: check if it's in sync with the remote.
-        let local_sha = git_ops::resolve_ref(local_candidate)?;
-        let remote_sha = git_ops::resolve_ref(trimmed)?;
-
-        if local_sha == remote_sha {
-            // Local is in sync with remote; use it.
-            println!("Using existing local branch '{local_candidate}' (in sync with '{trimmed}').");
-            return Ok(local_candidate.to_string());
-        } else {
-            // Local and remote diverge.
-            bail!(
-                "selected source '{}' maps to local branch '{}' which has diverged from its remote counterpart; \
-                 local is at {} while remote is at {}. Synchronize or use a different branch.",
-                source_ref,
-                local_candidate,
-                &local_sha[..8.min(local_sha.len())],
-                &remote_sha[..8.min(remote_sha.len())]
-            );
-        }
-    }
-
-    git_ops::create_tracking_branch(local_candidate, trimmed)?;
-    println!("Using remote source '{trimmed}' via new local tracking branch '{local_candidate}'");
-    println!(
-        "Tip: remote name '{remote_name}' is omitted for this merge context (source = '{local_candidate}')."
-    );
-
-    Ok(local_candidate.to_string())
-}
-
+/// Runs the primary Mergetopus merge workflow: chooses/normalizes source,
+/// creates or resumes integration context, snapshots auto-merged files, plans
+/// conflict slices, and materializes slice branches for iterative resolution.
 pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) -> Result<()> {
     let selected_source_ref = match args.effective_source() {
         Some(s) => s.to_string(),
@@ -296,6 +250,55 @@ pub fn select_conflicts(
             }
         }
     }
+}
+
+fn normalize_merge_source_ref(source_ref: &str) -> Result<String> {
+    let trimmed = source_ref.trim_start_matches('/');
+
+    if !git_ops::remote_branch_exists(trimmed)? {
+        return Ok(trimmed.to_string());
+    }
+
+    let Some((remote_name, local_candidate)) = trimmed.split_once('/') else {
+        return Ok(trimmed.to_string());
+    };
+
+    if local_candidate.is_empty() {
+        bail!(
+            "selected source '{}' is a remote ref with no local branch name; choose a concrete branch",
+            source_ref
+        );
+    }
+
+    if git_ops::branch_exists(local_candidate)? {
+        // Local branch exists: check if it's in sync with the remote.
+        let local_sha = git_ops::resolve_ref(local_candidate)?;
+        let remote_sha = git_ops::resolve_ref(trimmed)?;
+
+        if local_sha == remote_sha {
+            // Local is in sync with remote; use it.
+            println!("Using existing local branch '{local_candidate}' (in sync with '{trimmed}').");
+            return Ok(local_candidate.to_string());
+        } else {
+            // Local and remote diverge.
+            bail!(
+                "selected source '{}' maps to local branch '{}' which has diverged from its remote counterpart; \
+                 local is at {} while remote is at {}. Synchronize or use a different branch.",
+                source_ref,
+                local_candidate,
+                &local_sha[..8.min(local_sha.len())],
+                &remote_sha[..8.min(remote_sha.len())]
+            );
+        }
+    }
+
+    git_ops::create_tracking_branch(local_candidate, trimmed)?;
+    println!("Using remote source '{trimmed}' via new local tracking branch '{local_candidate}'");
+    println!(
+        "Tip: remote name '{remote_name}' is omitted for this merge context (source = '{local_candidate}')."
+    );
+
+    Ok(local_candidate.to_string())
 }
 
 fn create_consolidated_merge_commit_branch(

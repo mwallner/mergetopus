@@ -1,86 +1,12 @@
+//! suite C integration tests for worktree-oriented behavior:
+//! when worktree mode is engaged and how target worktree locations are inferred.
+
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+mod test_helpers;
+use test_helpers::{git, mergetopus, setup_single_conflict_repo, unique_temp_repo_dir};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
-
-fn unique_temp_repo_dir() -> PathBuf {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("mergetopus-test-worktree-{ts}-{}", std::process::id()))
-}
-
-fn run(cmd: &mut Command) -> TestResult<Output> {
-    let out = cmd.output()?;
-    Ok(out)
-}
-
-fn git(repo: &Path, args: &[&str]) -> TestResult<String> {
-    let out = run(Command::new("git").args(args).current_dir(repo))?;
-    if !out.status.success() {
-        return Err(format!(
-            "git {} failed:\nstdout:\n{}\nstderr:\n{}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        )
-        .into());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-fn mergetopus(repo: &Path, args: &[&str]) -> TestResult<Output> {
-    let bin = env!("CARGO_BIN_EXE_mergetopus");
-    run(Command::new(bin).args(args).current_dir(repo))
-}
-
-fn init_repo() -> TestResult<PathBuf> {
-    let repo = unique_temp_repo_dir();
-    fs::create_dir_all(&repo)?;
-
-    git(&repo, &["init"])?;
-    git(&repo, &["config", "commit.gpgsign", "false"])?;
-    git(&repo, &["config", "user.name", "Mergetopus Tests"])?;
-    git(&repo, &["config", "user.email", "tests@example.com"])?;
-    git(&repo, &["checkout", "-B", "main"])?;
-
-    Ok(repo)
-}
-
-fn write_file(repo: &Path, rel: &str, content: &str) -> TestResult<()> {
-    let path = repo.join(rel);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, content)?;
-    Ok(())
-}
-
-fn commit_all(repo: &Path, message: &str) -> TestResult<()> {
-    git(repo, &["add", "."])?;
-    git(repo, &["commit", "-m", message])?;
-    Ok(())
-}
-
-fn setup_single_conflict_repo() -> TestResult<PathBuf> {
-    let repo = init_repo()?;
-
-    write_file(&repo, "conflict.txt", "base\n")?;
-    commit_all(&repo, "base")?;
-
-    git(&repo, &["checkout", "-b", "feature"])?;
-    write_file(&repo, "conflict.txt", "feature\n")?;
-    commit_all(&repo, "feature change")?;
-
-    git(&repo, &["checkout", "main"])?;
-    write_file(&repo, "conflict.txt", "main\n")?;
-    commit_all(&repo, "main change")?;
-
-    Ok(repo)
-}
 
 fn parse_worktree_branch_map(repo: &Path) -> TestResult<Vec<(PathBuf, Option<String>)>> {
     let out = git(repo, &["worktree", "list", "--porcelain"])?;
@@ -122,6 +48,11 @@ fn branch_worktree_path(repo: &Path, branch: &str) -> TestResult<PathBuf> {
     Ok(path)
 }
 
+fn worktree_debug_dump(repo: &Path) -> String {
+    git(repo, &["worktree", "list", "--porcelain"])
+        .unwrap_or_else(|e| format!("<failed to list worktrees: {e}>"))
+}
+
 #[test]
 fn release_c_uses_worktree_mode_only_when_worktrees_already_exist() -> TestResult<()> {
     let repo = setup_single_conflict_repo()?;
@@ -143,9 +74,12 @@ fn release_c_uses_worktree_mode_only_when_worktrees_already_exist() -> TestResul
     let out = mergetopus(&repo, &["feature", "--quiet"])?;
     assert!(
         out.status.success(),
-        "mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        "mergetopus run failed:\nrepo: {}\nhelper_path: {}\nstdout:\n{}\nstderr:\n{}\nworktrees:\n{}",
+        repo.display(),
+        helper_path.display(),
         String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&out.stderr),
+        worktree_debug_dump(&repo)
     );
 
     let integration_path = branch_worktree_path(&repo, "_mmm/main/feature/integration")?;
@@ -153,11 +87,17 @@ fn release_c_uses_worktree_mode_only_when_worktrees_already_exist() -> TestResul
 
     assert!(
         integration_path != repo,
-        "integration branch should be placed in a dedicated worktree"
+        "integration branch should be placed in a dedicated worktree\nrepo: {}\nintegration_path: {}\nworktrees:\n{}",
+        repo.display(),
+        integration_path.display(),
+        worktree_debug_dump(&repo)
     );
     assert!(
         slice_path != repo,
-        "slice branch should be placed in a dedicated worktree"
+        "slice branch should be placed in a dedicated worktree\nrepo: {}\nslice_path: {}\nworktrees:\n{}",
+        repo.display(),
+        slice_path.display(),
+        worktree_debug_dump(&repo)
     );
 
     Ok(())
@@ -198,17 +138,26 @@ fn release_c_infers_common_base_for_new_worktrees() -> TestResult<()> {
     let out = mergetopus(&repo, &["feature", "--quiet"])?;
     assert!(
         out.status.success(),
-        "mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        "mergetopus run failed:\nrepo: {}\ninferred_base: {}\nwt_a: {}\nwt_b: {}\nstdout:\n{}\nstderr:\n{}\nworktrees:\n{}",
+        repo.display(),
+        inferred_base.display(),
+        wt_a.display(),
+        wt_b.display(),
         String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&out.stderr),
+        worktree_debug_dump(&repo)
     );
 
     let integration_path = branch_worktree_path(&repo, "_mmm/main/feature/integration")?;
     assert!(
         integration_path.starts_with(&inferred_base),
-        "expected integration worktree under inferred common base '{}' but found '{}'",
+        "expected integration worktree under inferred common base '{}' but found '{}'\nrepo: {}\nwt_a: {}\nwt_b: {}\nworktrees:\n{}",
         inferred_base.display(),
-        integration_path.display()
+        integration_path.display(),
+        repo.display(),
+        wt_a.display(),
+        wt_b.display(),
+        worktree_debug_dump(&repo)
     );
 
     Ok(())

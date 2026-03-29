@@ -7,7 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::git_ops;
 use crate::planner;
 
-pub(crate) fn here_command(args: &Args, current_branch: &str, tui_title: &str) -> Result<()> {
+/// Converts an in-progress manual merge into a Mergetopus-managed integration
+/// flow by preserving resolved work, slicing unresolved conflicts, and creating
+/// integration/slice branches for subsequent resolve steps.
+pub fn here_command(args: &Args, current_branch: &str, tui_title: &str) -> Result<()> {
     if !git_ops::merge_in_progress()? {
         bail!("HERE requires an in-progress merge (MERGE_HEAD not found)");
     }

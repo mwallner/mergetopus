@@ -7,7 +7,9 @@ use crate::tui;
 
 use helpers::extract_slice_paths;
 
-pub(crate) fn status_command(
+/// Reports Mergetopus integration progress for a source/integration branch,
+/// including slice merge state and suggested next commands.
+pub fn status_command(
     source_arg: Option<&str>,
     quiet: bool,
     current_branch: &str,
