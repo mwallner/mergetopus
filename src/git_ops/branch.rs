@@ -81,12 +81,7 @@ pub fn checkout_new_or_reset(branch: &str, at: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    mod test_helpers {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/test_helpers.rs"
-        ));
-    }
+    use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 

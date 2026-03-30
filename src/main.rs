@@ -6,6 +6,9 @@ mod models;
 mod planner;
 mod tui;
 
+#[cfg(test)]
+mod test_support;
+
 use anyhow::Result;
 use clap::Parser;
 
