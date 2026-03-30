@@ -130,27 +130,37 @@ fn fallback_worktree_base_dir() -> Result<PathBuf> {
 }
 
 fn infer_worktree_base_dir(entries: &[WorktreeEntry]) -> Result<PathBuf> {
-    let paths = entries
+    let paths: Vec<PathBuf> = entries
         .iter()
         .map(|e| normalize_existing_path(&e.path))
-        .collect::<Vec<_>>();
+        .collect();
 
-    if paths.len() >= 2 {
-        // Prefer two existing linked worktree paths (excluding the current directory) when possible.
+    // The first entry from `git worktree list` is always the primary (main) worktree.
+    // Exclude it from the anchor-pair search so that the inferred base stays stable even
+    // after the CWD moves into a newly-created linked worktree (at which point the primary
+    // worktree becomes a non-current entry and would otherwise be included in the pair,
+    // yielding a wider common parent such as /tmp).
+    let linked = paths.get(1..).unwrap_or_default();
+
+    if linked.len() >= 2 {
         let cwd = normalize_existing_path(
             &env::current_dir().context("failed to read current directory")?,
         );
-        let non_current = paths
-            .iter()
-            .filter(|p| **p != cwd)
-            .cloned()
-            .collect::<Vec<_>>();
+        let non_current: Vec<&PathBuf> = linked.iter().filter(|p| *p != &cwd).collect();
 
-        if non_current.len() >= 2 {
-            if let Some(common) = nearest_common_parent(&non_current[0], &non_current[1]) {
-                return Ok(common);
-            }
-        } else if let Some(common) = nearest_common_parent(&paths[0], &paths[1]) {
+        // Prefer a pair that excludes the current directory; fall back to any two
+        // linked worktrees when there are not enough non-current ones.
+        let (a, b) = if non_current.len() >= 2 {
+            (non_current[0], non_current[1])
+        } else {
+            (&linked[0], &linked[1])
+        };
+        if let Some(common) = nearest_common_parent(a, b) {
+            return Ok(common);
+        }
+    } else if paths.len() == 2 {
+        // Exactly one linked worktree: pair the primary with it to find the common base.
+        if let Some(common) = nearest_common_parent(&paths[0], &paths[1]) {
             return Ok(common);
         }
     }
@@ -274,12 +284,7 @@ pub fn ensure_worktree_for_branch_reset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    mod test_helpers {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/test_helpers.rs"
-        ));
-    }
+    use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -402,7 +407,55 @@ mod tests {
         ];
 
         let got = test_helpers::with_repo_cwd(&repo, || infer_worktree_base_dir(&entries))?;
-        assert_eq!(got, base);
+        // normalize_existing_path canonicalizes 8.3 short names on Windows;
+        // apply the same normalization to `base` so both sides are comparable.
+        assert_eq!(got, normalize_existing_path(&base));
+        Ok(())
+    }
+
+    #[test]
+    fn infer_worktree_base_dir_stays_stable_after_cwd_moves_to_linked_worktree() -> TestResult<()>
+    {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        let base = test_helpers::unique_temp_repo_dir();
+        let wta = base.join("wta");
+        let wtb = base.join("wtb");
+        let integration = base.join("mergetopus-integration");
+        std::fs::create_dir_all(&wta)?;
+        std::fs::create_dir_all(&wtb)?;
+        std::fs::create_dir_all(&integration)?;
+
+        // Simulate the state after the integration worktree has been created and
+        // the CWD has moved into it.  The primary worktree (repo) is now a
+        // non-current entry, so the old algorithm would use (repo, wta) as the
+        // anchor pair and return /tmp instead of `base`.
+        let entries = vec![
+            WorktreeEntry {
+                path: repo.clone(),
+                branch: Some("main".to_string()),
+            },
+            WorktreeEntry {
+                path: wta.clone(),
+                branch: Some("a".to_string()),
+            },
+            WorktreeEntry {
+                path: wtb.clone(),
+                branch: Some("b".to_string()),
+            },
+            WorktreeEntry {
+                path: integration.clone(),
+                branch: Some("integration".to_string()),
+            },
+        ];
+
+        // CWD = integration (the newly-created linked worktree).
+        let got =
+            test_helpers::with_repo_cwd(&integration, || infer_worktree_base_dir(&entries))?;
+        assert_eq!(
+            got,
+            normalize_existing_path(&base),
+            "base dir must remain stable even when CWD is the integration worktree"
+        );
         Ok(())
     }
 

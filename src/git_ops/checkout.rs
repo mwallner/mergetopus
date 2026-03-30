@@ -14,12 +14,7 @@ pub fn checkout(branch: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    mod test_helpers {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/test_helpers.rs"
-        ));
-    }
+    use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -85,7 +80,10 @@ mod tests {
 
         let expected_path = feature_worktree_path.ok_or("feature worktree path not found")?;
         assert_eq!(branch_after_checkout, "feature");
-        assert_eq!(cwd_after_checkout, expected_path);
+        // Normalize path separators: git porcelain uses '/' on Windows while
+        // std::env::current_dir() returns the native '\' separator.
+        let to_forward_slashes = |s: &str| s.replace('\\', "/");
+        assert_eq!(to_forward_slashes(&cwd_after_checkout), to_forward_slashes(&expected_path));
 
         Ok(())
     }
