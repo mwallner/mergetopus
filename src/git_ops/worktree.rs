@@ -407,7 +407,9 @@ mod tests {
         ];
 
         let got = test_helpers::with_repo_cwd(&repo, || infer_worktree_base_dir(&entries))?;
-        assert_eq!(got, base);
+        // normalize_existing_path canonicalizes 8.3 short names on Windows;
+        // apply the same normalization to `base` so both sides are comparable.
+        assert_eq!(got, normalize_existing_path(&base));
         Ok(())
     }
 
@@ -450,7 +452,8 @@ mod tests {
         let got =
             test_helpers::with_repo_cwd(&integration, || infer_worktree_base_dir(&entries))?;
         assert_eq!(
-            got, base,
+            got,
+            normalize_existing_path(&base),
             "base dir must remain stable even when CWD is the integration worktree"
         );
         Ok(())

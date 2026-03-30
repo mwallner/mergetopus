@@ -80,7 +80,10 @@ mod tests {
 
         let expected_path = feature_worktree_path.ok_or("feature worktree path not found")?;
         assert_eq!(branch_after_checkout, "feature");
-        assert_eq!(cwd_after_checkout, expected_path);
+        // Normalize path separators: git porcelain uses '/' on Windows while
+        // std::env::current_dir() returns the native '\' separator.
+        let norm = |s: &str| s.replace('\\', "/");
+        assert_eq!(norm(&cwd_after_checkout), norm(&expected_path));
 
         Ok(())
     }
