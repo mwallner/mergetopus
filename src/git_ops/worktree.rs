@@ -146,7 +146,7 @@ fn infer_worktree_base_dir(entries: &[WorktreeEntry]) -> Result<PathBuf> {
         let cwd = normalize_existing_path(
             &env::current_dir().context("failed to read current directory")?,
         );
-        let non_current: Vec<&PathBuf> = linked.iter().filter(|p| **p != cwd).collect();
+        let non_current: Vec<&PathBuf> = linked.iter().filter(|p| *p != &cwd).collect();
 
         // Prefer a pair that excludes the current directory; fall back to any two
         // linked worktrees when there are not enough non-current ones.
