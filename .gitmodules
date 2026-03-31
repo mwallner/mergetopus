@@ -1,0 +1,3 @@
+[submodule "third_party/make-some-history"]
+	path = third_party/make-some-history
+	url = git@github.com:mwallner/make-some-history.git
