@@ -145,6 +145,23 @@ If the integration branch already exists, `mergetopus`:
 
 Consolidation is non-destructive: it creates a separate branch `_mmm/<safe-current>/<safe-source>/kokomeco` with a single merge commit snapshot.
 
+### Why "kokomeco" Exists
+
+`kokomeco` stands for **KOrrekt KOnsoliderter MErge COmmit** (German: "correctly consolidated merge commit").
+
+The name is intentional: the consolidation step is not a squash and not a history rewrite of the integration branch. Instead, Mergetopus creates a separate merge-commit snapshot branch with merge parents derived from:
+
+- the remembered target-branch head (before the merge workflow started)
+- the original merge source commit
+
+and with the final resolved tree copied from the integration branch.
+
+Why this matters for `git blame`:
+
+- A plain squash-style consolidation would collapse ownership and often attribute many lines to the integrator commit.
+- Kokomeco keeps a proper merge ancestry edge to the original source side, so line-blame can continue to follow where unchanged lines actually came from.
+- Temporary integration/slice execution history can be cleaned up later, while the promoted branch still retains useful provenance in the final merge topology.
+
 ## Installation
 
 ```bash
