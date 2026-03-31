@@ -71,7 +71,10 @@ pub fn status_command(
                 continue;
             }
 
-            let tip_msg = git_ops::branch_tip_commit_message(slice)?;
+            let slice_ref = git_ops::best_ref_for_local_branch(slice)?
+                .unwrap_or_else(|| slice.to_string());
+
+            let tip_msg = git_ops::branch_tip_commit_message(&slice_ref)?;
             let mut paths = extract_slice_paths(&tip_msg);
             let resolve_tip = tip_msg
                 .lines()
@@ -79,7 +82,7 @@ pub fn status_command(
                 .unwrap_or("")
                 .contains("Mergetopus resolve:");
             if paths.is_empty() && resolve_tip {
-                let parent = git_ops::parent_sha(slice)?;
+                let parent = git_ops::parent_sha(&slice_ref)?;
                 let parent_msg = git_ops::commit_message(&parent)?;
                 paths = extract_slice_paths(&parent_msg);
             }

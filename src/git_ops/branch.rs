@@ -1,6 +1,6 @@
 use super::{head_sha, run_git, run_git_allow_failure};
 use crate::git_ops::worktree;
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 pub fn current_branch() -> Result<String> {
     let (ok, out, _) = run_git_allow_failure(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
@@ -34,6 +34,81 @@ pub fn remote_branch_exists(branch: &str) -> Result<bool> {
 
 pub fn create_tracking_branch(local_branch: &str, remote_branch: &str) -> Result<()> {
     run_git(&["branch", "--track", local_branch, remote_branch]).map(|_| ())
+}
+
+pub fn local_branch_name_from_remote_ref(reference: &str) -> Option<String> {
+    let (remote, tail) = reference.split_once('/')?;
+    if remote.is_empty() || tail.is_empty() {
+        return None;
+    }
+    Some(tail.to_string())
+}
+
+pub fn remote_refs_for_local_branch(local_branch: &str) -> Result<Vec<String>> {
+    let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/remotes"])?;
+    let suffix = format!("/{local_branch}");
+    let mut refs = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .filter(|l| l.ends_with(&suffix))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    refs.sort();
+    Ok(refs)
+}
+
+pub fn best_ref_for_local_branch(local_branch: &str) -> Result<Option<String>> {
+    if branch_exists(local_branch)? {
+        return Ok(Some(local_branch.to_string()));
+    }
+
+    let refs = remote_refs_for_local_branch(local_branch)?;
+    if refs.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(origin) = refs.iter().find(|r| r.starts_with("origin/")) {
+        return Ok(Some(origin.clone()));
+    }
+
+    Ok(refs.first().cloned())
+}
+
+pub fn ensure_local_branch_for_operation(branch_or_remote: &str) -> Result<String> {
+    if branch_exists(branch_or_remote)? {
+        return Ok(branch_or_remote.to_string());
+    }
+
+    if remote_branch_exists(branch_or_remote)? {
+        let local = local_branch_name_from_remote_ref(branch_or_remote).ok_or_else(|| {
+            anyhow::anyhow!(
+                "remote ref '{}' cannot be mapped to a local branch name",
+                branch_or_remote
+            )
+        })?;
+
+        if !branch_exists(&local)? {
+            create_tracking_branch(&local, branch_or_remote)?;
+        }
+        return Ok(local);
+    }
+
+    let remote_refs = remote_refs_for_local_branch(branch_or_remote)?;
+    if remote_refs.is_empty() {
+        bail!(
+            "branch '{}' does not exist locally and no matching remote tracking branch was found",
+            branch_or_remote
+        );
+    }
+
+    let selected = remote_refs
+        .iter()
+        .find(|r| r.starts_with("origin/"))
+        .cloned()
+        .unwrap_or_else(|| remote_refs[0].clone());
+    create_tracking_branch(branch_or_remote, &selected)?;
+    Ok(branch_or_remote.to_string())
 }
 
 pub fn list_branch_refs() -> Result<Vec<String>> {
@@ -186,6 +261,29 @@ mod tests {
         let head = test_helpers::git(&repo, &["rev-parse", "HEAD"])?;
         assert_eq!(current, "feature");
         assert_eq!(head, base_sha);
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_local_branch_for_operation_creates_tracking_branch_for_remote_only_slice(
+    ) -> TestResult<()> {
+        let repo = test_helpers::setup_remote_with_feature()?;
+        let slice = "_mmm/main/feature/slice1";
+        let remote_slice = format!("origin/{slice}");
+
+        test_helpers::git(&repo, &["checkout", "-b", slice])?;
+        test_helpers::write_file(&repo, "slice.txt", "slice\n")?;
+        test_helpers::commit_all(&repo, "slice commit")?;
+        test_helpers::git(&repo, &["push", "-u", "origin", slice])?;
+        test_helpers::git(&repo, &["checkout", "main"])?;
+        test_helpers::git(&repo, &["branch", "-D", slice])?;
+
+        let materialized =
+            test_helpers::with_repo_cwd(&repo, || ensure_local_branch_for_operation(&remote_slice))?;
+        assert_eq!(materialized, slice);
+
+        let exists = test_helpers::with_repo_cwd(&repo, || branch_exists(slice))?;
+        assert!(exists);
         Ok(())
     }
 }

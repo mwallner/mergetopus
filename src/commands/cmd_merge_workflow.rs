@@ -84,18 +84,23 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
             }
         }
 
-        let all_merged = !status.is_empty() && status.values().all(|v| *v);
+        let has_slices = !status.is_empty();
+        let all_merged = status.values().all(|v| *v);
         if all_merged {
             let do_consolidate = if args.yes {
                 true
             } else if args.quiet {
                 println!(
-                    "All slice branches are already merged. Skipping kokomeco prompt due to --quiet (use --yes to auto-create the kokomeco branch)."
+                    "No pending slice merges. Skipping kokomeco prompt due to --quiet (use --yes to auto-create the kokomeco branch)."
                 );
                 false
             } else {
                 tui::confirm(
-                    "All slice branches are already merged. Create a non-destructive kokomeco merge commit branch? (Enter/y=yes, n/Esc=no)",
+                    if has_slices {
+                        "All slice branches are already merged. Create a non-destructive kokomeco merge commit branch? (Enter/y=yes, n/Esc=no)"
+                    } else {
+                        "No slice branches were created for this integration branch. Create a non-destructive kokomeco merge commit branch? (Enter/y=yes, n/Esc=no)"
+                    },
                     tui_title,
                 )?
             };

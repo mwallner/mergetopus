@@ -24,7 +24,11 @@ pub fn cleanup_command(quiet: bool, current_branch: &str, tui_title: &str) -> Re
         branches_to_delete.push(branch.clone());
 
         let slices = git_ops::list_slice_branches_for_integration(branch)?;
-        branches_to_delete.extend(slices);
+        for slice in slices {
+            if git_ops::branch_exists(&slice)? {
+                branches_to_delete.push(slice);
+            }
+        }
     }
 
     if branches_to_delete.is_empty() {

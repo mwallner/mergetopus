@@ -21,10 +21,7 @@ pub fn resolve_command(
     quiet: bool,
     tui_title: &str,
 ) -> Result<()> {
-    let slice_branch = if let Some(b) = branch_arg {
-        if !git_ops::branch_exists(b)? {
-            bail!("branch '{}' does not exist", b);
-        }
+    let selected_slice = if let Some(b) = branch_arg {
         b.to_string()
     } else {
         if quiet {
@@ -40,19 +37,21 @@ pub fn resolve_command(
         }
     };
 
-    let integration_branch = planner::integration_from_slice_branch(&slice_branch).ok_or_else(|| {
+    let slice_branch = git_ops::ensure_local_branch_for_operation(&selected_slice)?;
+
+    let derived_integration = planner::integration_from_slice_branch(&slice_branch).ok_or_else(|| {
         anyhow::anyhow!(
             "could not derive integration branch from slice branch '{}' (expected suffix '/slice<N>')",
             slice_branch
         )
     })?;
-    if !git_ops::branch_exists(&integration_branch)? {
-        bail!(
-            "corresponding integration branch '{}' does not exist for slice '{}'",
-            integration_branch,
-            slice_branch
-        );
-    }
+    let integration_branch = git_ops::ensure_local_branch_for_operation(&derived_integration)
+        .with_context(|| {
+            format!(
+                "corresponding integration branch '{}' could not be materialized for slice '{}'",
+                derived_integration, slice_branch
+            )
+        })?;
 
     let slice_commit = git_ops::resolve_commit(&slice_branch)?;
     let merge_in_progress = git_ops::merge_in_progress()?;
