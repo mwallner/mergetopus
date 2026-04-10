@@ -136,10 +136,13 @@ pub fn list_branch_refs() -> Result<Vec<String>> {
         "refs/heads",
         "refs/remotes",
     ])?;
+    let remote_names = list_remote_names()?;
     let branches = out
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .filter(|l| !l.is_empty())
+        // Exclude <remote>/HEAD symbolic refs and bare remote names (not real branches).
+        .filter(|l| !l.ends_with("/HEAD") && !remote_names.iter().any(|r| r.as_str() == *l))
         .map(ToOwned::to_owned)
         .collect();
     Ok(branches)
@@ -252,6 +255,8 @@ mod tests {
         assert!(refs.iter().any(|r| r == "origin/main"));
         assert!(refs.iter().any(|r| r == "origin/feature"));
         assert!(!refs.iter().any(|r| r == "origin/HEAD"));
+        // Bare remote names should be excluded – they are not branches.
+        assert!(!refs.iter().any(|r| r == "origin"));
         Ok(())
     }
 

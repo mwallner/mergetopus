@@ -22,7 +22,10 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
             let remote_names = git_ops::list_remote_names()?;
 
             // Slice branches are resolve targets only; don't allow selecting them as a source.
-            branches.retain(|b| !planner::is_slice_branch(b));
+            // Bare remote names (e.g. "origin") are not branches; exclude them too.
+            branches.retain(|b| {
+                !planner::is_slice_branch(b) && !remote_names.iter().any(|r| r == b)
+            });
 
             match tui::pick_branch(&branches, tui_title, Some(current_branch), &remote_names)? {
                 Some(b) => b,
