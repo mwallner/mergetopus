@@ -84,6 +84,7 @@ fn is_windows_shell_builtin(program: &str) -> bool {
             | "echo"
             | "endlocal"
             | "erase"
+            | "exit"
             | "for"
             | "ftype"
             | "if"
