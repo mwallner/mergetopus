@@ -5,6 +5,96 @@ use crate::helpers;
 use crate::planner;
 use crate::tui;
 
+/// Check whether a file still contains git conflict markers.
+fn has_conflict_markers(path: &str) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let mut has_ours = false;
+    let mut has_separator = false;
+    for line in content.lines() {
+        if line.starts_with("<<<<<<<") {
+            has_ours = true;
+        } else if has_ours && line.starts_with("=======") {
+            has_separator = true;
+        } else if has_separator && line.starts_with(">>>>>>>") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Determine the effective trustExitCode setting for the given merge tool.
+///
+/// Precedence: `mergetool.<tool>.trustExitCode` > `mergetool.trustExitCode`.
+/// Returns `Some(true)` / `Some(false)` when explicitly configured, `None` when unset.
+fn effective_trust_exit_code(tool_name: &str) -> Result<Option<bool>> {
+    if let Some(val) = git_ops::get_git_config(&format!("mergetool.{tool_name}.trustExitCode"))? {
+        return Ok(Some(val == "true"));
+    }
+    if let Some(val) = git_ops::get_git_config("mergetool.trustExitCode")? {
+        return Ok(Some(val == "true"));
+    }
+    Ok(None)
+}
+
+/// Decide whether a resolved file should be staged, based on the mergetool
+/// exit status, conflict marker presence, and `trustExitCode` configuration.
+///
+/// Returns `true` if the file should be staged, `false` to skip.
+fn should_stage_after_mergetool(
+    path: &str,
+    exit_success: bool,
+    trust_exit_code: Option<bool>,
+    quiet: bool,
+    tui_title: &str,
+) -> Result<bool> {
+    match trust_exit_code {
+        Some(true) => {
+            // Explicit trust: rely solely on exit code.
+            if !exit_success {
+                eprintln!(
+                    "warning: merge tool exited with non-zero status for '{path}'; \
+                     skipping staging (trustExitCode is enabled)"
+                );
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        Some(false) => {
+            // Explicit distrust: always stage regardless of exit code.
+            Ok(true)
+        }
+        None => {
+            // Unset — variant C: check exit code AND conflict markers.
+            let markers = has_conflict_markers(path);
+            if exit_success && !markers {
+                return Ok(true);
+            }
+
+            let reason = match (!exit_success, markers) {
+                (true, true) => {
+                    "merge tool exited with non-zero status and conflict markers remain"
+                }
+                (true, false) => "merge tool exited with non-zero status",
+                (false, true) => "conflict markers remain in the file",
+                (false, false) => unreachable!(),
+            };
+
+            if quiet {
+                eprintln!("warning: {reason} for '{path}'; skipping staging in --quiet mode");
+                return Ok(false);
+            }
+
+            let prompt = format!(
+                "File '{path}' may not be fully resolved ({reason}).\n\n\
+                 Stage it anyway?"
+            );
+            tui::confirm(&prompt, tui_title)
+        }
+    }
+}
+
 /// Resolves one slice branch into its integration branch using the configured
 /// git mergetool, stages resolved paths, and optionally creates the merge commit.
 ///
@@ -31,7 +121,7 @@ pub fn resolve_command(
         if all_slices.is_empty() {
             bail!("no slice branches found in this repository");
         }
-        match tui::pick_branch(&all_slices, tui_title)? {
+        match tui::pick_branch(&all_slices, tui_title, None, &[])? {
             Some(b) => b,
             None => bail!("slice branch selection was canceled"),
         }
@@ -96,6 +186,7 @@ pub fn resolve_command(
              git config mergetool.<tool>.cmd '<cmd with $LOCAL $BASE $REMOTE $MERGED>'"
         ),
     };
+    let trust_exit_code = effective_trust_exit_code(&tool_name)?;
     let tool_cmd = match git_ops::get_git_config(&format!("mergetool.{tool_name}.cmd"))? {
         Some(c) => c,
         None => bail!(
@@ -133,6 +224,8 @@ pub fn resolve_command(
     let tmp_dir = std::env::temp_dir().join(format!("mergetopus-{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir)
         .context("failed to create temporary directory for merge tool files")?;
+
+    let mut skipped_paths: Vec<String> = Vec::new();
 
     for path in &conflicted_paths {
         let safe_name = path
@@ -193,15 +286,6 @@ pub fn resolve_command(
                 .with_context(|| format!("failed to launch merge tool '{tool_name}'"))?
         };
 
-        if !status.success() {
-            eprintln!(
-                "warning: merge tool exited with non-zero status for '{path}' \
-                 (exit code: {}); the file has been staged as-is – \
-                 please verify the resolution manually before committing",
-                status.code().unwrap_or(-1)
-            );
-        }
-
         if !cmd_uses_merged {
             let merged_after = std::fs::read(path).ok();
             if merged_after == merged_before {
@@ -215,20 +299,45 @@ pub fn resolve_command(
             }
         }
 
-        git_ops::stage_path(path)?;
+        if should_stage_after_mergetool(path, status.success(), trust_exit_code, quiet, tui_title)?
+        {
+            git_ops::stage_path(path)?;
+        } else {
+            skipped_paths.push(path.clone());
+        }
     }
 
-    let paths_list = conflicted_paths.join(", ");
+    let staged_count = conflicted_paths.len() - skipped_paths.len();
+    let staged_paths: Vec<&String> = conflicted_paths
+        .iter()
+        .filter(|p| !skipped_paths.contains(p))
+        .collect();
+    let paths_list = staged_paths
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
 
     println!(
         "Resolve complete for merge '{}' into '{}'",
         slice_branch, integration_branch
     );
     println!(
-        "  Resolved {} file(s): {}",
-        conflicted_paths.len(),
-        paths_list
+        "  Staged {} file(s): {}",
+        staged_count,
+        if paths_list.is_empty() {
+            "(none)".to_string()
+        } else {
+            paths_list.clone()
+        }
     );
+    if !skipped_paths.is_empty() {
+        println!(
+            "  Skipped {} file(s): {}",
+            skipped_paths.len(),
+            skipped_paths.join(", ")
+        );
+    }
 
     if do_commit {
         if git_ops::staged_has_changes()? || git_ops::merge_in_progress()? {
@@ -246,4 +355,73 @@ pub fn resolve_command(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_temp_file(content: &str) -> String {
+        let dir =
+            std::env::temp_dir().join(format!("mergetopus-test-resolve-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir
+            .join(format!(
+                "test-{}.txt",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn conflict_markers_detected_in_standard_conflict() {
+        let path =
+            write_temp_file("before\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\nafter\n");
+        assert!(has_conflict_markers(&path));
+    }
+
+    #[test]
+    fn no_conflict_markers_in_clean_file() {
+        let path = write_temp_file("just some\nclean content\n");
+        assert!(!has_conflict_markers(&path));
+    }
+
+    #[test]
+    fn partial_markers_not_detected_as_conflict() {
+        // Only opening marker, no separator or closing
+        let path = write_temp_file("<<<<<<< HEAD\nsome text\n");
+        assert!(!has_conflict_markers(&path));
+    }
+
+    #[test]
+    fn opening_and_separator_without_closing_not_detected() {
+        let path = write_temp_file("<<<<<<< HEAD\nours\n=======\ntheirs\n");
+        assert!(!has_conflict_markers(&path));
+    }
+
+    #[test]
+    fn markers_must_appear_in_order() {
+        // Closing before opening — should not match
+        let path = write_temp_file(">>>>>>> branch\n=======\n<<<<<<< HEAD\n");
+        assert!(!has_conflict_markers(&path));
+    }
+
+    #[test]
+    fn nonexistent_file_has_no_markers() {
+        assert!(!has_conflict_markers("/nonexistent/path/to/file.txt"));
+    }
+
+    #[test]
+    fn multiple_conflict_blocks_detected() {
+        let path = write_temp_file(
+            "<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\nok\n<<<<<<< HEAD\nc\n=======\nd\n>>>>>>> y\n",
+        );
+        assert!(has_conflict_markers(&path));
+    }
 }

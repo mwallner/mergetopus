@@ -19,11 +19,12 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
                 bail!("--quiet requires SOURCE to be provided explicitly");
             }
             let mut branches = git_ops::list_branch_refs()?;
+            let remote_names = git_ops::list_remote_names()?;
 
             // Slice branches are resolve targets only; don't allow selecting them as a source.
             branches.retain(|b| !planner::is_slice_branch(b));
 
-            match tui::pick_branch(&branches, tui_title)? {
+            match tui::pick_branch(&branches, tui_title, Some(current_branch), &remote_names)? {
                 Some(b) => b,
                 None => bail!("merge source selection was canceled"),
             }

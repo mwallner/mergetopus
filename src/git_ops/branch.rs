@@ -1,5 +1,5 @@
 use super::{head_sha, run_git, run_git_allow_failure};
-use crate::git_ops::worktree;
+use crate::git_ops::{refs, worktree};
 use anyhow::{Result, bail};
 
 pub fn current_branch() -> Result<String> {
@@ -88,9 +88,27 @@ pub fn ensure_local_branch_for_operation(branch_or_remote: &str) -> Result<Strin
             )
         })?;
 
-        if !branch_exists(&local)? {
-            create_tracking_branch(&local, branch_or_remote)?;
+        if branch_exists(&local)? {
+            let local_sha = refs::resolve_ref(&local)?;
+            let remote_sha = refs::resolve_ref(branch_or_remote)?;
+
+            if local_sha == remote_sha {
+                return Ok(local);
+            }
+
+            bail!(
+                "remote branch '{}' maps to local branch '{}' which is not up to date \
+                 (local: {}, remote: {}); pull the latest changes first:\n  \
+                 git checkout {} && git pull",
+                branch_or_remote,
+                local,
+                &local_sha[..8.min(local_sha.len())],
+                &remote_sha[..8.min(remote_sha.len())],
+                local,
+            );
         }
+
+        create_tracking_branch(&local, branch_or_remote)?;
         return Ok(local);
     }
 
@@ -137,6 +155,20 @@ pub fn list_local_branches() -> Result<Vec<String>> {
         .collect::<Vec<_>>();
     branches.sort();
     Ok(branches)
+}
+
+pub fn list_remote_names() -> Result<Vec<String>> {
+    let out = run_git_allow_failure(&["remote"])?;
+    if !out.0 {
+        return Ok(Vec::new());
+    }
+    Ok(out
+        .1
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 pub fn delete_branch(branch: &str) -> Result<()> {
@@ -265,8 +297,8 @@ mod tests {
     }
 
     #[test]
-    fn ensure_local_branch_for_operation_creates_tracking_branch_for_remote_only_slice(
-    ) -> TestResult<()> {
+    fn ensure_local_branch_for_operation_creates_tracking_branch_for_remote_only_slice()
+    -> TestResult<()> {
         let repo = test_helpers::setup_remote_with_feature()?;
         let slice = "_mmm/main/feature/slice1";
         let remote_slice = format!("origin/{slice}");
@@ -278,8 +310,9 @@ mod tests {
         test_helpers::git(&repo, &["checkout", "main"])?;
         test_helpers::git(&repo, &["branch", "-D", slice])?;
 
-        let materialized =
-            test_helpers::with_repo_cwd(&repo, || ensure_local_branch_for_operation(&remote_slice))?;
+        let materialized = test_helpers::with_repo_cwd(&repo, || {
+            ensure_local_branch_for_operation(&remote_slice)
+        })?;
         assert_eq!(materialized, slice);
 
         let exists = test_helpers::with_repo_cwd(&repo, || branch_exists(slice))?;

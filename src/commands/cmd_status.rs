@@ -22,16 +22,57 @@ pub fn status_command(
     // branch, show the merge suggestion instead of the raw integration status.
     let kokomeco = git_ops::consolidated_branch_name(&integration_branch);
     if git_ops::branch_exists(&kokomeco)? {
+        // Determine the intended target branch from the integration branch name.
+        let expected_target =
+            planner::parse_integration_branch(&integration_branch).map(|(target, _)| target);
+
+        let target_mismatch = expected_target
+            .as_ref()
+            .is_some_and(|target| target != current_branch);
+
+        if target_mismatch {
+            let target = expected_target.as_ref().unwrap();
+            if quiet {
+                eprintln!(
+                    "Warning: current branch '{}' does not match the integration target '{}'.",
+                    current_branch, target
+                );
+            } else {
+                let prompt = format!(
+                    "Current branch '{}' does not match the integration target '{}'.\n\n\
+                     The kokomeco branch should be merged into '{}', not '{}'.\n\n\
+                     Continue showing status?",
+                    current_branch, target, target, current_branch
+                );
+                if !tui::confirm(&prompt, tui_title)? {
+                    bail!("aborted: switch to '{}' before merging kokomeco", target);
+                }
+            }
+        }
+
+        let merge_target = expected_target.as_deref().unwrap_or(current_branch);
+
         println!("Mergetopus status");
         println!("  Integration branch:  {integration_branch}");
         println!("  Consolidated branch: {kokomeco}");
         println!();
+        if target_mismatch {
+            println!(
+                "  ⚠ Current branch '{}' is NOT the integration target '{}'.",
+                current_branch, merge_target
+            );
+            println!();
+        }
         println!(
-            "All slices are resolved. The kokomeco branch is ready to merge into '{current_branch}'."
+            "All slices are resolved. The kokomeco branch is ready to merge into '{merge_target}'."
         );
         println!();
         println!("Suggested next command:");
-        println!("  git merge {kokomeco}");
+        if target_mismatch {
+            println!("  git checkout {merge_target} && git merge {kokomeco}");
+        } else {
+            println!("  git merge {kokomeco}");
+        }
         println!();
         println!("To clean up slice and integration branches afterward:");
         println!("  mergetopus cleanup");
@@ -71,8 +112,8 @@ pub fn status_command(
                 continue;
             }
 
-            let slice_ref = git_ops::best_ref_for_local_branch(slice)?
-                .unwrap_or_else(|| slice.to_string());
+            let slice_ref =
+                git_ops::best_ref_for_local_branch(slice)?.unwrap_or_else(|| slice.to_string());
 
             let tip_msg = git_ops::branch_tip_commit_message(&slice_ref)?;
             let mut paths = extract_slice_paths(&tip_msg);
@@ -192,7 +233,7 @@ fn resolve_status_integration_branch(
                     "multiple integration branches found; provide SOURCE explicitly in --quiet mode"
                 );
             }
-            match tui::pick_branch(&candidates, tui_title)? {
+            match tui::pick_branch(&candidates, tui_title, Some(current_branch), &[])? {
                 Some(b) => Ok(b),
                 None => bail!("status branch selection was canceled"),
             }

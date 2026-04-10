@@ -40,7 +40,20 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub fn pick_branch(branches: &[String], title: &str) -> Result<Option<String>> {
+pub fn pick_branch(
+    branches: &[String],
+    title: &str,
+    current_branch: Option<&str>,
+    remote_names: &[String],
+) -> Result<Option<String>> {
+    let is_remote = |b: &str| -> bool {
+        remote_names.iter().any(|r| {
+            b.len() > r.len()
+                && b.starts_with(r.as_str())
+                && b.as_bytes().get(r.len()) == Some(&b'/')
+        })
+    };
+
     let mut guard = TerminalGuard::new(title)?;
 
     let mut filter = String::new();
@@ -56,6 +69,35 @@ pub fn pick_branch(branches: &[String], title: &str) -> Result<Option<String>> {
         if cursor >= filtered.len() {
             cursor = filtered.len().saturating_sub(1);
         }
+
+        // Build display items, inserting a separator at the local → remote boundary.
+        let mut items: Vec<ListItem> = Vec::new();
+        let mut branch_to_display: Vec<usize> = Vec::new();
+        let mut has_local = false;
+        let mut separator_inserted = false;
+
+        for b in &filtered {
+            if is_remote(b) && !separator_inserted && has_local {
+                items.push(ListItem::new(Line::from(Span::styled(
+                    "── Remote ──",
+                    Style::default().fg(Color::DarkGray),
+                ))));
+                separator_inserted = true;
+            }
+            if !is_remote(b) {
+                has_local = true;
+            }
+
+            branch_to_display.push(items.len());
+            let is_current = current_branch.is_some_and(|cb| cb == b.as_str());
+            if is_current {
+                items.push(ListItem::new(format!("> {b}")));
+            } else {
+                items.push(ListItem::new(format!("  {b}")));
+            }
+        }
+
+        let display_cursor = branch_to_display.get(cursor).copied().unwrap_or(0);
 
         guard.terminal.draw(|f| {
             let size = f.area();
@@ -78,10 +120,6 @@ pub fn pick_branch(branches: &[String], title: &str) -> Result<Option<String>> {
                 .block(Block::default().borders(Borders::ALL));
             f.render_widget(filter_line, chunks[0]);
 
-            let items = filtered
-                .iter()
-                .map(|b| ListItem::new(b.as_str()))
-                .collect::<Vec<_>>();
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).title("Branches"))
                 .highlight_style(
@@ -93,7 +131,7 @@ pub fn pick_branch(branches: &[String], title: &str) -> Result<Option<String>> {
 
             let mut state = ListState::default();
             if !filtered.is_empty() {
-                state.select(Some(cursor));
+                state.select(Some(display_cursor));
             }
             f.render_stateful_widget(list, chunks[1], &mut state);
 
