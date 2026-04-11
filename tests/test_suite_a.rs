@@ -919,7 +919,7 @@ fn configure_noop_tool(repo: &std::path::Path, exit_code: i32) -> TestResult<()>
 fn configure_marker_tool(repo: &std::path::Path) -> TestResult<()> {
     test_helpers::git(repo, &["config", "merge.tool", "testmerge"])?;
     #[cfg(target_os = "windows")]
-    let cmd = r#"(echo ^^^^^^^ HEAD & echo ours & echo ======= & echo theirs & echo ^^^^^^^ branch) > "%MERGED%""#;
+    let cmd = r#"(echo ^<^<^<^<^<^<^< HEAD & echo ours & echo ======= & echo theirs & echo ^>^>^>^>^>^>^> branch) > "%MERGED%""#;
     #[cfg(not(target_os = "windows"))]
     let cmd =
         r#"printf '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n' > "$MERGED""#;
