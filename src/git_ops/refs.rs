@@ -35,15 +35,10 @@ pub fn refs_pointing_to(commit: &str) -> Result<Vec<String>> {
     Ok(refs)
 }
 
-/// Return the SHA of the first parent of `rev` (i.e. `rev^`).
-pub fn parent_sha(rev: &str) -> Result<String> {
-    run_git(&["rev-parse", "--verify", &format!("{rev}^")])
-        .with_context(|| format!("failed to resolve parent of '{rev}'"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git_ops::parent_sha;
     use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;

@@ -84,6 +84,7 @@ fn is_windows_shell_builtin(program: &str) -> bool {
             | "echo"
             | "endlocal"
             | "erase"
+            | "exit"
             | "for"
             | "ftype"
             | "if"
@@ -132,17 +133,39 @@ pub fn run_windows_merge_tool(
             if err.kind() == std::io::ErrorKind::NotFound
                 && needs_windows_shell(expanded_cmd, &program) =>
         {
-            std::process::Command::new("cmd")
-                .args(["/d", "/s", "/c", expanded_cmd])
-                .status()
-                .with_context(|| {
-                    format!("failed to launch merge tool '{tool_name}' via Windows shell fallback")
-                })
+            cmd_shell_execute(tool_name, expanded_cmd)
         }
         Err(err) => Err(err).with_context(|| {
             format!("failed to launch merge tool '{tool_name}' (program: '{program}')")
         }),
     }
+}
+
+/// Run a command through `cmd /d /s /c` on Windows.
+///
+/// Uses `raw_arg` to pass the command string without Rust's MSVC-style quote
+/// escaping, which would otherwise turn `"path"` into `\"path\"` and garble
+/// paths for cmd.exe (cmd treats `\` as a literal, not an escape character).
+#[cfg(target_os = "windows")]
+fn cmd_shell_execute(tool_name: &str, expanded_cmd: &str) -> Result<std::process::ExitStatus> {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("cmd")
+        .args(["/d", "/s", "/c"])
+        .raw_arg(expanded_cmd)
+        .status()
+        .with_context(|| {
+            format!("failed to launch merge tool '{tool_name}' via Windows shell fallback")
+        })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cmd_shell_execute(tool_name: &str, expanded_cmd: &str) -> Result<std::process::ExitStatus> {
+    std::process::Command::new("cmd")
+        .args(["/d", "/s", "/c", expanded_cmd])
+        .status()
+        .with_context(|| {
+            format!("failed to launch merge tool '{tool_name}' via Windows shell fallback")
+        })
 }
 
 #[cfg(test)]

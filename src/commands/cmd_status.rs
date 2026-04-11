@@ -21,17 +21,60 @@ pub fn status_command(
     // If a kokomeco consolidated branch already exists for this integration
     // branch, show the merge suggestion instead of the raw integration status.
     let kokomeco = git_ops::consolidated_branch_name(&integration_branch);
-    if git_ops::branch_exists(&kokomeco)? {
+    if git_ops::branch_exists_anywhere(&kokomeco)? {
+        // Determine the intended target branch from the integration branch name.
+        let expected_target =
+            planner::parse_integration_branch(&integration_branch).map(|(target, _)| target);
+
+        let target_mismatch = expected_target
+            .as_ref()
+            .is_some_and(|target| target != current_branch);
+
+        if target_mismatch {
+            let target = expected_target.as_ref().unwrap();
+            if quiet {
+                eprintln!(
+                    "Warning: current branch '{}' does not match the integration target '{}'.",
+                    current_branch, target
+                );
+            } else {
+                let prompt = format!(
+                    "Current branch '{}' does not match the integration target '{}'.\n\n\
+                     The kokomeco branch should be merged into '{}', not '{}'.\n\n\
+                     Continue showing status?",
+                    current_branch, target, target, current_branch
+                );
+                if !tui::confirm(&prompt, tui_title)? {
+                    bail!("aborted: switch to '{}' before merging kokomeco", target);
+                }
+            }
+        }
+
+        let merge_target = expected_target.as_deref().unwrap_or(current_branch);
+        let kokomeco_ref = git_ops::best_ref_for_local_branch(&kokomeco)?
+            .unwrap_or_else(|| kokomeco.clone());
+
         println!("Mergetopus status");
         println!("  Integration branch:  {integration_branch}");
         println!("  Consolidated branch: {kokomeco}");
         println!();
+        if target_mismatch {
+            println!(
+                "  ⚠ Current branch '{}' is NOT the integration target '{}'.",
+                current_branch, merge_target
+            );
+            println!();
+        }
         println!(
-            "All slices are resolved. The kokomeco branch is ready to merge into '{current_branch}'."
+            "All slices are resolved. The kokomeco branch is ready to merge into '{merge_target}'."
         );
         println!();
         println!("Suggested next command:");
-        println!("  git merge {kokomeco}");
+        if target_mismatch {
+            println!("  git checkout {merge_target} && git merge {kokomeco_ref}");
+        } else {
+            println!("  git merge {kokomeco_ref}");
+        }
         println!();
         println!("To clean up slice and integration branches afterward:");
         println!("  mergetopus cleanup");
@@ -71,7 +114,10 @@ pub fn status_command(
                 continue;
             }
 
-            let tip_msg = git_ops::branch_tip_commit_message(slice)?;
+            let slice_ref =
+                git_ops::best_ref_for_local_branch(slice)?.unwrap_or_else(|| slice.to_string());
+
+            let tip_msg = git_ops::branch_tip_commit_message(&slice_ref)?;
             let mut paths = extract_slice_paths(&tip_msg);
             let resolve_tip = tip_msg
                 .lines()
@@ -79,7 +125,7 @@ pub fn status_command(
                 .unwrap_or("")
                 .contains("Mergetopus resolve:");
             if paths.is_empty() && resolve_tip {
-                let parent = git_ops::parent_sha(slice)?;
+                let parent = git_ops::parent_sha(&slice_ref)?;
                 let parent_msg = git_ops::commit_message(&parent)?;
                 paths = extract_slice_paths(&parent_msg);
             }
@@ -156,12 +202,16 @@ fn resolve_status_integration_branch(
             planner::integration_branch_name(current_branch, source)
         };
 
-        if !git_ops::branch_exists(&target)? {
+        if !git_ops::branch_exists_anywhere(&target)? {
             bail!(
                 "could not find integration branch '{}'; provide an existing integration branch or source ref",
                 target
             );
         }
+
+        // Materialize a local tracking branch when the integration branch only
+        // exists on a remote so that subsequent git operations work.
+        let target = git_ops::ensure_local_branch_for_operation(&target)?;
 
         return Ok(target);
     }
@@ -171,26 +221,40 @@ fn resolve_status_integration_branch(
     }
 
     let prefix = planner::integration_branch_family_prefix(current_branch);
-    let mut candidates = git_ops::list_local_branches()?
+    // Search both local and remote branches so a second workstation that only
+    // has remote-tracking refs can still discover integration branches.
+    let mut candidates: Vec<String> = git_ops::list_branch_refs()?
         .into_iter()
+        .map(|r| {
+            git_ops::local_branch_name_from_remote_ref(&r).unwrap_or(r)
+        })
         .filter(|b| b.starts_with(&prefix))
         .filter(|b| planner::parse_integration_branch(b).is_some())
-        .collect::<Vec<_>>();
+        .collect();
+    candidates.sort();
+    candidates.dedup();
 
     match candidates.len() {
         0 => bail!(
             "no integration branches found for current branch '{}'; provide SOURCE explicitly, e.g. 'mergetopus status <source>'",
             current_branch
         ),
-        1 => Ok(candidates.remove(0)),
+        1 => {
+            let branch = candidates.remove(0);
+            let branch = git_ops::ensure_local_branch_for_operation(&branch)?;
+            Ok(branch)
+        }
         _ => {
             if quiet {
                 bail!(
                     "multiple integration branches found; provide SOURCE explicitly in --quiet mode"
                 );
             }
-            match tui::pick_branch(&candidates, tui_title)? {
-                Some(b) => Ok(b),
+            match tui::pick_branch(&candidates, tui_title, Some(current_branch), &[])? {
+                Some(b) => {
+                    let b = git_ops::ensure_local_branch_for_operation(&b)?;
+                    Ok(b)
+                }
                 None => bail!("status branch selection was canceled"),
             }
         }

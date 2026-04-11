@@ -4,7 +4,7 @@ mod cmd_cleanup;
 mod cmd_here;
 mod cmd_license;
 mod cmd_resolve;
-mod cmd_status;
+pub(crate) mod cmd_status;
 mod cmd_merge_workflow;
 
 use crate::cli::{Args, Commands};

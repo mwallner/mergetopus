@@ -1,6 +1,6 @@
 use super::{head_sha, run_git, run_git_allow_failure};
-use crate::git_ops::worktree;
-use anyhow::Result;
+use crate::git_ops::{refs, worktree};
+use anyhow::{Result, bail};
 
 pub fn current_branch() -> Result<String> {
     let (ok, out, _) = run_git_allow_failure(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
@@ -32,8 +32,111 @@ pub fn remote_branch_exists(branch: &str) -> Result<bool> {
     Ok(ok)
 }
 
+/// Check if a branch exists either locally or as a remote tracking branch
+/// (e.g. `origin/<branch>`).
+pub fn branch_exists_anywhere(branch: &str) -> Result<bool> {
+    if branch_exists(branch)? {
+        return Ok(true);
+    }
+    let refs = remote_refs_for_local_branch(branch)?;
+    Ok(!refs.is_empty())
+}
+
 pub fn create_tracking_branch(local_branch: &str, remote_branch: &str) -> Result<()> {
     run_git(&["branch", "--track", local_branch, remote_branch]).map(|_| ())
+}
+
+pub fn local_branch_name_from_remote_ref(reference: &str) -> Option<String> {
+    let (remote, tail) = reference.split_once('/')?;
+    if remote.is_empty() || tail.is_empty() {
+        return None;
+    }
+    Some(tail.to_string())
+}
+
+pub fn remote_refs_for_local_branch(local_branch: &str) -> Result<Vec<String>> {
+    let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/remotes"])?;
+    let suffix = format!("/{local_branch}");
+    let mut refs = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .filter(|l| l.ends_with(&suffix))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    refs.sort();
+    Ok(refs)
+}
+
+pub fn best_ref_for_local_branch(local_branch: &str) -> Result<Option<String>> {
+    if branch_exists(local_branch)? {
+        return Ok(Some(local_branch.to_string()));
+    }
+
+    let refs = remote_refs_for_local_branch(local_branch)?;
+    if refs.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(origin) = refs.iter().find(|r| r.starts_with("origin/")) {
+        return Ok(Some(origin.clone()));
+    }
+
+    Ok(refs.first().cloned())
+}
+
+pub fn ensure_local_branch_for_operation(branch_or_remote: &str) -> Result<String> {
+    if branch_exists(branch_or_remote)? {
+        return Ok(branch_or_remote.to_string());
+    }
+
+    if remote_branch_exists(branch_or_remote)? {
+        let local = local_branch_name_from_remote_ref(branch_or_remote).ok_or_else(|| {
+            anyhow::anyhow!(
+                "remote ref '{}' cannot be mapped to a local branch name",
+                branch_or_remote
+            )
+        })?;
+
+        if branch_exists(&local)? {
+            let local_sha = refs::resolve_ref(&local)?;
+            let remote_sha = refs::resolve_ref(branch_or_remote)?;
+
+            if local_sha == remote_sha {
+                return Ok(local);
+            }
+
+            bail!(
+                "remote branch '{}' maps to local branch '{}' which is not up to date \
+                 (local: {}, remote: {}); pull the latest changes first:\n  \
+                 git checkout {} && git pull",
+                branch_or_remote,
+                local,
+                &local_sha[..8.min(local_sha.len())],
+                &remote_sha[..8.min(remote_sha.len())],
+                local,
+            );
+        }
+
+        create_tracking_branch(&local, branch_or_remote)?;
+        return Ok(local);
+    }
+
+    let remote_refs = remote_refs_for_local_branch(branch_or_remote)?;
+    if remote_refs.is_empty() {
+        bail!(
+            "branch '{}' does not exist locally and no matching remote tracking branch was found",
+            branch_or_remote
+        );
+    }
+
+    let selected = remote_refs
+        .iter()
+        .find(|r| r.starts_with("origin/"))
+        .cloned()
+        .unwrap_or_else(|| remote_refs[0].clone());
+    create_tracking_branch(branch_or_remote, &selected)?;
+    Ok(branch_or_remote.to_string())
 }
 
 pub fn list_branch_refs() -> Result<Vec<String>> {
@@ -43,10 +146,13 @@ pub fn list_branch_refs() -> Result<Vec<String>> {
         "refs/heads",
         "refs/remotes",
     ])?;
+    let remote_names = list_remote_names()?;
     let branches = out
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .filter(|l| !l.is_empty())
+        // Exclude <remote>/HEAD symbolic refs and bare remote names (not real branches).
+        .filter(|l| !l.ends_with("/HEAD") && !remote_names.iter().any(|r| r.as_str() == *l))
         .map(ToOwned::to_owned)
         .collect();
     Ok(branches)
@@ -62,6 +168,20 @@ pub fn list_local_branches() -> Result<Vec<String>> {
         .collect::<Vec<_>>();
     branches.sort();
     Ok(branches)
+}
+
+pub fn list_remote_names() -> Result<Vec<String>> {
+    let out = run_git_allow_failure(&["remote"])?;
+    if !out.0 {
+        return Ok(Vec::new());
+    }
+    Ok(out
+        .1
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 pub fn delete_branch(branch: &str) -> Result<()> {
@@ -145,6 +265,8 @@ mod tests {
         assert!(refs.iter().any(|r| r == "origin/main"));
         assert!(refs.iter().any(|r| r == "origin/feature"));
         assert!(!refs.iter().any(|r| r == "origin/HEAD"));
+        // Bare remote names should be excluded – they are not branches.
+        assert!(!refs.iter().any(|r| r == "origin"));
         Ok(())
     }
 
@@ -186,6 +308,63 @@ mod tests {
         let head = test_helpers::git(&repo, &["rev-parse", "HEAD"])?;
         assert_eq!(current, "feature");
         assert_eq!(head, base_sha);
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_local_branch_for_operation_creates_tracking_branch_for_remote_only_slice()
+    -> TestResult<()> {
+        let repo = test_helpers::setup_remote_with_feature()?;
+        let slice = "_mmm/main/feature/slice1";
+        let remote_slice = format!("origin/{slice}");
+
+        test_helpers::git(&repo, &["checkout", "-b", slice])?;
+        test_helpers::write_file(&repo, "slice.txt", "slice\n")?;
+        test_helpers::commit_all(&repo, "slice commit")?;
+        test_helpers::git(&repo, &["push", "-u", "origin", slice])?;
+        test_helpers::git(&repo, &["checkout", "main"])?;
+        test_helpers::git(&repo, &["branch", "-D", slice])?;
+
+        let materialized = test_helpers::with_repo_cwd(&repo, || {
+            ensure_local_branch_for_operation(&remote_slice)
+        })?;
+        assert_eq!(materialized, slice);
+
+        let exists = test_helpers::with_repo_cwd(&repo, || branch_exists(slice))?;
+        assert!(exists);
+        Ok(())
+    }
+
+    #[test]
+    fn branch_exists_anywhere_finds_remote_only_branch() -> TestResult<()> {
+        let repo = test_helpers::setup_remote_with_feature()?;
+        let branch = "_mmm/main/feature/integration";
+
+        test_helpers::git(&repo, &["checkout", "-b", branch])?;
+        test_helpers::write_file(&repo, "int.txt", "int\n")?;
+        test_helpers::commit_all(&repo, "integration commit")?;
+        test_helpers::git(&repo, &["push", "-u", "origin", branch])?;
+        test_helpers::git(&repo, &["checkout", "main"])?;
+        test_helpers::git(&repo, &["branch", "-D", branch])?;
+
+        // Not locally present.
+        let local = test_helpers::with_repo_cwd(&repo, || branch_exists(branch))?;
+        assert!(!local);
+
+        // But branch_exists_anywhere should find it via remote.
+        let anywhere = test_helpers::with_repo_cwd(&repo, || branch_exists_anywhere(branch))?;
+        assert!(anywhere);
+
+        Ok(())
+    }
+
+    #[test]
+    fn branch_exists_anywhere_returns_false_for_truly_missing_branch() -> TestResult<()> {
+        let repo = test_helpers::setup_remote_with_feature()?;
+
+        let result =
+            test_helpers::with_repo_cwd(&repo, || branch_exists_anywhere("no_such_branch"))?;
+        assert!(!result);
         Ok(())
     }
 }

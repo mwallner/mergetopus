@@ -879,3 +879,260 @@ fn initial_partial_merge_detection_ignores_task_branch_merge_between_slice_merge
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// resolve: trustExitCode / conflict marker detection
+// ---------------------------------------------------------------------------
+
+/// Helper: configure a merge tool that copies BASE to MERGED (resolves the conflict) but exits
+/// with the given exit code.
+fn configure_resolve_tool(repo: &std::path::Path, exit_code: i32) -> TestResult<()> {
+    test_helpers::git(repo, &["config", "merge.tool", "testmerge"])?;
+    let cmd = if exit_code == 0 {
+        configured_copybase_cmd().to_string()
+    } else {
+        #[cfg(target_os = "windows")]
+        {
+            format!("type \"%BASE%\" > \"%MERGED%\" & exit /b {exit_code}")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!("cp \"$BASE\" \"$MERGED\"; exit {exit_code}")
+        }
+    };
+    test_helpers::git(repo, &["config", "mergetool.testmerge.cmd", &cmd])?;
+    Ok(())
+}
+
+/// Helper: configure a merge tool that does NOT resolve the file (just exits).
+fn configure_noop_tool(repo: &std::path::Path, exit_code: i32) -> TestResult<()> {
+    test_helpers::git(repo, &["config", "merge.tool", "testmerge"])?;
+    #[cfg(target_os = "windows")]
+    let cmd = format!("exit /b {exit_code}");
+    #[cfg(not(target_os = "windows"))]
+    let cmd = format!("exit {exit_code}");
+    test_helpers::git(repo, &["config", "mergetool.testmerge.cmd", &cmd])?;
+    Ok(())
+}
+
+/// Helper: configure a merge tool that writes conflict markers into MERGED and exits 0.
+fn configure_marker_tool(repo: &std::path::Path) -> TestResult<()> {
+    test_helpers::git(repo, &["config", "merge.tool", "testmerge"])?;
+    #[cfg(target_os = "windows")]
+    let cmd = r#"(echo ^<^<^<^<^<^<^< HEAD & echo ours & echo ======= & echo theirs & echo ^>^>^>^>^>^>^> branch) > "%MERGED%""#;
+    #[cfg(not(target_os = "windows"))]
+    let cmd =
+        r#"printf '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n' > "$MERGED""#;
+    test_helpers::git(repo, &["config", "mergetool.testmerge.cmd", cmd])?;
+    Ok(())
+}
+
+/// Helper: set up a repo with a conflict and run mergetopus to create integration + slices.
+fn setup_resolve_scenario() -> TestResult<(std::path::PathBuf, String)> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        create.status.success(),
+        "initial mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+    Ok((repo, slice_branch().to_string()))
+}
+
+/// trustExitCode=true, tool exits 0 → file is staged.
+#[test]
+fn resolve_trust_exit_code_true_exit_zero_stages_file() -> TestResult<()> {
+    let (repo, slice) = setup_resolve_scenario()?;
+    configure_resolve_tool(&repo, 0)?;
+    test_helpers::git(&repo, &["config", "mergetool.testmerge.trustExitCode", "true"])?;
+
+    let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
+    assert!(
+        out.status.success(),
+        "resolve failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Staged 1 file(s)"),
+        "expected file to be staged:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Skipped"),
+        "should not skip when tool exits 0 with trustExitCode=true:\n{stdout}"
+    );
+
+    Ok(())
+}
+
+/// trustExitCode=true, tool exits non-zero → file is NOT staged.
+#[test]
+fn resolve_trust_exit_code_true_exit_nonzero_skips_file() -> TestResult<()> {
+    let (repo, slice) = setup_resolve_scenario()?;
+    configure_resolve_tool(&repo, 1)?;
+    test_helpers::git(&repo, &["config", "mergetool.testmerge.trustExitCode", "true"])?;
+
+    let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
+    assert!(
+        out.status.success(),
+        "resolve command itself should succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Skipped 1 file(s)"),
+        "expected file to be skipped:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("skipping staging (trustExitCode is enabled)"),
+        "expected trustExitCode warning in stderr:\n{stderr}"
+    );
+
+    Ok(())
+}
+
+/// trustExitCode=false, tool exits non-zero → file is staged regardless.
+#[test]
+fn resolve_trust_exit_code_false_always_stages() -> TestResult<()> {
+    let (repo, slice) = setup_resolve_scenario()?;
+    configure_resolve_tool(&repo, 1)?;
+    test_helpers::git(&repo, &["config", "mergetool.trustExitCode", "false"])?;
+
+    let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
+    assert!(
+        out.status.success(),
+        "resolve failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Staged 1 file(s)"),
+        "trustExitCode=false should always stage:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Skipped"),
+        "trustExitCode=false should not skip:\n{stdout}"
+    );
+
+    Ok(())
+}
+
+/// trustExitCode unset, tool exits 0, no markers → file is staged (happy path).
+#[test]
+fn resolve_unset_trust_exit_code_clean_resolve_stages() -> TestResult<()> {
+    let (repo, slice) = setup_resolve_scenario()?;
+    configure_resolve_tool(&repo, 0)?;
+
+    let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
+    assert!(
+        out.status.success(),
+        "resolve failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Staged 1 file(s)"),
+        "clean resolve should stage:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Skipped"),
+        "clean resolve should not skip:\n{stdout}"
+    );
+
+    Ok(())
+}
+
+/// trustExitCode unset, tool exits non-zero, --quiet → file is skipped.
+#[test]
+fn resolve_unset_trust_nonzero_exit_quiet_skips() -> TestResult<()> {
+    let (repo, slice) = setup_resolve_scenario()?;
+    configure_noop_tool(&repo, 1)?;
+
+    let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
+    assert!(
+        out.status.success(),
+        "resolve command itself should succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Skipped 1 file(s)"),
+        "non-zero exit with unset trustExitCode in quiet mode should skip:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("skipping staging in --quiet mode"),
+        "expected quiet-mode skip warning:\n{stderr}"
+    );
+
+    Ok(())
+}
+
+/// trustExitCode unset, tool exits 0 but conflict markers remain, --quiet → file is skipped.
+#[test]
+fn resolve_unset_trust_markers_remain_quiet_skips() -> TestResult<()> {
+    let (repo, slice) = setup_resolve_scenario()?;
+    configure_marker_tool(&repo)?;
+
+    let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
+    assert!(
+        out.status.success(),
+        "resolve command itself should succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("Skipped 1 file(s)"),
+        "conflict markers remaining with unset trustExitCode in quiet mode should skip:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("conflict markers remain"),
+        "expected conflict markers warning:\n{stderr}"
+    );
+
+    Ok(())
+}
+
+/// Tool-specific trustExitCode overrides global setting.
+#[test]
+fn resolve_tool_specific_trust_overrides_global() -> TestResult<()> {
+    let (repo, slice) = setup_resolve_scenario()?;
+    configure_resolve_tool(&repo, 1)?;
+    // Global says don't trust, tool-specific says trust
+    test_helpers::git(&repo, &["config", "mergetool.trustExitCode", "false"])?;
+    test_helpers::git(&repo, &["config", "mergetool.testmerge.trustExitCode", "true"])?;
+
+    let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
+    assert!(
+        out.status.success(),
+        "resolve command itself should succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Tool-specific trustExitCode=true should win over global=false,
+    // so non-zero exit → skip
+    assert!(
+        stdout.contains("Skipped 1 file(s)"),
+        "tool-specific trust should override global:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    Ok(())
+}

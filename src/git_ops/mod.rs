@@ -96,7 +96,12 @@ pub fn restore_ours(path: &str) -> Result<()> {
 }
 
 pub fn list_slice_branches_for_integration(integration_branch: &str) -> Result<Vec<String>> {
-    let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
+    let out = run_git(&[
+        "for-each-ref",
+        "--format=%(refname:short)",
+        "refs/heads",
+        "refs/remotes",
+    ])?;
     let Some(base) = integration_branch.strip_suffix("/integration") else {
         return Ok(Vec::new());
     };
@@ -104,10 +109,23 @@ pub fn list_slice_branches_for_integration(integration_branch: &str) -> Result<V
     let mut slices = out
         .lines()
         .map(str::trim)
-        .filter(|l| l.starts_with(&prefix))
-        .map(ToOwned::to_owned)
+        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .filter_map(|l| {
+            if l.starts_with(&prefix) {
+                Some(l.to_string())
+            } else if let Some(local) = local_branch_name_from_remote_ref(l) {
+                if local.starts_with(&prefix) {
+                    Some(local)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>();
     slices.sort();
+    slices.dedup();
     Ok(slices)
 }
 
@@ -122,7 +140,8 @@ pub fn slice_merge_status(
 ) -> Result<BTreeMap<String, bool>> {
     let mut result = BTreeMap::new();
     for slice in slice_branches {
-        result.insert(slice.clone(), is_ancestor(slice, integration_branch)?);
+        let probe_ref = best_ref_for_local_branch(slice)?.unwrap_or_else(|| slice.clone());
+        result.insert(slice.clone(), is_ancestor(&probe_ref, integration_branch)?);
     }
     Ok(result)
 }
@@ -333,26 +352,41 @@ pub fn parent_sha(rev: &str) -> Result<String> {
 /// List every local branch that looks like a mergetopus slice branch
 /// (`_mmm/<original>/<source>/slice<N>` where N is one or more digits).
 pub fn list_all_slice_branches() -> Result<Vec<String>> {
-    let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
+    let out = run_git(&[
+        "for-each-ref",
+        "--format=%(refname:short)",
+        "refs/heads",
+        "refs/remotes",
+    ])?;
     let mut slices = out
         .lines()
         .map(str::trim)
-        .filter(|l| {
-            let parts = l.split('/').collect::<Vec<_>>();
-            parts.len() == 4
-                && parts[0] == "_mmm"
-                && !parts[1].is_empty()
-                && !parts[2].is_empty()
-                && parts[3].starts_with("slice")
-                && parts[3]["slice".len()..]
-                    .chars()
-                    .all(|c| c.is_ascii_digit())
-                && parts[3].len() > "slice".len()
+        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .filter_map(|l| {
+            if is_local_slice_branch_name(l) {
+                return Some(l.to_string());
+            }
+
+            local_branch_name_from_remote_ref(l)
+                .filter(|candidate| is_local_slice_branch_name(candidate))
         })
-        .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     slices.sort();
+    slices.dedup();
     Ok(slices)
+}
+
+fn is_local_slice_branch_name(branch: &str) -> bool {
+    let parts = branch.split('/').collect::<Vec<_>>();
+    parts.len() == 4
+        && parts[0] == "_mmm"
+        && !parts[1].is_empty()
+        && !parts[2].is_empty()
+        && parts[3].starts_with("slice")
+        && parts[3]["slice".len()..]
+            .chars()
+            .all(|c| c.is_ascii_digit())
+        && parts[3].len() > "slice".len()
 }
 
 /// Write the content of `reference:path` from the object store to the file at
@@ -402,7 +436,10 @@ pub fn select_conflicts_by_list(all_conflicts: &[String], csv: &str) -> Result<V
 
 #[cfg(test)]
 mod tests {
-    use super::is_slice_branch_ref;
+    use super::{is_slice_branch_ref, list_all_slice_branches, list_slice_branches_for_integration};
+    use crate::test_support as test_helpers;
+
+    type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
     #[test]
     fn slice_ref_detection_accepts_local_and_remote() {
@@ -414,5 +451,30 @@ mod tests {
     fn slice_ref_detection_rejects_non_slice_refs() {
         assert!(!is_slice_branch_ref("_mmm/main/feature/integration"));
         assert!(!is_slice_branch_ref("feature"));
+    }
+
+    #[test]
+    fn remote_only_slices_are_listed_by_local_name() -> TestResult<()> {
+        let repo = test_helpers::setup_remote_with_feature()?;
+        let integration = "_mmm/main/feature/integration";
+        let slice = "_mmm/main/feature/slice1";
+
+        test_helpers::git(&repo, &["checkout", "-b", integration])?;
+        test_helpers::git(&repo, &["checkout", "-b", slice])?;
+        test_helpers::write_file(&repo, "slice.txt", "slice\n")?;
+        test_helpers::commit_all(&repo, "slice commit")?;
+        test_helpers::git(&repo, &["push", "-u", "origin", integration])?;
+        test_helpers::git(&repo, &["push", "-u", "origin", slice])?;
+        test_helpers::git(&repo, &["checkout", "main"])?;
+        test_helpers::git(&repo, &["branch", "-D", integration])?;
+        test_helpers::git(&repo, &["branch", "-D", slice])?;
+
+        let all = test_helpers::with_repo_cwd(&repo, list_all_slice_branches)?;
+        assert!(all.iter().any(|b| b == slice));
+
+        let for_integration =
+            test_helpers::with_repo_cwd(&repo, || list_slice_branches_for_integration(integration))?;
+        assert!(for_integration.iter().any(|b| b == slice));
+        Ok(())
     }
 }
