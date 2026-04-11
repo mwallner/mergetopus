@@ -32,6 +32,16 @@ pub fn remote_branch_exists(branch: &str) -> Result<bool> {
     Ok(ok)
 }
 
+/// Check if a branch exists either locally or as a remote tracking branch
+/// (e.g. `origin/<branch>`).
+pub fn branch_exists_anywhere(branch: &str) -> Result<bool> {
+    if branch_exists(branch)? {
+        return Ok(true);
+    }
+    let refs = remote_refs_for_local_branch(branch)?;
+    Ok(!refs.is_empty())
+}
+
 pub fn create_tracking_branch(local_branch: &str, remote_branch: &str) -> Result<()> {
     run_git(&["branch", "--track", local_branch, remote_branch]).map(|_| ())
 }
@@ -322,6 +332,39 @@ mod tests {
 
         let exists = test_helpers::with_repo_cwd(&repo, || branch_exists(slice))?;
         assert!(exists);
+        Ok(())
+    }
+
+    #[test]
+    fn branch_exists_anywhere_finds_remote_only_branch() -> TestResult<()> {
+        let repo = test_helpers::setup_remote_with_feature()?;
+        let branch = "_mmm/main/feature/integration";
+
+        test_helpers::git(&repo, &["checkout", "-b", branch])?;
+        test_helpers::write_file(&repo, "int.txt", "int\n")?;
+        test_helpers::commit_all(&repo, "integration commit")?;
+        test_helpers::git(&repo, &["push", "-u", "origin", branch])?;
+        test_helpers::git(&repo, &["checkout", "main"])?;
+        test_helpers::git(&repo, &["branch", "-D", branch])?;
+
+        // Not locally present.
+        let local = test_helpers::with_repo_cwd(&repo, || branch_exists(branch))?;
+        assert!(!local);
+
+        // But branch_exists_anywhere should find it via remote.
+        let anywhere = test_helpers::with_repo_cwd(&repo, || branch_exists_anywhere(branch))?;
+        assert!(anywhere);
+
+        Ok(())
+    }
+
+    #[test]
+    fn branch_exists_anywhere_returns_false_for_truly_missing_branch() -> TestResult<()> {
+        let repo = test_helpers::setup_remote_with_feature()?;
+
+        let result =
+            test_helpers::with_repo_cwd(&repo, || branch_exists_anywhere("no_such_branch"))?;
+        assert!(!result);
         Ok(())
     }
 }

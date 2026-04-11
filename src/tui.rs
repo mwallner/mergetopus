@@ -241,6 +241,78 @@ pub fn confirm(prompt: &str, title: &str) -> Result<bool> {
     }
 }
 
+/// Show a prompt with two labeled options the user can toggle with Up/Down.
+/// Returns the 0-based index of the chosen option, or `None` if cancelled.
+pub fn pick_option(prompt: &str, options: &[&str], title: &str) -> Result<Option<usize>> {
+    let mut guard = TerminalGuard::new(title)?;
+    let mut cursor = 0usize;
+
+    loop {
+        guard.terminal.draw(|f| {
+            let root = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(3),
+                    Constraint::Length((options.len() as u16) + 2),
+                    Constraint::Length(1),
+                ])
+                .split(f.area());
+
+            let prompt_area = centered_rect(70, 30, root[0]);
+            let widget = Paragraph::new(prompt)
+                .block(Block::default().title("Choose").borders(Borders::ALL))
+                .wrap(Wrap { trim: true });
+            f.render_widget(Clear, prompt_area);
+            f.render_widget(widget, prompt_area);
+
+            let items: Vec<ListItem> = options
+                .iter()
+                .enumerate()
+                .map(|(i, label)| {
+                    let prefix = if i == cursor { "> " } else { "  " };
+                    ListItem::new(format!("{prefix}{label}"))
+                })
+                .collect();
+            let list = List::new(items)
+                .block(Block::default().borders(Borders::ALL))
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                );
+            let mut state = ListState::default();
+            state.select(Some(cursor));
+            f.render_stateful_widget(list, root[1], &mut state);
+
+            render_keybar(
+                f,
+                root[2],
+                &[("Up/Down", "Move"), ("Enter", "Select"), ("Esc", "Cancel")],
+            );
+        })?;
+
+        if !event::poll(Duration::from_millis(200))? {
+            continue;
+        }
+
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match key.code {
+            KeyCode::Up => cursor = cursor.saturating_sub(1),
+            KeyCode::Down => cursor = (cursor + 1).min(options.len().saturating_sub(1)),
+            KeyCode::Enter => return Ok(Some(cursor)),
+            KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
 /// Show a scrollable list of `items` (highlighted in red) above a `prompt`,
 /// and ask the user to confirm (Enter / y) or cancel (Esc / n).
 pub fn confirm_list(items: &[String], prompt: &str, title: &str) -> Result<bool> {

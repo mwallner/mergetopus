@@ -8,6 +8,8 @@ use crate::git_ops;
 use crate::planner;
 use crate::tui;
 
+use super::cmd_status;
+
 /// Runs the primary Mergetopus merge workflow: chooses/normalizes source,
 /// creates or resumes integration context, snapshots auto-merged files, plans
 /// conflict slices, and materializes slice branches for iterative resolution.
@@ -35,17 +37,53 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
     };
     let source_ref = normalize_merge_source_ref(&selected_source_ref)?;
 
-    // If an integration branch is selected, redirect to the original/source pair.
+    // If an integration branch is selected, ask the user what they intend.
     let (actual_source_ref, actual_integration_branch, target_branch_for_merge) =
         if let Some((original, source)) = planner::parse_integration_branch(&source_ref) {
-            println!("Note: '{source_ref}' is an integration branch.");
-            println!("Redirecting: checking out '{original}' and merging '{source}' instead.\n");
+            if args.quiet {
+                bail!(
+                    "'{}' is an integration branch; in --quiet mode, provide the actual source branch instead",
+                    source_ref
+                );
+            }
 
-            git_ops::checkout(&original)?;
-            let new_current = git_ops::current_branch()?;
-            let new_integration = planner::integration_branch_name(&new_current, &source);
+            let prompt = format!(
+                "'{source_ref}' is an integration branch (target='{original}', source='{source}').\n\n\
+                 What would you like to do?"
+            );
+            let choice = tui::pick_option(
+                &prompt,
+                &[
+                    "Switch to this integration branch and view its status",
+                    "Create a new merge targeting this integration branch",
+                ],
+                tui_title,
+            )?;
 
-            (source.clone(), new_integration, new_current)
+            match choice {
+                Some(0) => {
+                    // Switch to the integration branch and show status.
+                    let local = git_ops::ensure_local_branch_for_operation(&source_ref)?;
+                    git_ops::checkout(&local)?;
+                    let branch_now = git_ops::current_branch()?;
+                    let tui_title = format!("Mergetopus [{branch_now}]");
+                    return cmd_status::status_command(
+                        None,
+                        false,
+                        &branch_now,
+                        &tui_title,
+                    );
+                }
+                Some(1) => {
+                    // Redirect: checkout original and merge source.
+                    println!("Redirecting: checking out '{original}' and merging '{source}'.\n");
+                    git_ops::checkout(&original)?;
+                    let new_current = git_ops::current_branch()?;
+                    let new_integration = planner::integration_branch_name(&new_current, &source);
+                    (source.clone(), new_integration, new_current)
+                }
+                _ => bail!("integration branch action selection was canceled"),
+            }
         } else {
             let integration_branch = planner::integration_branch_name(current_branch, &source_ref);
             (
@@ -56,13 +94,15 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         };
 
     let kokomeco_branch = git_ops::consolidated_branch_name(&actual_integration_branch);
-    if git_ops::branch_exists(&kokomeco_branch)? {
+    if git_ops::branch_exists_anywhere(&kokomeco_branch)? {
+        let kokomeco_ref = git_ops::best_ref_for_local_branch(&kokomeco_branch)?
+            .unwrap_or_else(|| kokomeco_branch.clone());
         println!("Kokomeco branch already exists for this merge context: {kokomeco_branch}");
         println!("To merge it back into your current target branch:");
         println!("  git checkout {target_branch_for_merge}");
-        println!("  git merge --no-ff {kokomeco_branch}");
+        println!("  git merge --no-ff {kokomeco_ref}");
         println!("After promotion, delete it manually when no longer needed:");
-        println!("  git branch -d {kokomeco_branch}");
+        println!("  git branch -d {kokomeco_ref}");
         return Ok(());
     }
 
@@ -73,7 +113,9 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
             "failed before entering conflict resolution: could not compute merge-base between current HEAD and source; verify source/history compatibility, then retry (for unrelated histories, merge manually with --allow-unrelated-histories first)"
         })?;
 
-    if git_ops::branch_exists(&actual_integration_branch)? {
+    if git_ops::branch_exists_anywhere(&actual_integration_branch)? {
+        let actual_integration_branch =
+            git_ops::ensure_local_branch_for_operation(&actual_integration_branch)?;
         git_ops::checkout(&actual_integration_branch)?;
         let slices = git_ops::list_slice_branches_for_integration(&actual_integration_branch)?;
         let status = git_ops::slice_merge_status(&actual_integration_branch, &slices)?;
