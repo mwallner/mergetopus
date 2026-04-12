@@ -134,6 +134,158 @@ notes:
 - consolidated branch is created for review/promotion
 ```
 
+## Example: Large Team Merge across LTS Versions
+
+### Scenario
+
+Five developers maintain a project with multiple long-term stable (LTS) release branches:
+
+| Developer      | Role                 | Active branches          |
+| -------------- | -------------------- | ------------------------ |
+| Wendy Corduroy | Developer            | LTS_v17, LTS_v32         |
+| Gideon Gleeful | Developer            | LTS_v17, LTS_v32         |
+| Dipper Pines   | Developer            | LTS_v32, main            |
+| Mabel Pines    | Team lead (Gideon's) | LTS_v32, main            |
+| Stan Pines     | Senior integrator    | LTS_v42 (merges forward) |
+
+Wendy and Gideon make **overlapping changes** to `config.toml` and `engine.rs`
+in LTS_v17. All four developers contribute to LTS_v32. Dipper and Mabel also
+work on `main`. Stan regularly merges from older LTS versions into newer ones
+and eventually upstream to `main`.
+
+### Branch Topology
+
+```text
+                    Wendy: v17 pooling     Gideon: v17 hardening
+                    (config, engine,       (config line 2,
+                     api, utils)            engine line 2)
+LTS_v17:  M0 ──────── W1 ────────────────── G1
+            │
+            │          Wendy: v32   Gideon: v32   Dipper: v32     Mabel: v32
+            │          retry        caching       debug logging   auth + logging
+LTS_v32:  M0 ──────── W2 ──────── G2 ──────── D1 ──────────── MB1
+            │
+            │          Stan: v42
+            │          baseline
+LTS_v42:  M0 ──────── S1 ────── kokomeco₁ ────── kokomeco₂ ──── ···
+            │                       ↑                  ↑
+            │                 merge LTS_v17       merge LTS_v32
+            │
+            │          Dipper:      Mabel:
+            │          metrics      telemetry
+main:     M0 ──────── D2 ──────── MB2 ─────────────── ··· ────── merge kokomeco₃
+```
+
+### Cascade Merge Steps
+
+Stan merges LTS_v17 → LTS_v42, then LTS_v32 → LTS_v42, then LTS_v42 → main.
+
+#### Step 1: LTS_v17 → LTS_v42
+
+```bash
+# Stan initiates the merge from LTS_v42
+mergetopus LTS_v17 --select-paths config.toml,engine.rs
+```
+
+```text
+LTS_v42 HEAD (Stan)                             LTS_v17 (Wendy + Gideon)
+     │                                               │
+     └─── mergetopus LTS_v17 ───┐                    │
+                                │                    │
+   _mmm/LTS_v42/LTS_v17/        │                    │
+     integration ◄── partial merge (auto-merged files,
+         │               conflicts reset to ours)
+         │
+         ├── slice1: config.toml + engine.rs  ←  explicit group (--select-paths)
+         │     → Mabel resolves (contains Gideon's overlapping changes)
+         │
+         ├── slice2: api.rs
+         │     → Dipper resolves (Wendy's caching changes)
+         │
+         └── slice3: utils.rs
+               → Dipper resolves (Wendy's format changes)
+
+  After all slices resolved + consolidated:
+  _mmm/LTS_v42/LTS_v17/kokomeco
+      parent 1: original LTS_v42 HEAD (Stan's baseline)
+      parent 2: LTS_v17 tip (Wendy + Gideon)
+      tree:     final integration state
+```
+
+#### Step 2: LTS_v32 → LTS_v42
+
+```bash
+# After promoting kokomeco₁ into LTS_v42
+git checkout LTS_v42 && git merge _mmm/LTS_v42/LTS_v17/kokomeco
+mergetopus LTS_v32 --select-paths engine.rs,utils.rs
+```
+
+```text
+  _mmm/LTS_v42/LTS_v32/
+     integration
+         │
+         ├── slice1: engine.rs + utils.rs  ←  Mabel resolves (Gideon/Mabel changes)
+         │
+         ├── slice2: api.rs                ←  Dipper resolves (Wendy's retry logic)
+         │
+         └── slice3: config.toml           ←  Dipper resolves (Wendy/Dipper's config)
+
+  After consolidation:
+  _mmm/LTS_v42/LTS_v32/kokomeco
+      parent 1: LTS_v42 (post kokomeco₁)
+      parent 2: LTS_v32 tip
+```
+
+#### Step 3: LTS_v42 → main
+
+```bash
+# After promoting kokomeco₂
+git checkout main
+mergetopus LTS_v42
+```
+
+Only `config.toml` and `engine.rs` conflict (main never changed `api.rs` or
+`utils.rs` from the initial commit, so those auto-merge).
+
+### Blame Verification on kokomeco
+
+After the full cascade, `git blame` on the final kokomeco correctly traces
+through the merge parents back to the original authors — no squash, no
+history rewrite:
+
+```text
+git blame _mmm/LTS_v42/LTS_v17/kokomeco -- config.toml:
+  max_connections = 200   → Wendy Corduroy   ("Wendy: v17 connection pooling and caching")
+  timeout = 60            → Gideon Gleeful   ("Gideon: v17 timeout hardening and error handling")
+
+git blame _mmm/LTS_v42/LTS_v17/kokomeco -- engine.rs:
+  fn init() { wendy_pool(); }       → Wendy Corduroy
+  fn process() { gideon_errors(); } → Gideon Gleeful
+
+git blame _mmm/LTS_v42/LTS_v17/kokomeco -- api.rs:
+  fn handle() { wendy_caching(); }  → Wendy Corduroy
+
+git blame _mmm/LTS_v42/LTS_v17/kokomeco -- utils.rs:
+  fn format() { wendy_format(); }   → Wendy Corduroy
+
+git blame _mmm/main/LTS_v42/kokomeco -- engine.rs:
+  fn init() { mabel_auth(); }       → Mabel Pines     (from LTS_v32)
+  fn process() { gideon_cache(); }  → Gideon Gleeful   (from LTS_v32)
+
+git blame _mmm/main/LTS_v42/kokomeco -- api.rs:
+  fn handle() { wendy_retry(); }    → Wendy Corduroy   (from LTS_v32, auto-merged)
+```
+
+The kokomeco merge topology preserves correct line-blame because:
+
+- each kokomeco has the source branch as merge parent 2
+- unchanged lines from the source side trace through that parent to original commits
+- the cascade (kokomeco₁ → kokomeco₂ → kokomeco₃) maintains a clean ancestry chain
+- no squash or history rewrite occurs — only clean merge snapshots
+
+> This scenario is exercised by the integration test
+> `lts_cascade_merge_preserves_authorship_in_kokomeco` in `tests/test_suite_d.rs`.
+
 ## Existing Topology Handling
 
 If the integration branch already exists, `mergetopus`:
@@ -163,6 +315,10 @@ Why this matters for `git blame`:
 - Temporary integration/slice execution history can be cleaned up later, while the promoted branch still retains useful provenance in the final merge topology.
 
 ## Installation
+
+Download the `mergetopus` binary for your platform from the [GitHub Releases](https://github.com/mwallner/mergetopus/releases) page and place it in a directory on your system's `PATH`.
+
+On **Windows** with [Chocolatey](https://chocolatey.org/):
 
 ```bash
 choco install mergetopus.portable
