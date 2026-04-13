@@ -21,20 +21,17 @@ The core idea is collaborative merge execution:
 
 ## What It Does
 
-1. Validates Git context:
-	- inside a Git worktree
-	- clean working tree
-	- valid merge source
-2. Creates integration branch: `_mmm/<safe-current>/<safe-source>/integration`
-3. Attempts merge with `--no-commit`
-4. Keeps auto-merged files in integration commit
-5. Resets conflicted files to ours in integration commit
-6. Uses interactive TUI conflict selection by default (including 3-way diff), or groups explicit conflicted paths from `--select-paths` into one explicit slice
-7. Creates one branch per explicit slice group from merge base (current HEAD vs source)
-8. Creates default one-file slice branches for every conflict not explicitly assigned by the user
-9. Applies source-side version of each affected file and commits with provenance trailers
+When you run `mergetopus <source>`, it:
 
-Once slice branches exist, run `mergetopus resolve` to drive conflict resolution on a slice branch using your configured merge tool (see [Resolving Conflicts](#resolving-conflicts)).
+1. Checks that you're in a Git repo with a clean working tree.
+2. Creates an integration branch (`_mmm/<target>/<source>/integration`).
+3. Runs `git merge --no-commit` against the source.
+4. Commits everything that merged cleanly into the integration branch.
+5. Resets conflicted files back to `ours` in that same commit — they'll be dealt with in slices.
+6. Lets you group conflicts into slices (via TUI or `--select-paths`). Any conflicts you don't explicitly group get their own one-file slice.
+7. Creates a branch per slice from the merge base, with the source-side version of each file and a commit message noting where it came from.
+
+From there, use `mergetopus resolve` to work through each slice with your merge tool (see [Resolving Conflicts](#resolving-conflicts)).
 
 ## Collaborative Workflow (Large Merges)
 
@@ -73,7 +70,7 @@ Status reports merged vs pending slices and suggests what to do next.
 
 4. Promote and clean up (`mergetopus cleanup`).
 
-- after all slices are merged, optionally create `kokomeco` snapshot branch
+- after all slices are merged, optionally create a [`kokomeco`](#why-kokomeco-exists) snapshot branch (a consolidated merge commit for promotion)
 - merge the chosen final branch into your target branch using normal Git policy
 - run cleanup to remove obsolete integration/slice branches
 
@@ -312,7 +309,7 @@ Why this matters for `git blame`:
 
 - A plain squash-style consolidation would collapse ownership and often attribute many lines to the integrator commit.
 - Kokomeco keeps a proper merge ancestry edge to the original source side, so line-blame can continue to follow where unchanged lines actually came from.
-- Temporary integration/slice execution history can be cleaned up later, while the promoted branch still retains useful provenance in the final merge topology.
+- Temporary integration/slice execution history can be cleaned up later, while the promoted branch still shows where changes came from in the final merge history.
 
 ## Installation
 
@@ -338,18 +335,16 @@ for the repository so deep path merges remain usable.
 
 ## Worktree Behavior
 
-Mergetopus supports Git worktrees in a conditional way:
+Mergetopus adapts its worktree behavior based on your existing setup:
 
 - If your repository has no additional worktrees, Mergetopus keeps the existing default behavior (no automatic worktree creation).
 - If your repository already uses worktrees, Mergetopus prefers running branch operations in branch-specific worktree directories.
 - When Mergetopus needs to create a branch worktree and no suitable branch worktree exists yet, it infers a base directory from existing worktree paths.
 - If a common base cannot be inferred, Mergetopus falls back to the parent of the repository root.
 
-This keeps non-worktree workflows stable while improving branch checkout ergonomics in repositories that already use worktrees.
+This keeps non-worktree workflows unchanged while making branch checkouts easier in repositories that already use worktrees.
 
 ## Branch Naming Conventions
-
-An understanding of branch naming helps prevent accidental misuse:
 
 - **Integration branches** follow the pattern `_mmm/<safe-original-branch>/<safe-source-branch>/integration`.
   These are temporary working branches that hold the merge result with auto-merged
@@ -376,17 +371,19 @@ When selecting a source branch for `mergetopus`:
 
 ### Integration Branch Redirection
 
-If you accidentally select an integration branch as the source:
-- `mergetopus` automatically detects this and redirects to the correct operation.
-- It extracts the original branch and source from the integration branch name.
-- It checks out the original branch and performs the merge with the actual source.
-- Example: if you select `_mmm/main/feature/integration`, mergetopus will:
-  1. Detect it's an integration branch
-  2. Check out `main`
-  3. Merge `feature` instead
-  4. Create a fresh `_mmm/main/feature/integration` branch
+If you select an integration branch as the source, `mergetopus` detects this
+and asks what you want to do:
 
-This prevents confusion when re-running mergetopus on an existing integration branch.
+- **Switch to this integration branch and view its status** — checks out the
+  integration branch and shows slice progress.
+- **Create a new merge targeting this integration branch** — checks out the
+  original target branch and merges the actual source, creating a fresh
+  integration branch.
+
+Example: if you select `_mmm/main/feature/integration`, mergetopus will
+recognize that the target was `main` and the source was `feature`, then let
+you pick between viewing existing status or starting a new merge of `feature`
+into `main`.
 
 ## Usage
 
@@ -620,7 +617,7 @@ Source branch picker / Slice branch picker:
 
 ## Commit Metadata
 
-Slice commits include:
+Slice commits include informational trailers that document where each file came from:
 
 - `Source-Ref`
 - `Source-Commit`
@@ -628,10 +625,17 @@ Slice commits include:
 - `Source-Path-Commit`
 - `Co-authored-by` (when source-side author info is available)
 
+These trailers are purely metadata for humans and tools like `mergetopus status`.
+Kokomeco creation does not depend on them — it works entirely from git history
+and the integration branch tree.
+
 ## Authorship Clarification
 
 A squash or consolidation commit does not preserve per-commit author lineage by itself.
-`mergetopus` preserves attribution context through provenance/co-author trailers and keeps original integration/slice history intact by writing consolidated output to a separate branch.
+`mergetopus` keeps attribution info using co-author trailers on slice commits
+and preserves original integration/slice history by writing consolidated output
+to a separate branch. The kokomeco branch itself gets correct `git blame`
+through its merge parents, not through trailers.
 
 ## Safety Notes
 
