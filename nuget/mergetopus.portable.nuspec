@@ -5,7 +5,8 @@
     <version>0.5.0</version>
     <title>mergetopus</title>
     <authors>mergetopus contributors</authors>
-    <licenseUrl>https://github.com/mwallner/mergetopus/blob/v0.4/LICENSE</licenseUrl>
+    <projectUrl>https://github.com/mwallner/mergetopus</projectUrl>
+    <licenseUrl>https://github.com/mwallner/mergetopus/blob/v0.5/LICENSE</licenseUrl>
     <iconUrl>https://raw.githubusercontent.com/mwallner/mergetopus/refs/heads/main/assets/logo-v3-minimal-icon.svg</iconUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <summary>mergetopus is a tool that enables splitting complex Git merges into manageable slices</summary>
