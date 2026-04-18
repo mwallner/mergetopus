@@ -166,8 +166,8 @@ pub fn create_slice_branches(
                         "Source-Path-Commit: {}",
                         provenance
                             .path_commit
-                            .clone()
-                            .unwrap_or_else(|| "(none)".to_string())
+                            .as_deref()
+                            .unwrap_or("(none)")
                     ),
                 ];
 

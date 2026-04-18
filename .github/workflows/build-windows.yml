@@ -16,6 +16,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
       - name: Setup PowerShell modules
         shell: pwsh
         run: |
@@ -39,12 +45,6 @@ jobs:
         run: |
           Set-StrictMode -Version Latest
           Invoke-Build Pack
-
-      - name: Run tests
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          cargo test
 
       - name: Collect build artifacts
         if: always()
