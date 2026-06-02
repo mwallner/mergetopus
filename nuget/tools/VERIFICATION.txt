@@ -1,0 +1,6 @@
+I am the author of this software.
+
+The relases are built via GitHub actions,
+the latest binaries can be found on the GitHub release page: https://github.com/mwallner/mergetopus/releases/
+
+
