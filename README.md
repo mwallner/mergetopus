@@ -646,4 +646,4 @@ through its merge parents, not through trailers.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See `LICENSE.txt`.

@@ -4,8 +4,8 @@ fn main() {
     let json_path = PathBuf::from("THIRDPARTY.json");
     let json_content = fs::read_to_string(&json_path).expect("Failed to read THIRDPARTY.json");
 
-    let license_path = PathBuf::from("LICENSE");
-    let license_content = fs::read_to_string(&license_path).expect("Failed to read LICENSE");
+    let license_path = PathBuf::from("LICENSE.txt");
+    let license_content = fs::read_to_string(&license_path).expect("Failed to read LICENSE.txt");
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = PathBuf::from(out_dir).join("licenses_json.rs");
