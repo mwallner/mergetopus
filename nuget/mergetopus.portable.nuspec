@@ -23,7 +23,7 @@ Designed for practical day-to-day Git work, Mergetopus supports both interactive
   </metadata>
   <files>
     <file src="tools\**" target="tools" />
-    <file src="..\LICENSE" target="tools\LICENSE" />
+    <file src="..\LICENSE.txt" target="tools\LICENSE.txt" />
     <file src="..\README.md" target="tools\README.md" />
   </files>
 </package>
