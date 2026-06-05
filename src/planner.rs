@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use crate::color;
 
 use crate::git_ops;
 
@@ -129,12 +130,9 @@ pub fn create_slice_branches(
             );
 
             git_ops::commit(&message)?;
-            println!(
-                "Created explicit slice branch {slice_branch} for {} file(s)",
-                group.len()
-            );
+            color::print_success(&format!("Created explicit slice branch {slice_branch} for {} file(s)", group.len()), None);
         } else {
-            println!("Skipped {slice_branch}: no staged changes");
+            color::print_warning(&format!("Skipped {slice_branch}: no staged changes"), None);
         }
     }
 
@@ -185,9 +183,9 @@ pub fn create_slice_branches(
             );
 
             git_ops::commit_slice(&message, &provenance)?;
-            println!("Created default single-file slice branch {slice_branch} for {path}");
+            color::print_success(&format!("Created default single-file slice branch {slice_branch} for {path}"), None);
         } else {
-            println!("Skipped {slice_branch} for {path}: no staged changes");
+            color::print_warning(&format!("Skipped {slice_branch} for {path}: no staged changes"), None);
         }
     }
 

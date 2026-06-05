@@ -1,3 +1,4 @@
+use crate::color;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -53,20 +54,20 @@ pub fn print_license(full: bool, json_output: bool) {
     }
 
     println!("Mergetopus is licensed under the {}", LICENSE_TEXT);
-    println!("------------------------------------------------");
-    println!(" Mergetopus is built using the following crates: ");
-    println!("------------------------------------------------");
+    color::print_info("------------------------------------------------", None);
+    color::print_emphasis(" Mergetopus is built using the following crates: ", None);
+    color::print_info("------------------------------------------------", None);
 
     let root: Root = parse_json(JSON_LICENSE_DATA).expect("Failed to parse JSON");
 
     if full {
         for library in root.third_party_libraries {
-            println!("Package: {}", library.package_name);
+            color::print_emphasis(&format!("Package: {}", library.package_name), None);
             for license_info in library.licenses {
-                println!("License: {}", license_info.license);
+                color::print_info(&format!("License: {}", license_info.license), None);
                 println!("{}", license_info.text);
             }
-            println!("------------------------------------------------");
+            color::print_info("------------------------------------------------", None);
         }
     } else {
         let mut license_map: HashMap<String, Vec<String>> = HashMap::new();
@@ -80,9 +81,9 @@ pub fn print_license(full: bool, json_output: bool) {
         }
 
         for (license, packages) in license_map {
-            println!("License: {}", license);
-            println!("Packages: {}", packages.join(", "));
-            println!("------------------------------------------------");
+            color::print_emphasis(&format!("License: {}", license), None);
+            color::print_info(&format!("Packages: {}", packages.join(", ")), None);
+            color::print_info("------------------------------------------------", None);
         }
     }
 }

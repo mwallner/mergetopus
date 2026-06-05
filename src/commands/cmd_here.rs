@@ -1,4 +1,5 @@
 use crate::cli::Args;
+use crate::color;
 use crate::commands::cmd_merge_workflow;
 use crate::models::SlicePlanItem;
 use anyhow::{Context, Result, bail};
@@ -35,7 +36,7 @@ pub fn here_command(args: &Args, current_branch: &str, tui_title: &str) -> Resul
 
     let unresolved_before = git_ops::conflicted_files()?;
     if unresolved_before.is_empty() {
-        println!("No unresolved conflicts found in current merge. Nothing to slice.");
+        color::print_info("No unresolved conflicts found in current merge. Nothing to slice.", None);
         return Ok(());
     }
 
@@ -112,15 +113,15 @@ pub fn here_command(args: &Args, current_branch: &str, tui_title: &str) -> Resul
         Ok(slices) => slices,
         Err(e) => {
             if let Err(checkout_err) = git_ops::checkout(current_branch) {
-                eprintln!(
+                color::print_error(&format!(
                     "Warning: failed to checkout '{current_branch}' during HERE cleanup: {checkout_err}"
-                );
+                ), None);
             }
             if let Err(delete_err) = git_ops::delete_branch(&integration_branch) {
-                eprintln!(
+                color::print_error(&format!(
                     "Warning: failed to delete integration branch '{}' during HERE cleanup: {}",
                     integration_branch, delete_err
-                );
+                ), None);
             }
             return Err(e)
                 .context("conflict selection canceled during HERE; integration branch cleaned up");
@@ -137,11 +138,11 @@ pub fn here_command(args: &Args, current_branch: &str, tui_title: &str) -> Resul
     )?;
 
     git_ops::checkout(&integration_branch)?;
-    println!("Mergetopus HERE takeover complete");
-    println!("  Integration branch: {integration_branch}");
-    println!("  Source ref: {source_ref} ({source_sha})");
-    println!("  Remaining conflict count: {}", unresolved_before.len());
-    println!("  Explicit slice groups: {}", explicit_slices.len());
+    color::print_emphasis("Mergetopus HERE takeover complete", None);
+    color::print_info(&format!("  Integration branch: {integration_branch}"), None);
+    color::print_info(&format!("  Source ref: {source_ref} ({source_sha})"), None);
+    color::print_info(&format!("  Remaining conflict count: {}", unresolved_before.len()), None);
+    color::print_info(&format!("  Explicit slice groups: {}", explicit_slices.len()), None);
 
     Ok(())
 }

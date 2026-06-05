@@ -1,6 +1,7 @@
 # mergetopus
 
 [![Build Linux](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-linux.yml?branch=main&label=Build%20Linux)](https://github.com/mwallner/mergetopus/actions/workflows/build-linux.yml)
+[![Build MacOS](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-macos.yml?branch=main&label=Build%20macOS)](https://github.com/mwallner/mergetopus/actions/workflows/build-macos.yml)
 [![Build Windows](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-windows.yml?branch=main&label=Build%20Windows)](https://github.com/mwallner/mergetopus/actions/workflows/build-windows.yml)
 
 ![mergetopus logo](assets/mergetopus-logo.svg)
@@ -68,7 +69,24 @@ mergetopus status feature/very-large-change
 
 Status reports merged vs pending slices and suggests what to do next.
 
-4. Promote and clean up (`mergetopus cleanup`).
+4. Push the merge plan to a shared remote (`mergetopus push`).
+
+- pushes the integration branch, all slice branches, and the kokomeco branch (if it exists) with `--force-with-lease`
+- verifies that source and target branches already exist on the remote before pushing
+- automatically selects the remote when only one is configured; shows a TUI picker when multiple remotes exist
+
+```bash
+# single remote — auto-selected
+mergetopus push
+
+# explicit remote
+mergetopus push origin
+
+# quiet mode requires an explicit remote when multiple are configured
+mergetopus push origin --quiet
+```
+
+5. Promote and clean up (`mergetopus cleanup`).
 
 - after all slices are merged, optionally create a [`kokomeco`](#why-kokomeco-exists) snapshot branch (a consolidated merge commit for promotion)
 - merge the chosen final branch into your target branch using normal Git policy
@@ -433,8 +451,20 @@ mergetopus feature/refactor-auth --quiet --yes
 # Show slice/integration progress status
 mergetopus status feature/refactor-auth
 
+# Show global MMM overview across local + configured remotes
+mergetopus status
+
+# Verify one integration branch against its kokomeco timestamp
+mergetopus verify feature/refactor-auth
+
+# Verify all integration branches globally (only ones with kokomeco are checked)
+mergetopus verify --global
+
 # Cleanup temporary integration/slice branches (interactive confirmation)
 mergetopus cleanup
+
+# Push an initialized merge plan to a remote
+mergetopus push origin
 
 # Take over an already in-progress manual merge
 mergetopus HERE
@@ -449,9 +479,12 @@ mergetopus --quiet --select-paths src/big/file1.cs,src/big/file2.cs HERE
 
 ## Status Reporting
 
-Use `mergetopus status` to inspect an integration branch and its slice progress.
+Use `mergetopus status` to inspect merge progress.
 
 ```bash
+# Global overview mode (no SOURCE): scans _mmm/* across local + configured remotes
+mergetopus status
+
 # Status by source ref
 mergetopus status feature/refactor-auth
 
@@ -459,13 +492,44 @@ mergetopus status feature/refactor-auth
 mergetopus status _mmm/main/feature_refactor-auth/integration
 ```
 
-The status output includes:
+Status behavior:
+
+- with no argument: prints a global MMM overview table (integration, target, source, state, pending/resolved, kokomeco)
+- with a source/integration argument: prints detailed status for that one integration branch
+- when discoverable refs do not form a valid integration family, reports them under `Orphaned MMM Refs (warning)`
+
+Detailed integration status output includes:
 
 - integration branch
 - source ref and source SHA (when derivable from integration history)
 - merged/pending slice counts
 - pending slice details with detected affected paths (when available)
 - suggested next commands
+
+## Verify Integration Status (safeguard)
+
+Use `mergetopus verify` after a kokomeco branch has been created to confirm that
+the integration branch has not drifted (no newer commits) since consolidation.
+
+```bash
+# Verify by source ref
+mergetopus verify feature/refactor-auth
+
+# Verify by integration branch name
+mergetopus verify _mmm/main/feature_refactor-auth/integration
+
+# Verify current branch when already on an integration branch
+mergetopus verify
+
+# Global validation across all discovered integration branches
+mergetopus verify --global
+```
+
+Verification behavior:
+
+- single-branch verify fails if the integration branch has commits newer than its corresponding kokomeco commit
+- `--global` scans all discovered integration branches and checks each branch that already has a corresponding kokomeco branch
+- global mode reports checked vs skipped counts (`skipped` means missing kokomeco)
 
 ## Resolving Conflicts
 
@@ -643,6 +707,20 @@ through its merge parents, not through trailers.
 - Consolidation requires explicit confirmation (unless `--yes` is used).
 - `--quiet` disables TUI interactions; provide `SOURCE` explicitly for CI/CD runs.
 - Integration branch is not rewritten by default.
+
+## Domain Language
+
+### Integration Branch
+
+The main merge target, created and managed by Mergetopus. Holds all auto-merged files and serves as the base for conflict slices.
+
+### Slice Branch
+
+A per-conflict-group branch created to isolate and resolve a specific set of conflicted files. Multiple slices can exist for a single merge.
+
+### Kokomeco Branch
+
+A consolidated merge commit branch created after all slices are resolved and merged back into the integration branch. Represents the final merge state.
 
 ## License
 

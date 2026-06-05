@@ -369,7 +369,7 @@ mod tests {
     fn repository_base_dir_matches_repo_root() -> TestResult<()> {
         let repo = test_helpers::init_repo_with_base_file()?;
         let got = test_helpers::with_repo_cwd(&repo, repository_base_dir)?;
-        assert_eq!(got, repo);
+        assert_eq!(normalize_existing_path(&got), normalize_existing_path(&repo));
         Ok(())
     }
 
@@ -378,7 +378,10 @@ mod tests {
         let repo = test_helpers::init_repo_with_base_file()?;
         let expected = repo.parent().ok_or("repo has no parent")?.to_path_buf();
         let got = test_helpers::with_repo_cwd(&repo, fallback_worktree_base_dir)?;
-        assert_eq!(got, expected);
+        assert_eq!(
+            normalize_existing_path(&got),
+            normalize_existing_path(&expected)
+        );
         Ok(())
     }
 
@@ -490,7 +493,7 @@ mod tests {
             switch_to_dir(&child)?;
             Ok(std::env::current_dir()?)
         })?;
-        assert_eq!(cwd, child);
+        assert_eq!(normalize_existing_path(&cwd), normalize_existing_path(&child));
         Ok(())
     }
 
