@@ -3,10 +3,11 @@ use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static UNIQUE_ID: AtomicU64 = AtomicU64::new(0);
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 pub fn run(cmd: &mut Command) -> TestResult<Output> {
@@ -35,11 +36,11 @@ pub fn mergetopus(repo: &Path, args: &[&str]) -> TestResult<Output> {
 }
 
 pub fn unique_temp_repo_dir() -> std::path::PathBuf {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("mergetopus-test-{ts}-{}", std::process::id()))
+    let id = UNIQUE_ID.fetch_add(1, Ordering::Relaxed);
+    let base = std::env::temp_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    base.join(format!("mergetopus-test-{}-{}", std::process::id(), id))
 }
 
 pub fn init_repo() -> TestResult<std::path::PathBuf> {
