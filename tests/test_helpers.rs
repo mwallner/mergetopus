@@ -37,9 +37,16 @@ pub fn mergetopus(repo: &Path, args: &[&str]) -> TestResult<Output> {
 
 pub fn unique_temp_repo_dir() -> std::path::PathBuf {
     let id = UNIQUE_ID.fetch_add(1, Ordering::Relaxed);
+    // On macOS, temp_dir() may return a /var/... symlink; canonicalize resolves
+    // it to /private/var/... so git sees a consistent path.
+    // On Windows, canonicalize() adds the \\?\ extended-length UNC prefix which
+    // git cannot handle as a local path, so we skip it there.
+    #[cfg(not(windows))]
     let base = std::env::temp_dir()
         .canonicalize()
         .unwrap_or_else(|_| std::env::temp_dir());
+    #[cfg(windows)]
+    let base = std::env::temp_dir();
     base.join(format!("mergetopus-test-{}-{}", std::process::id(), id))
 }
 
