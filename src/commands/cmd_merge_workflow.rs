@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::cli::Args;
+use crate::color;
 use crate::models::SlicePlanItem;
 use anyhow::{Context, Result, bail};
 
@@ -76,7 +77,7 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
                 }
                 Some(1) => {
                     // Redirect: checkout original and merge source.
-                    println!("Redirecting: checking out '{original}' and merging '{source}'.\n");
+                    color::print_info(&format!("Redirecting: checking out '{original}' and merging '{source}'.\n"), None);
                     git_ops::checkout(&original)?;
                     let new_current = git_ops::current_branch()?;
                     let new_integration = planner::integration_branch_name(&new_current, &source);
@@ -97,12 +98,12 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
     if git_ops::branch_exists_anywhere(&kokomeco_branch)? {
         let kokomeco_ref = git_ops::best_ref_for_local_branch(&kokomeco_branch)?
             .unwrap_or_else(|| kokomeco_branch.clone());
-        println!("Kokomeco branch already exists for this merge context: {kokomeco_branch}");
-        println!("To merge it back into your current target branch:");
-        println!("  git checkout {target_branch_for_merge}");
-        println!("  git merge --no-ff {kokomeco_ref}");
-        println!("After promotion, delete it manually when no longer needed:");
-        println!("  git branch -d {kokomeco_ref}");
+        color::print_emphasis(&format!("Kokomeco branch already exists for this merge context: {kokomeco_branch}"), None);
+        color::print_info("To merge it back into your current target branch:", None);
+        color::print_info(&format!("  git checkout {target_branch_for_merge}"), None);
+        color::print_info(&format!("  git merge --no-ff {kokomeco_ref}"), None);
+        color::print_info("After promotion, delete it manually when no longer needed:", None);
+        color::print_info(&format!("  git branch -d {kokomeco_ref}"), None);
         return Ok(());
     }
 
@@ -121,12 +122,13 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         let status = git_ops::slice_merge_status(&actual_integration_branch, &slices)?;
 
         if !status.is_empty() {
-            println!("Existing slice merge status for {actual_integration_branch}:");
+            color::print_emphasis(&format!("Existing slice merge status for {actual_integration_branch}:"), None);
             for (slice, merged) in &status {
-                println!(
-                    "  - {slice}: {}",
-                    if *merged { "merged" } else { "pending" }
-                );
+                if *merged {
+                    color::print_info(&format!("  - {slice}: merged"), None);
+                } else {
+                    color::print_warning(&format!("  - {slice}: pending"), None);
+                }
             }
         }
 
@@ -136,8 +138,9 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
             let do_consolidate = if args.yes {
                 true
             } else if args.quiet {
-                println!(
-                    "No pending slice merges. Skipping kokomeco prompt due to --quiet (use --yes to auto-create the kokomeco branch)."
+                color::print_info(
+                    "No pending slice merges. Skipping kokomeco prompt due to --quiet (use --yes to auto-create the kokomeco branch).",
+                    None,
                 );
                 false
             } else {
@@ -157,17 +160,19 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
                     &actual_source_ref,
                     &status,
                 )?;
-                println!("Created kokomeco branch: {consolidated}");
-                println!(
-                    "Integration branch was not rewritten. Review and promote explicitly if desired."
+                color::print_success(&format!("Created kokomeco branch: {consolidated}"), None);
+                color::print_info(
+                    "Integration branch was not rewritten. Review and promote explicitly if desired.",
+                    None,
                 );
             }
         }
 
         if !all_merged {
-            println!("Integration branch already exists and has pending slice merges.");
-            println!(
-                "Resolve pending slices first, then re-run for consolidation or new operations."
+            color::print_warning("Integration branch already exists and has pending slice merges.", None);
+            color::print_info(
+                "Resolve pending slices first, then re-run for consolidation or new operations.",
+                None,
             );
         }
 
@@ -256,13 +261,13 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
     )?;
 
     git_ops::checkout(&actual_integration_branch)?;
-    println!("Mergetopus complete");
-    println!("  Integration branch: {actual_integration_branch}");
-    println!("  Source ref: {actual_source_ref} ({actual_source_sha})");
-    println!("  Conflict count: {}", conflicted_files.len());
-    println!("  Explicit slice groups: {}", explicit_slices.len());
+    color::print_emphasis("Mergetopus complete", None);
+    color::print_info(&format!("  Integration branch: {actual_integration_branch}"), None);
+    color::print_info(&format!("  Source ref: {actual_source_ref} ({actual_source_sha})"), None);
+    color::print_info(&format!("  Conflict count: {}", conflicted_files.len()), None);
+    color::print_info(&format!("  Explicit slice groups: {}", explicit_slices.len()), None);
     for (idx, group) in explicit_slices.iter().enumerate() {
-        println!("  - SliceGroup {}: {} file(s)", idx + 1, group.len());
+        color::print_info(&format!("  - SliceGroup {}: {} file(s)", idx + 1, group.len()), None);
     }
 
     Ok(())
@@ -328,7 +333,7 @@ fn normalize_merge_source_ref(source_ref: &str) -> Result<String> {
 
         if local_sha == remote_sha {
             // Local is in sync with remote; use it.
-            println!("Using existing local branch '{local_candidate}' (in sync with '{trimmed}').");
+            color::print_info(&format!("Using existing local branch '{local_candidate}' (in sync with '{trimmed}')."), None);
             return Ok(local_candidate.to_string());
         } else {
             // Local and remote diverge.
@@ -344,10 +349,10 @@ fn normalize_merge_source_ref(source_ref: &str) -> Result<String> {
     }
 
     git_ops::create_tracking_branch(local_candidate, trimmed)?;
-    println!("Using remote source '{trimmed}' via new local tracking branch '{local_candidate}'");
-    println!(
+    color::print_info(&format!("Using remote source '{trimmed}' via new local tracking branch '{local_candidate}'"), None);
+    color::print_info(&format!(
         "Tip: remote name '{remote_name}' is omitted for this merge context (source = '{local_candidate}')."
-    );
+    ), None);
 
     Ok(local_candidate.to_string())
 }

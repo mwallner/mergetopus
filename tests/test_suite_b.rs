@@ -186,6 +186,96 @@ fn release_b_status_with_source_arg_finds_remote_only_integration() -> TestResul
     Ok(())
 }
 
+/// No-arg status prints global overview first and then current-branch details
+/// when a matching target unit exists.
+#[test]
+fn release_b_status_no_arg_prints_global_then_current_branch_details() -> TestResult<()> {
+    let repo = setup_remote_only_integration_repo()?;
+
+    let status = test_helpers::mergetopus(&repo, &["--quiet", "status"])?;
+    assert!(
+        status.status.success(),
+        "status command failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(stdout.contains("Global MMM overview"));
+    assert!(stdout.contains("Current branch details:"));
+    assert!(stdout.contains(&format!("Integration branch: {}", integration_branch())));
+
+    Ok(())
+}
+
+/// Explicit source/integration args must suppress global overview output.
+#[test]
+fn release_b_status_explicit_arg_skips_global_overview() -> TestResult<()> {
+    let repo = setup_remote_only_integration_repo()?;
+
+    let status = test_helpers::mergetopus(&repo, &["--quiet", "status", "feature"])?;
+    assert!(
+        status.status.success(),
+        "status command failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(!stdout.contains("Global MMM overview"));
+    assert!(stdout.contains(&format!("Integration branch: {}", integration_branch())));
+
+    Ok(())
+}
+
+/// Zero global units should be a successful, clear no-results report.
+#[test]
+fn release_b_status_zero_results_is_success() -> TestResult<()> {
+    let repo = test_helpers::init_repo_with_base_file()?;
+
+    let status = test_helpers::mergetopus(&repo, &["--quiet", "status"])?;
+    assert!(
+        status.status.success(),
+        "status command failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("No in-progress Mergetopus merges found in '_mmm/' across local and configured remotes."),
+        "expected no-results message in output:\n{stdout}"
+    );
+
+    Ok(())
+}
+
+/// Orphaned MMM refs should be reported as warnings without failing status.
+#[test]
+fn release_b_status_reports_orphaned_refs_without_failing() -> TestResult<()> {
+    let repo = test_helpers::init_repo_with_base_file()?;
+    let orphan_slice = "_mmm/main/feature/slice1";
+
+    test_helpers::git(&repo, &["checkout", "-b", orphan_slice])?;
+    test_helpers::write_file(&repo, "orphan.txt", "orphan\n")?;
+    test_helpers::commit_all(&repo, "orphan slice")?;
+    test_helpers::git(&repo, &["checkout", "main"])?;
+
+    let status = test_helpers::mergetopus(&repo, &["--quiet", "status"])?;
+    assert!(
+        status.status.success(),
+        "status command failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(stdout.contains("Orphaned MMM Refs (warning)"));
+    assert!(stdout.contains(orphan_slice));
+
+    Ok(())
+}
+
 /// Person B can resolve a remote-only slice branch.
 #[test]
 fn release_b_resolve_works_with_remote_only_slice() -> TestResult<()> {

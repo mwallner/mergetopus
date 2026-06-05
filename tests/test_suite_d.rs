@@ -720,3 +720,209 @@ fn lts_cascade_merge_preserves_authorship_in_kokomeco() -> TestResult<()> {
 
     Ok(())
 }
+
+#[test]
+fn verify_passes_when_integration_not_modified_after_kokomeco() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        create.status.success(),
+        "initial mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let integration = "_mmm/main/feature/integration";
+    let slice = "_mmm/main/feature/slice1";
+    resolve_slice_take_theirs(
+        &repo,
+        integration,
+        slice,
+        &["conflict.txt"],
+        STAN_NAME,
+        STAN_EMAIL,
+        "Stan resolves slice",
+    )?;
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let consolidate = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--yes"])?;
+    assert!(
+        consolidate.status.success(),
+        "kokomeco creation failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&consolidate.stdout),
+        String::from_utf8_lossy(&consolidate.stderr)
+    );
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let verify = test_helpers::mergetopus(&repo, &["--quiet", "verify", "feature"])?;
+    assert!(
+        verify.status.success(),
+        "verify failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&verify.stdout);
+    assert!(
+        stdout.contains("verification passed"),
+        "expected success message:\n{stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn verify_fails_when_integration_has_post_kokomeco_commit() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        create.status.success(),
+        "initial mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let integration = "_mmm/main/feature/integration";
+    let slice = "_mmm/main/feature/slice1";
+    resolve_slice_take_theirs(
+        &repo,
+        integration,
+        slice,
+        &["conflict.txt"],
+        STAN_NAME,
+        STAN_EMAIL,
+        "Stan resolves slice",
+    )?;
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let consolidate = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--yes"])?;
+    assert!(
+        consolidate.status.success(),
+        "kokomeco creation failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&consolidate.stdout),
+        String::from_utf8_lossy(&consolidate.stderr)
+    );
+
+    // Add a guaranteed newer commit on integration after kokomeco creation.
+    test_helpers::git(&repo, &["checkout", integration])?;
+    let out = test_helpers::run(
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "post-kokomeco drift"])
+            .env("GIT_AUTHOR_DATE", "2099-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2099-01-01T00:00:00Z")
+            .current_dir(&repo),
+    )?;
+    assert!(
+        out.status.success(),
+        "failed to create post-kokomeco drift commit:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let verify = test_helpers::mergetopus(&repo, &["--quiet", "verify", "feature"])?;
+    assert!(
+        !verify.status.success(),
+        "verify should fail for post-kokomeco drift:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(
+        stderr.contains("verification failed"),
+        "expected failure message:\n{stderr}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn verify_without_source_suggests_global_switch() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let verify = test_helpers::mergetopus(&repo, &["--quiet", "verify"])?;
+    assert!(
+        !verify.status.success(),
+        "verify without source should fail on non-integration branch:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(
+        stderr.contains("--global"),
+        "expected --global guidance in error:\n{stderr}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn verify_global_fails_when_any_integration_has_post_kokomeco_commit() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        create.status.success(),
+        "initial mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    let integration = "_mmm/main/feature/integration";
+    let slice = "_mmm/main/feature/slice1";
+    resolve_slice_take_theirs(
+        &repo,
+        integration,
+        slice,
+        &["conflict.txt"],
+        STAN_NAME,
+        STAN_EMAIL,
+        "Stan resolves slice",
+    )?;
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let consolidate = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--yes"])?;
+    assert!(
+        consolidate.status.success(),
+        "kokomeco creation failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&consolidate.stdout),
+        String::from_utf8_lossy(&consolidate.stderr)
+    );
+
+    test_helpers::git(&repo, &["checkout", integration])?;
+    let out = test_helpers::run(
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "post-kokomeco drift"])
+            .env("GIT_AUTHOR_DATE", "2099-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2099-01-01T00:00:00Z")
+            .current_dir(&repo),
+    )?;
+    assert!(
+        out.status.success(),
+        "failed to create post-kokomeco drift commit:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let verify = test_helpers::mergetopus(&repo, &["--quiet", "verify", "--global"])?;
+    assert!(
+        !verify.status.success(),
+        "global verify should fail for post-kokomeco drift:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(
+        stderr.contains("global verification failed"),
+        "expected global failure message:\n{stderr}"
+    );
+
+    Ok(())
+}

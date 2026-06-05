@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 
+use crate::color;
 use crate::git_ops;
 use crate::helpers;
 use crate::planner;
@@ -53,10 +54,10 @@ fn should_stage_after_mergetool(
         Some(true) => {
             // Explicit trust: rely solely on exit code.
             if !exit_success {
-                eprintln!(
+                color::print_error(&format!(
                     "warning: merge tool exited with non-zero status for '{path}'; \
                      skipping staging (trustExitCode is enabled)"
-                );
+                ), None);
                 return Ok(false);
             }
             Ok(true)
@@ -82,7 +83,7 @@ fn should_stage_after_mergetool(
             };
 
             if quiet {
-                eprintln!("warning: {reason} for '{path}'; skipping staging in --quiet mode");
+                color::print_error(&format!("warning: {reason} for '{path}'; skipping staging in --quiet mode"), None);
                 return Ok(false);
             }
 
@@ -199,23 +200,23 @@ pub fn resolve_command(
         || tool_cmd.contains("%MERGED%");
 
     if conflicted_paths.is_empty() {
-        println!(
+        color::print_info(&format!(
             "No conflicted files remain for merge '{}' into '{}'.",
             slice_branch, integration_branch
-        );
+        ), None);
 
         if do_commit {
             if git_ops::staged_has_changes()? || git_ops::merge_in_progress()? {
                 let msg =
                     format!("Mergetopus resolve: '{slice_branch}' into '{integration_branch}'");
                 git_ops::commit_strict(&msg)?;
-                println!("  Merge commit created on '{integration_branch}'.");
+                color::print_success(&format!("  Merge commit created on '{integration_branch}'."), None);
             } else {
-                println!("  No staged changes to commit.");
+                color::print_info("  No staged changes to commit.", None);
             }
         } else {
-            println!("  Merge result is staged on '{integration_branch}' but not committed.");
-            println!("  Review and commit when ready, or re-run with --commit.");
+            color::print_info(&format!("  Merge result is staged on '{integration_branch}' but not committed."), None);
+            color::print_info("  Review and commit when ready, or re-run with --commit.", None);
         }
 
         return Ok(());
@@ -259,7 +260,7 @@ pub fn resolve_command(
         let base_before = std::fs::read(&base_tmp)
             .with_context(|| format!("failed to read temporary BASE file for '{path}'"))?;
 
-        println!("Resolving '{path}' with '{tool_name}'...");
+        color::print_info(&format!("Resolving '{path}' with '{tool_name}'..."), None);
 
         // Substitute variables in the command to handle both Unix-style ($VAR, ${VAR})
         // and Windows-style (%VAR%) variable references consistently across platforms.
@@ -294,7 +295,7 @@ pub fn resolve_command(
                 if base_after != base_before {
                     std::fs::write(path, &base_after)
                         .with_context(|| format!("failed to write resolved content to '{path}'"))?;
-                    println!("Applied '{tool_name}' output from BASE temp file back to '{path}'.");
+                    color::print_info(&format!("Applied '{tool_name}' output from BASE temp file back to '{path}'."), None);
                 }
             }
         }
@@ -318,11 +319,11 @@ pub fn resolve_command(
         .collect::<Vec<_>>()
         .join(", ");
 
-    println!(
+    color::print_success(&format!(
         "Resolve complete for merge '{}' into '{}'",
         slice_branch, integration_branch
-    );
-    println!(
+    ), None);
+    color::print_info(&format!(
         "  Staged {} file(s): {}",
         staged_count,
         if paths_list.is_empty() {
@@ -330,13 +331,13 @@ pub fn resolve_command(
         } else {
             paths_list.clone()
         }
-    );
+    ), None);
     if !skipped_paths.is_empty() {
-        println!(
+        color::print_warning(&format!(
             "  Skipped {} file(s): {}",
             skipped_paths.len(),
             skipped_paths.join(", ")
-        );
+        ), None);
     }
 
     if do_commit {
@@ -345,13 +346,13 @@ pub fn resolve_command(
                 "Mergetopus resolve: '{slice_branch}' into '{integration_branch}'\n\nResolved-Paths: {paths_list}\nSource-Commit: {remote_commit}"
             );
             git_ops::commit_strict(&msg)?;
-            println!("  Merge commit created on '{integration_branch}'.");
+            color::print_success(&format!("  Merge commit created on '{integration_branch}'."), None);
         } else {
-            println!("  No staged changes to commit.");
+            color::print_info("  No staged changes to commit.", None);
         }
     } else {
-        println!("  Merge result is staged on '{integration_branch}' but not committed.");
-        println!("  Review and commit when ready, or re-run with --commit.");
+        color::print_info(&format!("  Merge result is staged on '{integration_branch}' but not committed."), None);
+        color::print_info("  Review and commit when ready, or re-run with --commit.", None);
     }
 
     Ok(())

@@ -1,0 +1,66 @@
+name: Build macOS
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    name: Build (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PowerShell modules
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          Install-Module InvokeBuild -Scope CurrentUser -Force -AllowClobber
+
+      - name: Setup cargo-bundle-licenses
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          cargo install --locked cargo-bundle-licenses
+
+      - name: Build + Test
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          Invoke-Build Build,Test
+
+      - name: Collect build artifacts
+        if: always()
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+
+          $artifactDir = 'artifacts'
+          New-Item -Path $artifactDir -ItemType Directory -Force | Out-Null
+
+          if (Test-Path './target/release/mergetopus') {
+            Copy-Item './target/release/mergetopus' "$artifactDir/mergetopus" -Force
+
+            tar -czf "$artifactDir/mergetopus-macos-x64.tar.gz" -C "$artifactDir" mergetopus
+
+            $hash = Get-FileHash "$artifactDir/mergetopus" -Algorithm SHA256
+            "$($hash.Hash.ToLower())  mergetopus" | Out-File -FilePath "$artifactDir/mergetopus-macos-x64.sha256" -Encoding ascii
+          }
+          else {
+            Write-Host 'No target/release/mergetopus file found to collect.'
+          }
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ runner.os }}
+          path: |
+            artifacts/mergetopus-macos-x64.tar.gz
+            artifacts/mergetopus-macos-x64.sha256
+          if-no-files-found: warn

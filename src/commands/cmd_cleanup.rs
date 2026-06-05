@@ -1,4 +1,5 @@
 use crate::tui;
+use crate::color;
 use anyhow::{Result, bail};
 
 use crate::git_ops;
@@ -32,8 +33,9 @@ pub fn cleanup_command(quiet: bool, current_branch: &str, tui_title: &str) -> Re
     }
 
     if branches_to_delete.is_empty() {
-        println!(
-            "Nothing to clean up: no integration branches with a corresponding kokomeco branch found."
+        color::print_info(
+            "Nothing to clean up: no integration branches with a corresponding kokomeco branch found.",
+            None,
         );
         return Ok(());
     }
@@ -55,21 +57,21 @@ pub fn cleanup_command(quiet: bool, current_branch: &str, tui_title: &str) -> Re
     };
 
     if !do_delete {
-        println!("Cleanup canceled.");
+        color::print_warning("Cleanup canceled.", None);
         return Ok(());
     }
 
     let mut deleted = 0usize;
     for branch in &branches_to_delete {
         if branch == current_branch {
-            eprintln!("Skipping '{branch}': cannot delete the currently checked-out branch.");
+            color::print_error(&format!("Skipping '{branch}': cannot delete the currently checked-out branch."), None);
             continue;
         }
         git_ops::delete_branch(branch)?;
-        println!("Deleted: {branch}");
+        color::print_success(&format!("Deleted: {branch}"), None);
         deleted += 1;
     }
 
-    println!("\nCleaned up {deleted} branch(es).");
+    color::print_success(&format!("\nCleaned up {deleted} branch(es)."), None);
     Ok(())
 }

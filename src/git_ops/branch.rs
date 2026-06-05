@@ -188,6 +188,28 @@ pub fn delete_branch(branch: &str) -> Result<()> {
     run_git(&["branch", "-D", branch]).map(|_| ())
 }
 
+/// Push a local branch to a remote with --force-with-lease.
+pub fn push_branch_force(remote: &str, branch: &str) -> Result<()> {
+    run_git(&["push", "--force-with-lease", remote, branch]).map(|_| ())
+}
+
+/// List local integration branches that have no remote-tracking ref on `remote`.
+pub fn list_unpushed_integration_branches(remote: &str) -> Result<Vec<String>> {
+    let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
+    let mut result = Vec::new();
+    for branch in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if crate::planner::parse_integration_branch(branch).is_none() {
+            continue;
+        }
+        let remote_ref = format!("{remote}/{branch}");
+        if !remote_branch_exists(&remote_ref)? {
+            result.push(branch.to_string());
+        }
+    }
+    result.sort();
+    Ok(result)
+}
+
 pub fn checkout_new_or_reset(branch: &str, at: &str) -> Result<()> {
     let entries = worktree::list_worktree_entries()?;
     if worktree::has_existing_linked_worktrees(&entries) {

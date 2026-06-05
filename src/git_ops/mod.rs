@@ -327,10 +327,10 @@ pub fn first_mergetopus_partial_merge_commit(integration_branch: &str) -> Result
         }
 
         if !subject.starts_with("Mergetopus: partial merge '") {
-            eprintln!(
+            crate::color::print_error(&format!(
                 "warning: skipping merge commit '{}' on '{}' because subject does not match expected Mergetopus prefix",
                 sha, integration_branch
-            );
+            ), None);
             continue;
         }
 
