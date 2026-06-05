@@ -1,6 +1,7 @@
 # mergetopus
 
 [![Build Linux](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-linux.yml?branch=main&label=Build%20Linux)](https://github.com/mwallner/mergetopus/actions/workflows/build-linux.yml)
+[![Build MacOS](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-macos.yml?branch=main&label=Build%20macOS)](https://github.com/mwallner/mergetopus/actions/workflows/build-macos.yml)
 [![Build Windows](https://img.shields.io/github/actions/workflow/status/mwallner/mergetopus/build-windows.yml?branch=main&label=Build%20Windows)](https://github.com/mwallner/mergetopus/actions/workflows/build-windows.yml)
 
 ![mergetopus logo](assets/mergetopus-logo.svg)

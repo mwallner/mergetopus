@@ -2,12 +2,12 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>mergetopus.portable</id>
-    <version>0.5.0</version>
+    <version>0.6.0</version>
     <title>mergetopus</title>
     <authors>mergetopus contributors</authors>
     <projectUrl>https://github.com/mwallner/mergetopus</projectUrl>
-    <licenseUrl>https://github.com/mwallner/mergetopus/blob/v0.5/LICENSE</licenseUrl>
-    <iconUrl>https://cdn.jsdelivr.net/gh/mwallner/mergetopus@0.5/assets/logo-v3-minimal-icon.svg</iconUrl>
+    <licenseUrl>https://github.com/mwallner/mergetopus/blob/v0.6/LICENSE</licenseUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/mwallner/mergetopus@0.6/assets/logo-v3-minimal-icon.svg</iconUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <summary>mergetopus is a tool that enables splitting complex Git merges into manageable slices</summary>
     <description>Mergetopus turns a regular Git merge into an integration branch plus optional per-conflict slice branches, making large or risky merges easier to review and land safely.
