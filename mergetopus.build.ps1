@@ -1,19 +1,12 @@
 # Invoke-Build -Task Pack
 
-Task GenerateLicenseInfo {
-	Remove-Item ./THIRDPARTY.json -ErrorAction SilentlyContinue
-	Exec {
-		cargo bundle-licenses --format json --output THIRDPARTY.json
-	}
-}
-
-Task BuildWin GenerateLicenseInfo, {
+Task BuildWin {
 	Exec {
 		cargo build --target x86_64-pc-windows-gnu --release
 	}
 }
 
-Task Build GenerateLicenseInfo, {
+Task Build {
 	Exec {
 		cargo build --release
 	}

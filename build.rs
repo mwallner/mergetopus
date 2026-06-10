@@ -1,11 +1,49 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
-    let json_path = PathBuf::from("THIRDPARTY.json");
-    let json_content = fs::read_to_string(&json_path).expect("Failed to read THIRDPARTY.json");
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"));
 
-    let license_path = PathBuf::from("LICENSE.txt");
-    let license_content = fs::read_to_string(&license_path).expect("Failed to read LICENSE.txt");
+    let json_path = manifest_dir.join("THIRDPARTY.json");
+    if let Err(err) = fs::remove_file(&json_path)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        panic!(
+            "Failed to remove existing THIRDPARTY.json at {}: {err}",
+            json_path.display()
+        );
+    }
+
+    let license_cmd = Command::new("cargo")
+        .args([
+            "bundle-licenses",
+            "--format",
+            "json",
+            "--output",
+            "THIRDPARTY.json",
+        ])
+        .current_dir(&manifest_dir)
+        .status()
+        .unwrap_or_else(|err| panic!("Failed to run cargo bundle-licenses: {err}"));
+    assert!(
+        license_cmd.success(),
+        "cargo bundle-licenses failed with status: {license_cmd}"
+    );
+
+    let json_content = fs::read_to_string(&json_path).unwrap_or_else(|err| {
+        panic!(
+            "Failed to read THIRDPARTY.json at {}: {err}",
+            json_path.display()
+        )
+    });
+
+    let license_path = manifest_dir.join("LICENSE.txt");
+    let license_content = fs::read_to_string(&license_path).unwrap_or_else(|err| {
+        panic!(
+            "Failed to read LICENSE.txt at {}: {err}",
+            license_path.display()
+        )
+    });
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = PathBuf::from(out_dir).join("licenses_json.rs");

@@ -339,6 +339,12 @@ On **Windows** with [Chocolatey](https://chocolatey.org/):
 choco install mergetopus.portable
 ```
 
+**Anywhere**, with Cargo:
+
+```bash
+cargo install --git https://github.com/mwallner/mergetopus.git 
+```
+
 ## Platform Support
 
 `mergetopus` works on **Windows**, **macOS**, and **Linux**.
