@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use crate::git_ops;
 use crate::planner;
 use crate::tui;
+use crate::tui_progress;
 
 /// Push an initialized merge plan (integration + slices + kokomeco) to a remote.
 ///
@@ -63,9 +64,25 @@ pub fn push_command(
     }
 
     // --- Step 5: Push each branch ---
-    for branch in &to_push {
-        color::print_info(&format!("Pushing {branch} \u{2192} {remote}"), None);
-        git_ops::push_branch_force(&remote, branch)?;
+    if !quiet {
+        let r = remote.clone();
+        let steps: Vec<tui_progress::ProgressStep> = to_push
+            .iter()
+            .map(|branch| {
+                let branch = branch.clone();
+                let remote = r.clone();
+                tui_progress::ProgressStep {
+                    label: format!("Pushing {branch} \u{2192} {remote}"),
+                    action: Box::new(move || git_ops::push_branch_force(&remote, &branch)),
+                }
+            })
+            .collect();
+        tui_progress::run_progress(tui_title, steps)?;
+    } else {
+        for branch in &to_push {
+            color::print_info(&format!("Pushing {branch} \u{2192} {remote}"), None);
+            git_ops::push_branch_force(&remote, branch)?;
+        }
     }
 
     color::print_success(
