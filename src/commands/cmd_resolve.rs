@@ -462,19 +462,17 @@ pub fn resolve_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn write_temp_file(content: &str) -> String {
+        let id = TEMP_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir =
             std::env::temp_dir().join(format!("mergetopus-test-resolve-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir
-            .join(format!(
-                "test-{}.txt",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ))
+            .join(format!("test-{id}.txt"))
             .to_string_lossy()
             .into_owned();
         std::fs::write(&path, content).unwrap();

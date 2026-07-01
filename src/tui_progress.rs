@@ -438,17 +438,61 @@ mod tests {
             },
         ];
 
-        let polls = Cell::new(0u64);
+        // Use a shared counter so poll_event returns true only after
+        // both steps have had time to finish. The loop injects ignored
+        // Tab keys during the render-loop polls; Enter is injected only
+        // once for the dismissal loop.
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let polls_clone = polls.clone();
         let result = run_progress_on_terminal(
             &mut terminal,
             "Test",
             steps,
-            |_| {
-                let n = polls.get() + 1;
-                polls.set(n);
-                Ok(n > 5)
+            move |_| {
+                let n = polls_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(n > 20)
             },
             events![
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                 Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             ],
         );
@@ -481,17 +525,58 @@ mod tests {
             },
         ];
 
-        let polls = Cell::new(0u64);
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let polls_clone = polls.clone();
         let result = run_progress_on_terminal(
             &mut terminal,
             "Test",
             steps,
-            |_| {
-                let n = polls.get() + 1;
-                polls.set(n);
-                Ok(n > 5)
+            move |_| {
+                let n = polls_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(n > 20)
             },
             events![
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                 Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             ],
         );
