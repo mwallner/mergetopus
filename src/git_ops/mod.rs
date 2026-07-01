@@ -238,9 +238,13 @@ pub fn show_file_at(reference: &str, path: &str) -> Result<String> {
 
     if output.status.success() {
         let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
-        // git show appends a trailing newline; strip only that, not all whitespace.
+        // git show appends a trailing newline (CRLF on Windows); strip only
+        // that, not all trailing whitespace, to preserve meaningful content.
         if s.ends_with('\n') {
             s.truncate(s.len() - 1);
+            if s.ends_with('\r') {
+                s.truncate(s.len() - 1);
+            }
         }
         Ok(s)
     } else {
