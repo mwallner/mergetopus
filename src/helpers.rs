@@ -29,15 +29,47 @@ pub fn extract_slice_paths(message: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parse a command string into program and arguments, handling quoted tokens.
+/// Parse a command string into program and arguments, handling quoted tokens
+/// and backslash-escaped quotes.
+///
+/// Supported escapes inside quotes:
+/// - `\"` → literal `"` (inside double-quoted strings)
+/// - `\'` → literal `'` (inside single-quoted strings)
+/// - `\\` → literal `\`
+///
 /// Splits on unquoted whitespace to handle paths and arguments with special characters.
 fn parse_command_string(cmd: &str) -> Result<(String, Vec<String>)> {
     let mut tokens = Vec::new();
     let mut current_token = String::new();
     let mut in_double_quotes = false;
     let mut in_single_quotes = false;
+    let mut chars = cmd.chars().peekable();
 
-    for ch in cmd.chars() {
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.peek() {
+                Some('"') if in_double_quotes => {
+                    current_token.push('"');
+                    chars.next();
+                    continue;
+                }
+                Some('\'') if in_single_quotes => {
+                    current_token.push('\'');
+                    chars.next();
+                    continue;
+                }
+                Some('\\') => {
+                    current_token.push('\\');
+                    chars.next();
+                    continue;
+                }
+                _ => {
+                    current_token.push('\\');
+                    continue;
+                }
+            }
+        }
+
         match ch {
             '"' if !in_single_quotes => {
                 in_double_quotes = !in_double_quotes;
@@ -205,5 +237,49 @@ mod tests {
         let msg = "Mergetopus slice: 'src/lib.rs' from 'feat' (theirs)\n\nSource-Ref: feat\nSource-Commit: 111\nSource-Path: src/lib.rs\nSource-Path-Commit: 222\n";
         let paths = extract_slice_paths(msg);
         assert_eq!(paths, vec!["src/lib.rs".to_string()]);
+    }
+
+    #[test]
+    fn parse_command_backslash_escaped_double_quote() {
+        let (prog, args) = parse_command_string("tool \"path\\\"with\\\"quotes\" arg2").unwrap();
+        assert_eq!(prog, "tool");
+        assert_eq!(args, vec![r#"path"with"quotes"#, "arg2"]);
+    }
+
+    #[test]
+    fn parse_command_backslash_escaped_single_quote() {
+        let (prog, args) = parse_command_string("tool 'it\\'s arg' arg2").unwrap();
+        assert_eq!(prog, "tool");
+        assert_eq!(args, vec!["it's arg", "arg2"]);
+    }
+
+    #[test]
+    fn parse_command_backslash_escaped_backslash() {
+        let (prog, args) = parse_command_string("tool \"a\\\\b\"").unwrap();
+        assert_eq!(prog, "tool");
+        assert_eq!(args, vec![r"a\b"]);
+    }
+
+    #[test]
+    fn parse_command_backslash_outside_quotes_is_literal() {
+        let (prog, args) = parse_command_string(r"tool path\with\backslashes").unwrap();
+        assert_eq!(prog, "tool");
+        assert_eq!(args, vec![r"path\with\backslashes"]);
+    }
+
+    #[test]
+    fn parse_command_backslash_before_unquoted_quote_does_not_escape() {
+        // Outside quotes, \ before " should produce a literal backslash,
+        // then " toggles double-quoting for the remaining text.
+        let (prog, args) = parse_command_string(r#"tool arg\"rest"#).unwrap();
+        assert_eq!(prog, "tool");
+        assert_eq!(args, vec!["arg\\rest"]); // "rest is inside double quotes
+    }
+
+    #[test]
+    fn parse_command_trailing_backslash_in_quotes() {
+        let (prog, args) = parse_command_string("tool \"trailing\\\"").unwrap();
+        assert_eq!(prog, "tool");
+        assert_eq!(args, vec!["trailing\""]);
     }
 }

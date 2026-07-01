@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result, bail};
 
 use crate::color;
@@ -6,6 +8,68 @@ use crate::helpers;
 use crate::planner;
 use crate::tui;
 use crate::tui_progress;
+
+/// RAII guard that creates a temporary directory on construction and deletes
+/// it (including all contents) when the guard is dropped, covering all exit
+/// paths: normal return, early bail, panic unwind, and Ctrl-C.
+struct MergetopusTempDir {
+    path: PathBuf,
+    cleaned: bool,
+}
+
+impl MergetopusTempDir {
+    fn new() -> Result<Self> {
+        let pid = std::process::id();
+        let base = std::env::temp_dir().join(format!("mergetopus-{pid}"));
+        // Use a counter suffix so sequential resolves in the same process
+        // each get a fresh directory.
+        let path = {
+            let mut n = 0u64;
+            loop {
+                let candidate = if n == 0 {
+                    base.clone()
+                } else {
+                    base.with_extension(n.to_string())
+                };
+                if !candidate.exists() {
+                    break candidate;
+                }
+                n += 1;
+            }
+        };
+        std::fs::create_dir_all(&path)
+            .context("failed to create temporary directory for merge tool files")?;
+        Ok(MergetopusTempDir { path, cleaned: false })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Mark the directory as successfully cleaned — prevents the Drop handler
+    /// from printing a warning on normal exit paths.
+    fn clean(&mut self) {
+        self.cleaned = true;
+    }
+}
+
+impl Drop for MergetopusTempDir {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        if let Err(e) = std::fs::remove_dir_all(&self.path) {
+            // Only warn on actual errors (not "not found" — that's fine).
+            if e.kind() != std::io::ErrorKind::NotFound {
+                let _ = std::fs::remove_dir_all(&self.path);
+                eprintln!(
+                    "warning: failed to remove temporary directory '{}': {e}",
+                    self.path.display()
+                );
+            }
+        }
+    }
+}
 
 /// Check whether a file still contains git conflict markers.
 fn has_conflict_markers(path: &str) -> bool {
@@ -113,6 +177,8 @@ pub fn resolve_command(
     quiet: bool,
     tui_title: &str,
 ) -> Result<()> {
+    git_ops::ensure_longpaths_support()?;
+
     let selected_slice = if let Some(b) = branch_arg {
         b.to_string()
     } else {
@@ -244,14 +310,18 @@ pub fn resolve_command(
         return Ok(());
     }
 
-    let tmp_dir = std::env::temp_dir().join(format!("mergetopus-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp_dir)
-        .context("failed to create temporary directory for merge tool files")?;
+    let mut tmp_dir = MergetopusTempDir::new()?;
 
     let mut skipped_paths: Vec<String> = Vec::new();
 
     for path in &conflicted_paths {
-        let safe_name = path
+        // Derive a short safe name from the filename alone, suffixed with
+        // a hash of the full path to keep unique even if the same filename
+        // appears in different directories.
+        let filename = path.rsplit_once(['/', '\\'])
+            .map(|(_, name)| name)
+            .unwrap_or(path);
+        let safe_file: String = filename
             .chars()
             .map(|c| {
                 if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
@@ -260,16 +330,24 @@ pub fn resolve_command(
                     '_'
                 }
             })
-            .collect::<String>();
+            .collect();
+        let hash = path.bytes().fold(0u32, |acc, b| {
+            acc.wrapping_mul(31).wrapping_add(b as u32)
+        });
+        let safe_name = format!("{}_{:08x}", safe_file, hash);
+
         let local_tmp = tmp_dir
+            .path()
             .join(format!("{safe_name}.LOCAL"))
             .to_string_lossy()
             .into_owned();
         let base_tmp = tmp_dir
+            .path()
             .join(format!("{safe_name}.BASE"))
             .to_string_lossy()
             .into_owned();
         let remote_tmp = tmp_dir
+            .path()
             .join(format!("{safe_name}.REMOTE"))
             .to_string_lossy()
             .into_owned();
@@ -377,6 +455,7 @@ pub fn resolve_command(
         color::print_info("  Review and commit when ready, or re-run with --commit.", None);
     }
 
+    tmp_dir.clean();
     Ok(())
 }
 

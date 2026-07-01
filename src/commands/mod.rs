@@ -57,9 +57,9 @@ pub fn run(args: Args) -> Result<()> {
         return cmd_verify::verify_command(source.as_deref(), *global, &current_branch);
     }
 
-    if let Some(Commands::Here) = &args.command {
+    if let Some(Commands::Here { source }) = &args.command {
         let (current_branch, tui_title) = current_branch_and_tui_title_worktree()?;
-        return cmd_here::here_command(&args, &current_branch, &tui_title);
+        return cmd_here::here_command(&args, source.as_deref(), &current_branch, &tui_title);
     }
 
     if let Some(Commands::Push { remote }) = &args.command {

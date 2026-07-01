@@ -69,7 +69,7 @@ pub fn ensure_git_worktree() -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn ensure_longpaths_support() -> Result<()> {
+pub(crate) fn ensure_longpaths_support() -> Result<()> {
     let current = get_git_config("core.longpaths")?.unwrap_or_default();
     if current.eq_ignore_ascii_case("true") {
         return Ok(());
@@ -79,7 +79,7 @@ fn ensure_longpaths_support() -> Result<()> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn ensure_longpaths_support() -> Result<()> {
+pub(crate) fn ensure_longpaths_support() -> Result<()> {
     Ok(())
 }
 
@@ -231,10 +231,20 @@ pub fn commit_slice(message: &str, provenance: &PathProvenance) -> Result<()> {
 }
 
 pub fn show_file_at(reference: &str, path: &str) -> Result<String> {
-    let (ok, out, err) = run_git_allow_failure(&["show", &format!("{reference}:{path}")])?;
-    if ok {
-        Ok(out)
+    let output = Command::new("git")
+        .args(["show", &format!("{reference}:{path}")])
+        .output()
+        .with_context(|| format!("failed to execute git show {reference}:{path}"))?;
+
+    if output.status.success() {
+        let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
+        // git show appends a trailing newline; strip only that, not all whitespace.
+        if s.ends_with('\n') {
+            s.truncate(s.len() - 1);
+        }
+        Ok(s)
     } else {
+        let err = String::from_utf8_lossy(&output.stderr);
         Ok(format!("<unavailable: {err}>"))
     }
 }

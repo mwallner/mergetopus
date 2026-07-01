@@ -652,7 +652,7 @@ pub(crate) fn render_select_conflicts(
                     .title("3-Way Diff (Esc close, Up/Down/PgUp/PgDn/Home/End scroll)")
                     .borders(Borders::ALL),
             )
-            .scroll((*overlay_scroll as u16, 0))
+            .scroll(((*overlay_scroll).min(u16::MAX as usize) as u16, 0))
             .wrap(Wrap { trim: false });
         f.render_widget(Clear, area);
         f.render_widget(p, area);
