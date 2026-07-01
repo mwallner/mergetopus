@@ -5,6 +5,7 @@ use crate::git_ops;
 use crate::helpers;
 use crate::planner;
 use crate::tui;
+use crate::tui_progress;
 
 /// Check whether a file still contains git conflict markers.
 fn has_conflict_markers(path: &str) -> bool {
@@ -169,10 +170,31 @@ pub fn resolve_command(
 
         (git_ops::head_sha()?, merge_head)
     } else {
-        git_ops::ensure_git_context()?;
-        git_ops::checkout(&integration_branch)?;
+        if !quiet {
+            let ib = integration_branch.clone();
+            let sb = slice_branch.clone();
+            tui_progress::run_progress(
+                tui_title,
+                vec![
+                    tui_progress::ProgressStep {
+                        label: "Preparing integration branch".into(),
+                        action: Box::new(move || {
+                            git_ops::ensure_git_context()?;
+                            git_ops::checkout(&ib)
+                        }),
+                    },
+                    tui_progress::ProgressStep {
+                        label: format!("Merging slice branch: {slice_branch}"),
+                        action: Box::new(move || git_ops::merge_no_commit(&sb)),
+                    },
+                ],
+            )?;
+        } else {
+            git_ops::ensure_git_context()?;
+            git_ops::checkout(&integration_branch)?;
+            git_ops::merge_no_commit(&slice_branch)?;
+        }
         let local = git_ops::head_sha()?;
-        git_ops::merge_no_commit(&slice_branch)?;
         (local, slice_commit.clone())
     };
 

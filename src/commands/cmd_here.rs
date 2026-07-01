@@ -2,6 +2,7 @@ use crate::cli::Args;
 use crate::color;
 use crate::commands::cmd_merge_workflow;
 use crate::models::SlicePlanItem;
+use crate::tui_progress;
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -54,8 +55,27 @@ pub fn here_command(args: &Args, current_branch: &str, tui_title: &str) -> Resul
     let remembered_head = git_ops::head_sha()?;
     let merge_base = git_ops::merge_base(&remembered_head, &source_sha)?;
 
-    git_ops::checkout_new_or_reset(&integration_branch, &remembered_head)?;
-    git_ops::merge_no_commit(&source_sha)?;
+    if !args.quiet {
+        let ib = integration_branch.clone();
+        let rh = remembered_head.clone();
+        let ss = source_sha.clone();
+        tui_progress::run_progress(
+            tui_title,
+            vec![
+                tui_progress::ProgressStep {
+                    label: "Creating integration branch".into(),
+                    action: Box::new(move || git_ops::checkout_new_or_reset(&ib, &rh)),
+                },
+                tui_progress::ProgressStep {
+                    label: format!("Merging source: {source_ref}"),
+                    action: Box::new(move || git_ops::merge_no_commit(&ss)),
+                },
+            ],
+        )?;
+    } else {
+        git_ops::checkout_new_or_reset(&integration_branch, &remembered_head)?;
+        git_ops::merge_no_commit(&source_sha)?;
+    }
 
     let conflicted_now = git_ops::conflicted_files()?;
     for path in &conflicted_now {
@@ -128,16 +148,40 @@ pub fn here_command(args: &Args, current_branch: &str, tui_title: &str) -> Resul
         }
     };
 
-    planner::create_slice_branches(
-        &integration_branch,
-        &merge_base,
-        &source_ref,
-        &source_sha,
-        &unresolved_before,
-        &explicit_slices,
-    )?;
-
-    git_ops::checkout(&integration_branch)?;
+    if !args.quiet {
+        let ib = integration_branch.clone();
+        let ib2 = integration_branch.clone();
+        let mb = merge_base.clone();
+        let sr = source_ref.clone();
+        let ss = source_sha.clone();
+        let ub = unresolved_before.clone();
+        let es = explicit_slices.clone();
+        tui_progress::run_progress(
+            tui_title,
+            vec![
+                tui_progress::ProgressStep {
+                    label: "Creating slice branches".into(),
+                    action: Box::new(move || {
+                        planner::create_slice_branches(&ib, &mb, &sr, &ss, &ub, &es)
+                    }),
+                },
+                tui_progress::ProgressStep {
+                    label: "Finalizing".into(),
+                    action: Box::new(move || git_ops::checkout(&ib2)),
+                },
+            ],
+        )?;
+    } else {
+        planner::create_slice_branches(
+            &integration_branch,
+            &merge_base,
+            &source_ref,
+            &source_sha,
+            &unresolved_before,
+            &explicit_slices,
+        )?;
+        git_ops::checkout(&integration_branch)?;
+    }
     color::print_emphasis("Mergetopus HERE takeover complete", None);
     color::print_info(&format!("  Integration branch: {integration_branch}"), None);
     color::print_info(&format!("  Source ref: {source_ref} ({source_sha})"), None);

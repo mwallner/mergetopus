@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use crate::git_ops;
 use crate::planner;
 use crate::tui;
+use crate::tui_progress;
 
 use super::cmd_status;
 
@@ -179,8 +180,27 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         return Ok(());
     }
 
-    git_ops::checkout_new_or_reset(&actual_integration_branch, &actual_remembered_head)?;
-    git_ops::merge_no_commit(&actual_source_ref)?;
+    if !args.quiet {
+        let ib = actual_integration_branch.clone();
+        let head = actual_remembered_head.clone();
+        let src = actual_source_ref.clone();
+        tui_progress::run_progress(
+            tui_title,
+            vec![
+                tui_progress::ProgressStep {
+                    label: "Creating integration branch".into(),
+                    action: Box::new(move || git_ops::checkout_new_or_reset(&ib, &head)),
+                },
+                tui_progress::ProgressStep {
+                    label: format!("Merging source: {src}"),
+                    action: Box::new(move || git_ops::merge_no_commit(&src)),
+                },
+            ],
+        )?;
+    } else {
+        git_ops::checkout_new_or_reset(&actual_integration_branch, &actual_remembered_head)?;
+        git_ops::merge_no_commit(&actual_source_ref)?;
+    }
 
     let conflicted_files = git_ops::conflicted_files()?;
     for path in &conflicted_files {
@@ -251,16 +271,40 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
             return Err(e).context("conflict selection canceled; integration branch cleaned up");
         }
     };
-    planner::create_slice_branches(
-        &actual_integration_branch,
-        &actual_merge_base,
-        &actual_source_ref,
-        &actual_source_sha,
-        &conflicted_files,
-        &explicit_slices,
-    )?;
-
-    git_ops::checkout(&actual_integration_branch)?;
+    if !args.quiet {
+        let ib = actual_integration_branch.clone();
+        let ib2 = actual_integration_branch.clone();
+        let mb = actual_merge_base.clone();
+        let sr = actual_source_ref.clone();
+        let ss = actual_source_sha.clone();
+        let cf = conflicted_files.clone();
+        let es = explicit_slices.clone();
+        tui_progress::run_progress(
+            tui_title,
+            vec![
+                tui_progress::ProgressStep {
+                    label: "Creating slice branches".into(),
+                    action: Box::new(move || {
+                        planner::create_slice_branches(&ib, &mb, &sr, &ss, &cf, &es)
+                    }),
+                },
+                tui_progress::ProgressStep {
+                    label: "Finalizing".into(),
+                    action: Box::new(move || git_ops::checkout(&ib2)),
+                },
+            ],
+        )?;
+    } else {
+        planner::create_slice_branches(
+            &actual_integration_branch,
+            &actual_merge_base,
+            &actual_source_ref,
+            &actual_source_sha,
+            &conflicted_files,
+            &explicit_slices,
+        )?;
+        git_ops::checkout(&actual_integration_branch)?;
+    }
     color::print_emphasis("Mergetopus complete", None);
     color::print_info(&format!("  Integration branch: {actual_integration_branch}"), None);
     color::print_info(&format!("  Source ref: {actual_source_ref} ({actual_source_sha})"), None);

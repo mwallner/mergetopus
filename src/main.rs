@@ -6,6 +6,7 @@ mod helpers;
 mod models;
 mod planner;
 mod tui;
+pub(crate) mod tui_progress;
 
 #[cfg(test)]
 mod test_support;
