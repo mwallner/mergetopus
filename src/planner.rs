@@ -3,7 +3,48 @@ use crate::color;
 
 use crate::git_ops;
 
+/// Sanitize a string for use as a Git branch name fragment.
+///
+/// Replaces invalid characters with `_`, collapses consecutive underscores,
+/// and trims leading/trailing underscores. When characters are replaced, a
+/// short deterministic hash of the original input is appended to prevent
+/// collisions between different names that sanitize to the same fragment
+/// (e.g. `"feature/foo"` and `"feature:foo"` both producing `"feature_foo"`).
 pub fn sanitize_branch_fragment(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_underscore = false;
+    let mut had_replacements = false;
+
+    for c in input.chars() {
+        let ok = c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+        if ok {
+            out.push(c);
+            prev_underscore = false;
+        } else if !prev_underscore {
+            out.push('_');
+            prev_underscore = true;
+            had_replacements = true;
+        }
+    }
+
+    let trimmed = out.trim_matches('_').to_string();
+    if trimmed.is_empty() || !had_replacements {
+        return trimmed;
+    }
+
+    // A simple polynomial hash that is stable across Rust versions and
+    // platforms. 16-bit suffix = 1-in-65536 collision chance, more than
+    // adequate for disambiguation within a single repository.
+    let hash = input
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    format!("{trimmed}_{:04x}", hash & 0xFFFF)
+}
+
+/// Like `sanitize_branch_fragment` but never appends a disambiguation hash.
+/// Use this when comparing against stored branch-name tokens in existing MMM
+/// branch names (status, verify) for backward compatibility.
+pub fn sanitize_branch_fragment_legacy(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut prev_underscore = false;
 
@@ -242,12 +283,74 @@ mod tests {
 
     #[test]
     fn sanitize_fragment_keeps_safe_chars() {
+        // Characters that are replaced get a short disambiguation hash suffix.
+        let a = sanitize_branch_fragment("feature/refactor-auth");
+        assert!(a.starts_with("feature_refactor-auth_"), "expected hash suffix, got {a}");
+        let b = sanitize_branch_fragment("release 1.0");
+        assert!(b.starts_with("release_1.0_"), "expected hash suffix, got {b}");
+        // All-invalid input still produces empty (no hash needed).
+        assert_eq!(sanitize_branch_fragment("***"), "");
+        // Purely safe input has no hash suffix (backward compatible).
         assert_eq!(
-            sanitize_branch_fragment("feature/refactor-auth"),
+            sanitize_branch_fragment("feature.refactor-auth"),
+            "feature.refactor-auth"
+        );
+    }
+
+    #[test]
+    fn sanitize_fragment_legacy_preserves_old_behavior() {
+        assert_eq!(
+            sanitize_branch_fragment_legacy("feature/refactor-auth"),
             "feature_refactor-auth"
         );
-        assert_eq!(sanitize_branch_fragment("release 1.0"), "release_1.0");
-        assert_eq!(sanitize_branch_fragment("***"), "");
+        assert_eq!(
+            sanitize_branch_fragment_legacy("release 1.0"),
+            "release_1.0"
+        );
+        assert_eq!(sanitize_branch_fragment_legacy("***"), "");
+    }
+
+    #[test]
+    fn sanitize_fragment_disambiguates_collisions() {
+        let a = sanitize_branch_fragment("feature/foo");
+        let b = sanitize_branch_fragment("feature:foo");
+        assert_ne!(a, b, "colliding inputs must produce different outputs");
+    }
+
+    #[test]
+    fn sanitize_fragment_hash_hardcoded_output() {
+        // Hardcoded expected values so changes to the hash algorithm are
+        // caught by CI rather than silently producing different branch names.
+        // Values below were computed by the current polynomial hash.
+        // If CI fails here, the hash algorithm changed and branch names
+        // will differ from previous runs — update intentionally.
+        assert_eq!(
+            sanitize_branch_fragment("feature/foo"),
+            "feature_foo_fa2d",
+        );
+        assert_eq!(
+            sanitize_branch_fragment("feature:foo"),
+            "feature_foo_fa42",
+        );
+    }
+
+    #[test]
+    fn sanitize_fragment_hash_is_deterministic() {
+        let a = sanitize_branch_fragment("feature/release/1.0");
+        let b = sanitize_branch_fragment("feature/release/1.0");
+        assert_eq!(a, b, "same input must produce same output across calls");
+        let expected_prefix = "feature_release_1.0_";
+        assert!(
+            a.starts_with(expected_prefix),
+            "expected prefix '{expected_prefix}', got '{a}'"
+        );
+        // Verify the suffix is a 4-char hex string.
+        let suffix = a.strip_prefix(expected_prefix).unwrap();
+        assert_eq!(suffix.len(), 4, "hash suffix should be 4 hex chars, got '{suffix}'");
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash suffix should be hex, got '{suffix}'"
+        );
     }
 
     #[test]

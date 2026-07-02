@@ -1,4 +1,4 @@
-use crate::git_ops::run_git;
+use crate::git_ops::{run_git, ensure_longpaths_support};
 use anyhow::{Context, Result, bail};
 use std::env;
 use std::fs;
@@ -178,15 +178,43 @@ fn branch_to_worktree_leaf(branch: &str) -> String {
         }
     }
     if out.is_empty() {
-        "branch".to_string()
-    } else {
-        out
+        return "branch".to_string();
     }
+
+    // Truncate long branch names to avoid exceeding filesystem path limits
+    // on Windows. Append a short hash of the full name so the leaf remains
+    // unique even after truncation.
+    const MAX_LEAF: usize = 80;
+    if out.len() > MAX_LEAF {
+        let hash = branch.bytes().fold(0u32, |acc, b| {
+            acc.wrapping_mul(31).wrapping_add(b as u32)
+        });
+        let suffix = format!("_{:04x}", hash & 0xFFFF);
+        let trunc = MAX_LEAF.saturating_sub(suffix.len());
+        out.truncate(trunc);
+        out.push_str(&suffix);
+    }
+
+    out
 }
 
 fn pick_new_worktree_path(base: &Path, branch: &str, entries: &[WorktreeEntry]) -> PathBuf {
     let base_name = format!("mergetopus-{}", branch_to_worktree_leaf(branch));
     let known = entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>();
+
+    // Guard: if even the base name would produce a path exceeding the
+    // recommended maximum (240 chars — leaves room for drive letter,
+    // colon, backslash, and null terminator on Windows), fall back to
+    // a short hash-only name.
+    const MAX_PATH_LEN: usize = 240;
+    let base_len = base.to_string_lossy().len() + 1; // +1 for separator
+    if base_len + base_name.len() > MAX_PATH_LEN {
+        let hash = branch.bytes().fold(0u32, |acc, b| {
+            acc.wrapping_mul(31).wrapping_add(b as u32)
+        });
+        let fallback_leaf = format!("mergetopus-{:08x}", hash);
+        return base.join(fallback_leaf);
+    }
 
     for idx in 0..1000usize {
         let leaf = if idx == 0 {
@@ -220,9 +248,11 @@ pub fn ensure_worktree_for_existing_branch(
     entries: &[WorktreeEntry],
 ) -> Result<PathBuf> {
     if let Some(path) = find_worktree_for_branch(entries, branch) {
+        ensure_longpaths_support()?;
         return Ok(path);
     }
 
+    ensure_longpaths_support()?;
     let base = infer_worktree_base_dir(entries)?;
     fs::create_dir_all(&base).with_context(|| {
         format!(
@@ -249,9 +279,11 @@ pub fn ensure_worktree_for_branch_reset(
     entries: &[WorktreeEntry],
 ) -> Result<PathBuf> {
     if let Some(path) = find_worktree_for_branch(entries, branch) {
+        ensure_longpaths_support()?;
         return Ok(path);
     }
 
+    ensure_longpaths_support()?;
     let base = infer_worktree_base_dir(entries)?;
     fs::create_dir_all(&base).with_context(|| {
         format!(

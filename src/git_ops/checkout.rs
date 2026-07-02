@@ -1,7 +1,8 @@
-use crate::git_ops::{run_git, worktree};
+use crate::git_ops::{ensure_longpaths_support, run_git, worktree};
 use anyhow::Result;
 
 pub fn checkout(branch: &str) -> Result<()> {
+    ensure_longpaths_support()?;
     let entries = worktree::list_worktree_entries()?;
     if worktree::has_existing_linked_worktrees(&entries) {
         let path = worktree::ensure_worktree_for_existing_branch(branch, &entries)?;

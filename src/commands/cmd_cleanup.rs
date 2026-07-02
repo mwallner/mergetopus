@@ -18,7 +18,7 @@ pub fn cleanup_command(quiet: bool, current_branch: &str, tui_title: &str) -> Re
         }
 
         let kokomeco = git_ops::consolidated_branch_name(branch);
-        if !git_ops::branch_exists(&kokomeco)? {
+        if !git_ops::branch_exists_anywhere(&kokomeco)? {
             continue;
         }
 
@@ -35,6 +35,10 @@ pub fn cleanup_command(quiet: bool, current_branch: &str, tui_title: &str) -> Re
     if branches_to_delete.is_empty() {
         color::print_info(
             "Nothing to clean up: no integration branches with a corresponding kokomeco branch found.",
+            None,
+        );
+        color::print_info(
+            "  Tip: run 'git fetch --prune' to sync remote state and try again.",
             None,
         );
         return Ok(());

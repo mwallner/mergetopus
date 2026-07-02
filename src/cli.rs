@@ -196,7 +196,14 @@ pub enum Commands {
     /// present. Mergetopus captures already-resolved paths, rebuilds a canonical
     /// integration branch, and opens conflict grouping for only unresolved paths.
     #[command(name = "HERE", visible_alias = "here")]
-    Here,
+    Here {
+        /// Explicit source branch/ref to use as the merge source.
+        ///
+        /// Use this to disambiguate when multiple branches point to the same
+        /// commit. If omitted, Mergetopus prompts for selection when ambiguous.
+        #[arg(long, value_name = "SOURCE")]
+        source: Option<String>,
+    },
 
     /// Push an initialized merge plan (integration + slices + kokomeco) to a remote.
     ///

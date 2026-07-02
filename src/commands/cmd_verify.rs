@@ -189,7 +189,7 @@ fn resolve_verify_integration_branch(source_arg: Option<&str>, current_branch: &
             source.to_string()
         } else if let Some((_, current_source)) = planner::parse_integration_branch(current_branch)
         {
-            if current_source == planner::sanitize_branch_fragment(source) {
+            if current_source == planner::sanitize_branch_fragment_legacy(source) {
                 current_branch.to_string()
             } else {
                 planner::integration_branch_name(current_branch, source)

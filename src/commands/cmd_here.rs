@@ -2,6 +2,8 @@ use crate::cli::Args;
 use crate::color;
 use crate::commands::cmd_merge_workflow;
 use crate::models::SlicePlanItem;
+use crate::tui;
+use crate::tui_progress;
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,13 +13,24 @@ use crate::planner;
 /// Converts an in-progress manual merge into a Mergetopus-managed integration
 /// flow by preserving resolved work, slicing unresolved conflicts, and creating
 /// integration/slice branches for subsequent resolve steps.
-pub fn here_command(args: &Args, current_branch: &str, tui_title: &str) -> Result<()> {
+///
+/// `source_ref_override` — when provided (via `--source`), skip ref resolution
+/// and use this value as the source label directly.
+pub fn here_command(
+    args: &Args,
+    source_ref_override: Option<&str>,
+    current_branch: &str,
+    tui_title: &str,
+) -> Result<()> {
     if !git_ops::merge_in_progress()? {
         bail!("HERE requires an in-progress merge (MERGE_HEAD not found)");
     }
 
     let source_sha = git_ops::merge_head_sha()?;
-    let source_ref = choose_source_ref_label(&source_sha)?;
+    let source_ref = match source_ref_override {
+        Some(val) => val.to_string(),
+        None => choose_source_ref_label(&source_sha, current_branch, args.quiet, tui_title)?,
+    };
     let integration_branch = planner::integration_branch_name(current_branch, &source_ref);
     let kokomeco_branch = git_ops::consolidated_branch_name(&integration_branch);
 
@@ -54,8 +67,27 @@ pub fn here_command(args: &Args, current_branch: &str, tui_title: &str) -> Resul
     let remembered_head = git_ops::head_sha()?;
     let merge_base = git_ops::merge_base(&remembered_head, &source_sha)?;
 
-    git_ops::checkout_new_or_reset(&integration_branch, &remembered_head)?;
-    git_ops::merge_no_commit(&source_sha)?;
+    if !args.quiet {
+        let ib = integration_branch.clone();
+        let rh = remembered_head.clone();
+        let ss = source_sha.clone();
+        tui_progress::run_progress(
+            tui_title,
+            vec![
+                tui_progress::ProgressStep {
+                    label: "Creating integration branch".into(),
+                    action: Box::new(move || git_ops::checkout_new_or_reset(&ib, &rh)),
+                },
+                tui_progress::ProgressStep {
+                    label: format!("Merging source: {source_ref}"),
+                    action: Box::new(move || git_ops::merge_no_commit(&ss)),
+                },
+            ],
+        )?;
+    } else {
+        git_ops::checkout_new_or_reset(&integration_branch, &remembered_head)?;
+        git_ops::merge_no_commit(&source_sha)?;
+    }
 
     let conflicted_now = git_ops::conflicted_files()?;
     for path in &conflicted_now {
@@ -128,16 +160,40 @@ pub fn here_command(args: &Args, current_branch: &str, tui_title: &str) -> Resul
         }
     };
 
-    planner::create_slice_branches(
-        &integration_branch,
-        &merge_base,
-        &source_ref,
-        &source_sha,
-        &unresolved_before,
-        &explicit_slices,
-    )?;
-
-    git_ops::checkout(&integration_branch)?;
+    if !args.quiet {
+        let ib = integration_branch.clone();
+        let ib2 = integration_branch.clone();
+        let mb = merge_base.clone();
+        let sr = source_ref.clone();
+        let ss = source_sha.clone();
+        let ub = unresolved_before.clone();
+        let es = explicit_slices.clone();
+        tui_progress::run_progress(
+            tui_title,
+            vec![
+                tui_progress::ProgressStep {
+                    label: "Creating slice branches".into(),
+                    action: Box::new(move || {
+                        planner::create_slice_branches(&ib, &mb, &sr, &ss, &ub, &es)
+                    }),
+                },
+                tui_progress::ProgressStep {
+                    label: "Finalizing".into(),
+                    action: Box::new(move || git_ops::checkout(&ib2)),
+                },
+            ],
+        )?;
+    } else {
+        planner::create_slice_branches(
+            &integration_branch,
+            &merge_base,
+            &source_ref,
+            &source_sha,
+            &unresolved_before,
+            &explicit_slices,
+        )?;
+        git_ops::checkout(&integration_branch)?;
+    }
     color::print_emphasis("Mergetopus HERE takeover complete", None);
     color::print_info(&format!("  Integration branch: {integration_branch}"), None);
     color::print_info(&format!("  Source ref: {source_ref} ({source_sha})"), None);
@@ -179,13 +235,82 @@ fn apply_resolved_snapshots(snapshots: &BTreeMap<String, Option<Vec<u8>>>) -> Re
     Ok(())
 }
 
-fn choose_source_ref_label(source_sha: &str) -> Result<String> {
+/// Resolve a human-readable source ref label for the given commit.
+///
+/// When exactly one local branch points to the commit, it is used directly.
+/// When multiple local branches point to the same commit (e.g. after a
+/// fast-forward merge), the user is prompted to pick one in interactive mode,
+/// or a heuristic is applied in quiet mode (current branch excluded, MMM
+/// branches excluded); if ambiguity remains, an error is raised suggesting
+/// `--source`.
+fn choose_source_ref_label(
+    source_sha: &str,
+    current_branch: &str,
+    quiet: bool,
+    tui_title: &str,
+) -> Result<String> {
     let refs = git_ops::refs_pointing_to(source_sha)?;
-    if let Some(local) = refs.iter().find(|r| !r.contains('/')) {
-        return Ok(local.clone());
+    let local_refs: Vec<&String> = refs.iter().filter(|r| !r.contains('/')).collect();
+
+    // Single candidate — straightforward.
+    if let Some(single) = local_refs.iter().find(|_| local_refs.len() == 1) {
+        return Ok((*single).clone());
     }
-    if let Some(any) = refs.first() {
-        return Ok(any.clone());
+
+    // No local refs at all — fall back to remote or abbreviated SHA.
+    if local_refs.is_empty() {
+        if let Some(any) = refs.first() {
+            return Ok(any.clone());
+        }
+        return Ok(source_sha[..8.min(source_sha.len())].to_string());
     }
-    Ok(source_sha[..8.min(source_sha.len())].to_string())
+
+    // Multiple local refs — disambiguate.
+    if quiet {
+        let filtered: Vec<&String> = local_refs
+            .iter()
+            .filter(|r| ***r != current_branch)
+            .filter(|r| !r.starts_with("_mmm/"))
+            .copied()
+            .collect();
+
+        match filtered.len() {
+            0 => {
+                // All candidates were filtered out — still ambiguous, just
+                // show everything except current branch.
+                let candidates: Vec<&String> = local_refs
+                    .iter()
+                    .filter(|r| ***r != current_branch)
+                    .copied()
+                    .collect();
+                if candidates.len() == 1 {
+                    return Ok(candidates[0].clone());
+                }
+                bail!(
+                    "ambiguous source ref '{:.8}'; candidates: {}. Use --source to specify.",
+                    source_sha,
+                    candidates.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(", ")
+                );
+            }
+            1 => Ok(filtered[0].clone()),
+            _ => {
+                bail!(
+                    "ambiguous source ref '{:.8}'; candidates: {}. Use --source to specify.",
+                    source_sha,
+                    filtered.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(", ")
+                );
+            }
+        }
+    } else {
+        let candidates: Vec<String> = local_refs.iter().map(|r| (*r).clone()).collect();
+        match tui::pick_branch(
+            &candidates,
+            tui_title,
+            Some(current_branch),
+            &[],
+        )? {
+            Some(choice) => Ok(choice),
+            None => bail!("source ref selection canceled"),
+        }
+    }
 }
