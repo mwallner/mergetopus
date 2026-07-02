@@ -1,4 +1,5 @@
 use crate::git_ops::{run_git, ensure_longpaths_support};
+use crate::win32_path::to_fs_path;
 use anyhow::{Context, Result, bail};
 use std::env;
 use std::fs;
@@ -169,6 +170,30 @@ fn infer_worktree_base_dir(entries: &[WorktreeEntry]) -> Result<PathBuf> {
 }
 
 fn branch_to_worktree_leaf(branch: &str) -> String {
+    // MMM branches use a compact hash-based name to keep worktree paths short.
+    // Integration → _mmm-{hash}, slice N → _mmm-{hash}-s{N}, kokomeco → _mmm-{hash}-kc
+    if let Some(rest) = branch.strip_prefix("_mmm/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() >= 3 {
+            let target = parts[0];
+            let source = parts[1];
+            let key = format!("{target}/{source}");
+            let hash = key.bytes().fold(0u32, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(b as u32)
+            });
+            let base = format!("_mmm-{:08x}", hash);
+            return match parts.last() {
+                Some(suffix) if *suffix == "integration" => base,
+                Some(suffix) if *suffix == "kokomeco" => format!("{base}-kc"),
+                Some(suffix) if suffix.starts_with("slice") => {
+                    format!("{base}-s{}", &suffix["slice".len()..])
+                }
+                _ => base,
+            };
+        }
+    }
+
+    // Non-MMM branches: existing sanitization logic.
     let mut out = String::with_capacity(branch.len());
     for c in branch.chars() {
         if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
@@ -181,9 +206,6 @@ fn branch_to_worktree_leaf(branch: &str) -> String {
         return "branch".to_string();
     }
 
-    // Truncate long branch names to avoid exceeding filesystem path limits
-    // on Windows. Append a short hash of the full name so the leaf remains
-    // unique even after truncation.
     const MAX_LEAF: usize = 80;
     if out.len() > MAX_LEAF {
         let hash = branch.bytes().fold(0u32, |acc, b| {
@@ -212,7 +234,16 @@ fn pick_new_worktree_path(base: &Path, branch: &str, entries: &[WorktreeEntry]) 
         let hash = branch.bytes().fold(0u32, |acc, b| {
             acc.wrapping_mul(31).wrapping_add(b as u32)
         });
-        let fallback_leaf = format!("mergetopus-{:08x}", hash);
+        // Ensure the fallback also respects the limit.
+        let fallback_leaf = {
+            let leaf = format!("mergetopus-{:08x}", hash);
+            if base_len + leaf.len() > MAX_PATH_LEN {
+                // Shortest possible unique leaf: "wt-{hash}" (~12 chars).
+                format!("wt-{:08x}", hash)
+            } else {
+                leaf
+            }
+        };
         return base.join(fallback_leaf);
     }
 
@@ -254,7 +285,7 @@ pub fn ensure_worktree_for_existing_branch(
 
     ensure_longpaths_support()?;
     let base = infer_worktree_base_dir(entries)?;
-    fs::create_dir_all(&base).with_context(|| {
+    fs::create_dir_all(to_fs_path(&base)).with_context(|| {
         format!(
             "failed to create inferred worktree base '{}'",
             base.display()
@@ -285,7 +316,7 @@ pub fn ensure_worktree_for_branch_reset(
 
     ensure_longpaths_support()?;
     let base = infer_worktree_base_dir(entries)?;
-    fs::create_dir_all(&base).with_context(|| {
+    fs::create_dir_all(to_fs_path(&base)).with_context(|| {
         format!(
             "failed to create inferred worktree base '{}'",
             base.display()
@@ -495,12 +526,54 @@ mod tests {
     }
 
     #[test]
-    fn branch_to_worktree_leaf_sanitizes_branch_name() {
+    fn branch_to_worktree_leaf_sanitizes_non_mmm_branch_name() {
         assert_eq!(
             branch_to_worktree_leaf("feature/refactor auth"),
             "feature_refactor_auth"
         );
         assert_eq!(branch_to_worktree_leaf("***"), "___");
+    }
+
+    #[test]
+    fn branch_to_worktree_leaf_uses_hash_for_mmm_integration() {
+        let leaf = branch_to_worktree_leaf("_mmm/main/feature/integration");
+        assert!(leaf.starts_with("_mmm-"), "expected _mmm-{{hash}}, got {leaf}");
+        assert_eq!(leaf.len(), 13, "expected '_mmm-XXXXXXXX' (13 chars), got '{leaf}' ({})", leaf.len());
+        // Same target/source → same hash.
+        let leaf2 = branch_to_worktree_leaf("_mmm/main/feature/integration");
+        assert_eq!(leaf, leaf2);
+    }
+
+    #[test]
+    fn branch_to_worktree_leaf_uses_hash_for_mmm_slice() {
+        let integration = branch_to_worktree_leaf("_mmm/main/feature/integration");
+        let slice = branch_to_worktree_leaf("_mmm/main/feature/slice3");
+        assert!(slice.starts_with(&integration), "slice should share integration prefix");
+        assert!(slice.ends_with("-s3"), "expected suffix -s3, got {slice}");
+    }
+
+    #[test]
+    fn branch_to_worktree_leaf_uses_hash_for_mmm_kokomeco() {
+        let integration = branch_to_worktree_leaf("_mmm/main/feature/integration");
+        let kokomeco = branch_to_worktree_leaf("_mmm/main/feature/kokomeco");
+        assert!(kokomeco.starts_with(&integration), "kokomeco should share integration prefix");
+        assert!(kokomeco.ends_with("-kc"), "expected suffix -kc, got {kokomeco}");
+    }
+
+    #[test]
+    fn branch_to_worktree_leaf_different_sources_produce_different_hashes() {
+        let a = branch_to_worktree_leaf("_mmm/main/feature/integration");
+        let b = branch_to_worktree_leaf("_mmm/main/other/integration");
+        assert_ne!(a, b, "different sources must produce different hashes");
+    }
+
+    #[test]
+    fn branch_to_worktree_leaf_handles_long_non_mmm_branch_names() {
+        let long = "a".repeat(200);
+        let leaf = branch_to_worktree_leaf(&long);
+        // Should be truncated to 80 chars + hash suffix.
+        assert!(leaf.len() <= 85, "expected truncation, got {leaf} ({} chars)", leaf.len());
+        assert!(leaf.starts_with("aaaaaaaaa"), "should start with a's, got {leaf}");
     }
 
     #[test]
@@ -513,6 +586,39 @@ mod tests {
 
         let picked = pick_new_worktree_path(&base, "main", &entries);
         assert_eq!(picked, base.join("mergetopus-main-1"));
+    }
+
+    #[test]
+    fn pick_new_worktree_path_falls_back_to_short_hash_when_base_too_long() {
+        // Base path near the limit — the descriptive leaf would exceed 240,
+        // but the hash fallback should be short enough.
+        let base_str = "C:\\".to_string() + &"a".repeat(210);
+        let base = PathBuf::from(&base_str);
+        let entries: Vec<WorktreeEntry> = Vec::new();
+
+        let picked = pick_new_worktree_path(&base, "main", &entries);
+        let picked_str = picked.to_string_lossy();
+        assert!(picked_str.len() <= 240, "expected <= 240 chars, got {} ({picked_str})", picked_str.len());
+        assert!(
+            picked_str.contains("mergetopus-") || picked_str.contains("wt-"),
+            "expected hash-based leaf, got {picked_str}"
+        );
+    }
+
+    #[test]
+    fn pick_new_worktree_path_falls_back_to_wt_prefix_when_even_mergetopus_hash_exceeds() {
+        // Base path extremely long — even "mergetopus-{hash}" (19 chars) goes over.
+        let base_str = "C:\\".to_string() + &"a".repeat(225);
+        let base = PathBuf::from(&base_str);
+        let entries: Vec<WorktreeEntry> = Vec::new();
+
+        let picked = pick_new_worktree_path(&base, "main", &entries);
+        let picked_str = picked.to_string_lossy();
+        assert!(picked_str.len() <= 240, "expected <= 240 chars, got {} ({picked_str})", picked_str.len());
+        assert!(
+            picked_str.contains("wt-"),
+            "expected 'wt-{{hash}}' leaf when even mergetopus- would exceed limit, got {picked_str}"
+        );
     }
 
     #[test]

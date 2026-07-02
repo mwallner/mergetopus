@@ -8,6 +8,7 @@ mod models;
 mod planner;
 mod tui;
 pub(crate) mod tui_progress;
+pub(crate) mod win32_path;
 
 #[cfg(test)]
 mod test_support;
