@@ -76,15 +76,14 @@ pub(crate) fn ensure_longpaths_support() -> Result<()> {
         return Ok(());
     }
 
-    run_git(&["config", "core.longpaths", "true"])?;
+    let _ = run_git(&["config", "core.longpaths", "true"]);
 
-    // Verify the setting was applied (defense against system-level overrides
-    // or read-only config).
+    // Best-effort: warn but don't bail if the setting couldn't be verified.
     let verified = get_git_config("core.longpaths")?.unwrap_or_default();
     if !verified.eq_ignore_ascii_case("true") {
-        bail!(
-            "failed to enable core.longpaths; git reports '{verified}' after setting it to 'true'. \
-             Check repository or system-level git config for overrides."
+        eprintln!(
+            "warning: failed to enable core.longpaths; git reports '{verified}'. \
+             Long paths on Windows may fail."
         );
     }
     Ok(())

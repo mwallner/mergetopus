@@ -281,7 +281,6 @@ pub fn ensure_worktree_for_existing_branch(
     entries: &[WorktreeEntry],
 ) -> Result<PathBuf> {
     if let Some(path) = find_worktree_for_branch(entries, branch) {
-        ensure_longpaths_support()?;
         return Ok(path);
     }
 
@@ -312,7 +311,6 @@ pub fn ensure_worktree_for_branch_reset(
     entries: &[WorktreeEntry],
 ) -> Result<PathBuf> {
     if let Some(path) = find_worktree_for_branch(entries, branch) {
-        ensure_longpaths_support()?;
         return Ok(path);
     }
 
