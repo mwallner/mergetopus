@@ -860,7 +860,7 @@ pub fn select_conflicts(
     title: &str,
 ) -> Result<Option<Vec<Vec<String>>>> {
     let started = std::time::Instant::now();
-    let debounce = std::time::Duration::from_millis(300);
+    let debounce = std::time::Duration::from_millis(1000);
     let mut guard = TerminalGuard::new(title)?;
     select_conflicts_on_terminal(
         &mut guard.terminal,
