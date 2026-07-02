@@ -263,9 +263,8 @@ fn render_progress(
     } else if cancelled {
         "Operation cancelled \u{2014} press Enter or Esc to continue.".into()
     } else {
-        let remaining = total - completed - failed;
         format!(
-            "\u{2713} {completed} completed \u{00b7} {remaining} remaining \u{00b7} {failed} failed"
+            "\u{2713} {completed} completed \u{00b7} press Enter to continue"
         )
     };
 

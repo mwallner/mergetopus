@@ -1,6 +1,6 @@
 use super::{head_sha, run_git, run_git_allow_failure};
 use crate::git_ops::{refs, worktree};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 pub fn current_branch() -> Result<String> {
     let (ok, out, _) = run_git_allow_failure(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
@@ -189,6 +189,13 @@ pub fn list_remote_names() -> Result<Vec<String>> {
 }
 
 pub fn delete_branch(branch: &str) -> Result<()> {
+    let entries = worktree::list_worktree_entries()?;
+    if worktree::has_existing_linked_worktrees(&entries) {
+        if let Some(path) = worktree::find_worktree_for_branch(&entries, branch) {
+            run_git(&["worktree", "remove", "--force", &path.to_string_lossy()])
+                .with_context(|| format!("failed to remove worktree at '{}'", path.display()))?;
+        }
+    }
     run_git(&["branch", "-D", branch]).map(|_| ())
 }
 
