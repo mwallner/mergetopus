@@ -171,7 +171,7 @@ where
             if let Event::Key(key) = read_event()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Enter | KeyCode::Esc | KeyCode::Char(' ') => break,
+                        KeyCode::Esc => break,
                         _ => {}
                     }
                 }
@@ -259,12 +259,12 @@ fn render_progress(
     }
 
     let summary: String = if failed > 0 {
-        "Operation failed \u{2014} press Enter or Esc to continue.".into()
+        "Operation failed \u{2014} press Esc to continue.".into()
     } else if cancelled {
-        "Operation cancelled \u{2014} press Enter or Esc to continue.".into()
+        "Operation cancelled \u{2014} press Esc to continue.".into()
     } else {
         format!(
-            "\u{2713} {completed} completed \u{00b7} press Enter to continue"
+            "\u{2713} {completed} completed \u{00b7} press Esc to continue"
         )
     };
 
@@ -439,7 +439,7 @@ mod tests {
 
         // Use a shared counter so poll_event returns true only after
         // both steps have had time to finish. The loop injects ignored
-        // Tab keys during the render-loop polls; Enter is injected only
+        // Tab keys during the render-loop polls; Esc is sent only
         // once for the dismissal loop.
         let polls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let polls_clone = polls.clone();
@@ -492,7 +492,7 @@ mod tests {
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             ],
         );
 
@@ -576,7 +576,7 @@ mod tests {
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             ],
         );
 

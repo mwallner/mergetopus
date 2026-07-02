@@ -852,6 +852,14 @@ where
     }
 }
 
+/// Drain any buffered input events so a stray key press from a preceding TUI
+/// (e.g. the progress screen) does not bleed into the next one.
+fn drain_input_events() {
+    while event::poll(std::time::Duration::from_millis(10)).unwrap_or(false) {
+        let _ = event::read();
+    }
+}
+
 pub fn select_conflicts(
     conflicts: &[String],
     diff_provider: impl Fn(&str) -> Result<String>,
@@ -859,6 +867,7 @@ pub fn select_conflicts(
     external_diff_runner: impl Fn(&str) -> Result<()>,
     title: &str,
 ) -> Result<Option<Vec<Vec<String>>>> {
+    drain_input_events();
     let mut guard = TerminalGuard::new(title)?;
     select_conflicts_on_terminal(
         &mut guard.terminal,
