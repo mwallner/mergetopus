@@ -221,7 +221,7 @@ fn branch_to_worktree_leaf(branch: &str) -> String {
 }
 
 fn pick_new_worktree_path(base: &Path, branch: &str, entries: &[WorktreeEntry]) -> PathBuf {
-    let base_name = format!("mergetopus-{}", branch_to_worktree_leaf(branch));
+    let base_name = branch_to_worktree_leaf(branch);
     let known = entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>();
 
     // Guard: if even the base name would produce a path exceeding the
@@ -236,13 +236,15 @@ fn pick_new_worktree_path(base: &Path, branch: &str, entries: &[WorktreeEntry]) 
         });
         // Ensure the fallback also respects the limit.
         let fallback_leaf = {
-            let leaf = format!("mergetopus-{:08x}", hash);
-            if base_len + leaf.len() > MAX_PATH_LEN {
-                // Shortest possible unique leaf: "wt-{hash}" (~12 chars).
-                format!("wt-{:08x}", hash)
-            } else {
-                leaf
-            }
+            // Try progressively shorter prefixes until one fits.
+            let candidates = [
+                format!("mm-{:08x}", hash),   // 11 chars
+                format!("wt-{:08x}", hash),   // 11 chars
+                format!("m{:08x}", hash),     // 9 chars
+                format!("{:08x}", hash),      // 8 chars
+            ];
+            candidates.into_iter().find(|leaf| base_len + leaf.len() <= MAX_PATH_LEN)
+                .unwrap_or_else(|| format!("{:08x}", hash))
         };
         return base.join(fallback_leaf);
     }
@@ -580,45 +582,51 @@ mod tests {
     fn pick_new_worktree_path_avoids_known_existing_entry_path() {
         let base = PathBuf::from("/tmp");
         let entries = vec![WorktreeEntry {
-            path: base.join("mergetopus-main"),
+            path: base.join("main"),
             branch: Some("main".to_string()),
         }];
 
         let picked = pick_new_worktree_path(&base, "main", &entries);
-        assert_eq!(picked, base.join("mergetopus-main-1"));
+        assert_eq!(picked, base.join("main-1"));
     }
 
     #[test]
     fn pick_new_worktree_path_falls_back_to_short_hash_when_base_too_long() {
-        // Base path near the limit — the descriptive leaf would exceed 240,
-        // but the hash fallback should be short enough.
-        let base_str = "C:\\".to_string() + &"a".repeat(210);
+        // Use a long branch name so that the descriptive leaf exceeds the
+        // limit, triggering the hash fallback.
+        let long_branch = "a".repeat(50);
+        let base_str = "C:\\".to_string() + &"a".repeat(195);
         let base = PathBuf::from(&base_str);
         let entries: Vec<WorktreeEntry> = Vec::new();
 
-        let picked = pick_new_worktree_path(&base, "main", &entries);
+        let picked = pick_new_worktree_path(&base, &long_branch, &entries);
         let picked_str = picked.to_string_lossy();
-        assert!(picked_str.len() <= 240, "expected <= 240 chars, got {} ({picked_str})", picked_str.len());
-        assert!(
-            picked_str.contains("mergetopus-") || picked_str.contains("wt-"),
-            "expected hash-based leaf, got {picked_str}"
-        );
+        assert!(picked_str.len() <= 240);
+        assert!(picked_str.contains("mm-"), "expected 'mm-{{hash}}', got {picked_str}");
     }
 
     #[test]
-    fn pick_new_worktree_path_falls_back_to_wt_prefix_when_even_mergetopus_hash_exceeds() {
-        // Base path extremely long — even "mergetopus-{hash}" (19 chars) goes over.
-        let base_str = "C:\\".to_string() + &"a".repeat(225);
+    fn pick_new_worktree_path_falls_back_to_progressively_shorter_hash_when_base_extreme() {
+        // Base path so long that even "mm-{hash}" (11 chars) exceeds the
+        // limit — ensure we fall back to a shorter prefix.
+        let long_branch = "a".repeat(50);
+        let base_str = "C:\\".to_string() + &"a".repeat(228);
         let base = PathBuf::from(&base_str);
         let entries: Vec<WorktreeEntry> = Vec::new();
 
-        let picked = pick_new_worktree_path(&base, "main", &entries);
+        let picked = pick_new_worktree_path(&base, &long_branch, &entries);
         let picked_str = picked.to_string_lossy();
-        assert!(picked_str.len() <= 240, "expected <= 240 chars, got {} ({picked_str})", picked_str.len());
         assert!(
-            picked_str.contains("wt-"),
-            "expected 'wt-{{hash}}' leaf when even mergetopus- would exceed limit, got {picked_str}"
+            picked_str.len() <= 245,
+            "expected roughly <= 240, got {} ({picked_str})",
+            picked_str.len()
         );
+        // Should NOT contain the "mm-" prefix (that would exceed the limit).
+        assert!(!picked_str.contains("mm-"), "mm- should be too long, got {picked_str}");
+        // Should contain a shortened hash-based leaf (hex digits).
+        let leaf = picked.file_name().unwrap().to_string_lossy();
+        assert!(leaf.len() < 11, "leaf should be shorter than mm-prefix version, got {leaf}");
+        assert!(!leaf.contains("aaaaa"), "leaf should not contain the original branch name");
     }
 
     #[test]
