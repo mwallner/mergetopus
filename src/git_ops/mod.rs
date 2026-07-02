@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::process::Command;
 
 use crate::models::PathProvenance;
@@ -207,7 +208,7 @@ pub fn path_provenance(source_ref: &str, source_sha: &str, path: &str) -> Result
 
 pub fn commit_slice(message: &str, provenance: &PathProvenance) -> Result<()> {
     let mut command = Command::new("git");
-    command.args(["commit", "-m", message]);
+    command.args(["commit", "-F", "-"]);
 
     if let Some(name) = &provenance.author_name {
         command.env("GIT_AUTHOR_NAME", name);
@@ -219,9 +220,22 @@ pub fn commit_slice(message: &str, provenance: &PathProvenance) -> Result<()> {
         command.env("GIT_AUTHOR_DATE", date);
     }
 
-    let output = command
-        .output()
-        .context("failed to execute git commit for slice")?;
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to spawn git commit for slice")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(message.as_bytes())
+            .context("failed to write slice commit message to stdin")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for git commit for slice")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("slice commit failed: {}", stderr.trim());
