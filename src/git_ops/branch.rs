@@ -170,6 +170,10 @@ pub fn list_local_branches() -> Result<Vec<String>> {
     Ok(branches)
 }
 
+pub fn get_remote_url(remote: &str) -> Result<String> {
+    run_git(&["remote", "get-url", remote])
+}
+
 pub fn list_remote_names() -> Result<Vec<String>> {
     let out = run_git_allow_failure(&["remote"])?;
     if !out.0 {

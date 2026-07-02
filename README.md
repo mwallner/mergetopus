@@ -457,6 +457,12 @@ mergetopus feature/refactor-auth --quiet --yes
 # Show slice/integration progress status
 mergetopus status feature/refactor-auth
 
+# Include pull/merge request URLs in status output
+mergetopus status feature/refactor-auth --pr
+
+# Show global MMM overview across local + configured remotes
+mergetopus status
+
 # Show global MMM overview across local + configured remotes
 mergetopus status
 
@@ -468,6 +474,9 @@ mergetopus verify --global
 
 # Cleanup temporary integration/slice branches (interactive confirmation)
 mergetopus cleanup
+
+# Close associated PRs when cleaning up branches
+mergetopus cleanup --close-prs
 
 # Push an initialized merge plan to a remote
 mergetopus push origin
@@ -502,6 +511,7 @@ Status behavior:
 
 - with no argument: prints a global MMM overview table (integration, target, source, state, pending/resolved, kokomeco)
 - with a source/integration argument: prints detailed status for that one integration branch
+- with `--pr`: also fetches and displays pull/merge request URLs and states (requires forge auth)
 - when discoverable refs do not form a valid integration family, reports them under `Orphaned MMM Refs (warning)`
 
 Detailed integration status output includes:
@@ -623,6 +633,94 @@ git config merge.tool vimdiff
 # Provide the shell command template.
 # $LOCAL, $BASE, $REMOTE, $MERGED are expanded at runtime.
 git config mergetool.vimdiff.cmd 'vimdiff "$LOCAL" "$BASE" "$REMOTE" -c "wincmd J" "$MERGED"'
+```
+
+## Pull Request Integration
+
+Mergetopus can create and manage pull/merge requests for the integration and
+slice branches on GitHub, GitLab, Bitbucket Data Center, and Forgejo.
+
+### Forge Detection
+
+The forge is detected automatically from the remote URL:
+
+| Remote URL                           | Detected Forge |
+| ------------------------------------ | -------------- |
+| `https://github.com/owner/repo.git`  | GitHub         |
+| `git@github.com:owner/repo.git`      | GitHub         |
+| `https://gitlab.com/owner/repo.git`  | GitLab         |
+| `https://bitbucket.org/owner/repo.git` | Bitbucket    |
+| `https://codeberg.org/owner/repo.git` | Forgejo       |
+| `git@codeberg.org:owner/repo.git`    | Forgejo        |
+
+For **self-managed** instances (e.g. `gitlab.internal.example.com`,
+`bitbucket.company.com`, `git.forgejo.instance`), set the forge type explicitly:
+
+```bash
+git config mergetopus.forge-type gitlab
+# or: forgejo, bitbucket
+```
+
+### Authentication
+
+Each forge reads a token from git config (scoped to the repository or global),
+falling back to an environment variable:
+
+| Forge     | Git Config Key               | Environment Variable          |
+| --------- | ---------------------------- | ----------------------------- |
+| GitHub    | `mergetopus.github-token`    | `GITHUB_TOKEN`                |
+| GitLab    | `mergetopus.gitlab-token`    | `GITLAB_TOKEN`                |
+| Bitbucket | `mergetopus.bitbucket-token` | `BITBUCKET_TOKEN`             |
+| Forgejo   | `mergetopus.forgejo-token`   | `FORGEJO_TOKEN` or `CODEBERG_TOKEN` |
+
+Example:
+
+```bash
+git config mergetopus.github-token ghp_xxxxxxxxxxxxxxxxxxxx
+# or
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+```
+
+### Commands
+
+Create pull requests for integration and slice branches (as drafts):
+
+```bash
+# Create PRs for the current merge plan
+mergetopus pr create
+
+# Create PRs for a specific source/integration
+mergetopus pr create feature/refactor-auth
+```
+
+Sync PR titles and descriptions after changes:
+
+```bash
+mergetopus pr sync
+```
+
+List existing PR URLs and states:
+
+```bash
+mergetopus pr list
+```
+
+Create PRs as part of push (combines push + pr create):
+
+```bash
+mergetopus push --pr
+```
+
+Show PR URLs alongside status output:
+
+```bash
+mergetopus status --pr
+```
+
+Close associated PRs during branch cleanup:
+
+```bash
+mergetopus cleanup --close-prs
 ```
 
 Some common examples:

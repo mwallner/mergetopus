@@ -1,6 +1,7 @@
 mod cli;
 mod color;
 mod commands;
+pub(crate) mod forges;
 mod git_ops;
 mod helpers;
 mod models;

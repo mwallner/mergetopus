@@ -72,6 +72,7 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
                     return cmd_status::status_command(
                         None,
                         false,
+                        false,
                         &branch_now,
                         &tui_title,
                     );
