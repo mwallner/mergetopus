@@ -23,6 +23,8 @@ Examples:
   mergetopus resolve --commit _mmm/main/feature/slice1
   mergetopus status feature/refactor-auth
   mergetopus verify _mmm/main/feature/integration
+  mergetopus discard feature/refactor-auth
+  mergetopus discard --close-prs
   mergetopus HERE
 ";
 
@@ -160,6 +162,10 @@ pub enum Commands {
     Status {
         #[arg(value_name = "SOURCE")]
         source: Option<String>,
+
+        /// Fetch and display pull/merge request URLs for MMM branches.
+        #[arg(long, default_value_t = false)]
+        pr: bool,
     },
 
     /// Cleanup slice and integration branches once a kokomeco branch exists.
@@ -168,7 +174,31 @@ pub enum Commands {
     /// which a consolidated kokomeco branch already exists, lists them in an
     /// interactive confirmation TUI, and deletes them on confirmation.
     /// The kokomeco branch itself is retained.
-    Cleanup,
+    Cleanup {
+        /// Close associated pull/merge requests before deleting branches.
+        #[arg(long, default_value_t = false)]
+        close_prs: bool,
+    },
+
+    /// Discard a Mergetopus workflow by deleting all associated branches.
+    ///
+    /// Lists all branches belonging to a workflow (integration + slice branches),
+    /// shows them in an interactive confirmation TUI, deletes local branches,
+    /// and optionally deletes remote tracking branches and closes associated PRs.
+    ///
+    /// WORKFLOW may be either a merge source ref (e.g. feature/foo) for the
+    /// active/inferred integration branch, or a full integration branch name
+    /// (e.g. _mmm/main/feature_foo/integration). If omitted, an interactive
+    /// picker shows all integration branches.
+    Discard {
+        /// Source branch or integration branch name to discard.
+        #[arg(value_name = "WORKFLOW")]
+        integration: Option<String>,
+
+        /// Close associated pull/merge requests before deleting branches.
+        #[arg(long, default_value_t = false)]
+        close_prs: bool,
+    },
 
     /// Verify integration completeness after kokomeco creation.
     ///
@@ -221,5 +251,54 @@ pub enum Commands {
             help = "Remote to push to (required in --quiet mode when multiple remotes exist)"
         )]
         remote: Option<String>,
+
+        /// Also create pull requests for the pushed branches.
+        #[arg(long, default_value_t = false)]
+        pr: bool,
+    },
+
+    /// Manage pull/merge requests for MMM branches on remote forges.
+    ///
+    /// Creates, syncs, or lists pull/merge requests for the integration and
+    /// slice branches of a Mergetopus merge plan.
+    ///
+    /// Requires authentication via git config or environment variable
+    /// (see mergetopus.github-token, GITHUB_TOKEN, etc.).
+    Pr {
+        #[command(subcommand)]
+        action: PrSubcommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PrSubcommand {
+    /// Create pull requests for all MMM branches (draft PRs).
+    ///
+    /// Creates draft pull requests for the integration branch and each slice
+    /// branch. If a PR already exists for a branch, it is reused.
+    Create {
+        /// Source branch or integration branch name.
+        #[arg(value_name = "SOURCE")]
+        source: Option<String>,
+    },
+
+    /// Sync existing pull request titles and descriptions.
+    ///
+    /// Updates the title and body of existing PRs to match current state.
+    /// Does not create new PRs.
+    Sync {
+        /// Source branch or integration branch name.
+        #[arg(value_name = "SOURCE")]
+        source: Option<String>,
+    },
+
+    /// List pull request URLs for all MMM branches.
+    ///
+    /// Queries the remote forge for PRs matching the integration and slice
+    /// branches and displays their URLs and states.
+    List {
+        /// Source branch or integration branch name.
+        #[arg(value_name = "SOURCE")]
+        source: Option<String>,
     },
 }

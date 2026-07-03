@@ -36,7 +36,8 @@ pub struct ProgressStep {
 ///
 /// Each step is executed sequentially. While a step runs, an animated spinner
 /// is displayed next to its label. When all steps complete (or one fails), the
-/// screen stays visible until the user presses Enter, Esc, or Space.
+/// screen stays visible until the user presses Esc. If all steps succeed the
+/// screen auto-dismisses after 500 ms.
 pub fn run_progress(title: &str, steps: Vec<ProgressStep>) -> Result<()> {
     let mut guard = TerminalGuard::new(title)?;
     run_progress_on_terminal(
@@ -45,6 +46,7 @@ pub fn run_progress(title: &str, steps: Vec<ProgressStep>) -> Result<()> {
         steps,
         |d| Ok(event::poll(d)?),
         || Ok(event::read()?),
+        Some(Duration::from_millis(500)),
     )
 }
 
@@ -55,6 +57,7 @@ pub(crate) fn run_progress_on_terminal<B: Backend>(
     steps: Vec<ProgressStep>,
     mut poll_event: impl FnMut(Duration) -> Result<bool>,
     mut read_event: impl FnMut() -> Result<Event>,
+    auto_dismiss_after: Option<Duration>,
 ) -> Result<()>
 where
     <B as Backend>::Error: Send + Sync + 'static,
@@ -158,7 +161,9 @@ where
         }
     }
 
-    // Final state — wait for dismissal
+    // Final state — wait for dismissal (or auto-dismiss after success)
+    let final_started = std::time::Instant::now();
+    let all_succeeded = failed == 0 && !cancelled;
     loop {
         terminal.draw(|f| {
             let states = states.lock().unwrap();
@@ -167,11 +172,19 @@ where
             );
         })?;
 
+        if all_succeeded {
+            if let Some(timeout) = auto_dismiss_after {
+                if final_started.elapsed() >= timeout {
+                    break;
+                }
+            }
+        }
+
         if poll_event(Duration::from_millis(200))? {
             if let Event::Key(key) = read_event()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Enter | KeyCode::Esc | KeyCode::Char(' ') => break,
+                        KeyCode::Esc => break,
                         _ => {}
                     }
                 }
@@ -259,14 +272,11 @@ fn render_progress(
     }
 
     let summary: String = if failed > 0 {
-        "Operation failed \u{2014} press Enter or Esc to continue.".into()
+        "Operation failed \u{2014} press Esc to continue.".into()
     } else if cancelled {
-        "Operation cancelled \u{2014} press Enter or Esc to continue.".into()
+        "Operation cancelled \u{2014} press Esc to continue.".into()
     } else {
-        let remaining = total - completed - failed;
-        format!(
-            "\u{2713} {completed} completed \u{00b7} {remaining} remaining \u{00b7} {failed} failed"
-        )
+        format!("\u{2713} {completed} completed")
     };
 
     let summary_line = Paragraph::new(Line::from(Span::styled(
@@ -440,7 +450,7 @@ mod tests {
 
         // Use a shared counter so poll_event returns true only after
         // both steps have had time to finish. The loop injects ignored
-        // Tab keys during the render-loop polls; Enter is injected only
+        // Tab keys during the render-loop polls; Esc is sent only
         // once for the dismissal loop.
         let polls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let polls_clone = polls.clone();
@@ -493,8 +503,9 @@ mod tests {
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             ],
+            None,
         );
 
         assert!(result.is_ok(), "expected Ok, got {result:?}");
@@ -577,8 +588,9 @@ mod tests {
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                 Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             ],
+            None,
         );
 
         assert!(result.is_err(), "expected Err, got {result:?}");

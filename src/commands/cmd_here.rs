@@ -4,6 +4,7 @@ use crate::commands::cmd_merge_workflow;
 use crate::models::SlicePlanItem;
 use crate::tui;
 use crate::tui_progress;
+use crate::win32_path::to_fs_path;
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -206,7 +207,7 @@ pub fn here_command(
 fn snapshot_resolved_paths(paths: &[String]) -> Result<BTreeMap<String, Option<Vec<u8>>>> {
     let mut snapshots = BTreeMap::new();
     for path in paths {
-        let content = std::fs::read(path).ok();
+        let content = std::fs::read(to_fs_path(path)).ok();
         snapshots.insert(path.clone(), content);
     }
     Ok(snapshots)
@@ -219,11 +220,11 @@ fn apply_resolved_snapshots(snapshots: &BTreeMap<String, Option<Vec<u8>>>) -> Re
                 if let Some(parent) = std::path::Path::new(path).parent()
                     && !parent.as_os_str().is_empty()
                 {
-                    std::fs::create_dir_all(parent).with_context(|| {
+                    std::fs::create_dir_all(to_fs_path(parent)).with_context(|| {
                         format!("failed to create parent directory for '{path}'")
                     })?;
                 }
-                std::fs::write(path, bytes)
+                std::fs::write(to_fs_path(path), bytes)
                     .with_context(|| format!("failed to restore resolved file '{path}'"))?;
                 git_ops::stage_path(path)?;
             }

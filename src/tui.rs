@@ -859,6 +859,8 @@ pub fn select_conflicts(
     external_diff_runner: impl Fn(&str) -> Result<()>,
     title: &str,
 ) -> Result<Option<Vec<Vec<String>>>> {
+    let started = std::time::Instant::now();
+    let debounce = std::time::Duration::from_millis(1000);
     let mut guard = TerminalGuard::new(title)?;
     select_conflicts_on_terminal(
         &mut guard.terminal,
@@ -866,7 +868,13 @@ pub fn select_conflicts(
         diff_provider,
         external_diff_tool,
         external_diff_runner,
-        |d| Ok(event::poll(d)?),
+        |d| {
+            if started.elapsed() < debounce {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                return Ok(false);
+            }
+            Ok(event::poll(d)?)
+        },
         || Ok(event::read()?),
     )
 }

@@ -8,6 +8,7 @@ use crate::helpers;
 use crate::planner;
 use crate::tui;
 use crate::tui_progress;
+use crate::win32_path::to_fs_path;
 
 /// RAII guard that creates a temporary directory on construction and deletes
 /// it (including all contents) when the guard is dropped, covering all exit
@@ -73,7 +74,7 @@ impl Drop for MergetopusTempDir {
 
 /// Check whether a file still contains git conflict markers.
 fn has_conflict_markers(path: &str) -> bool {
-    let Ok(content) = std::fs::read_to_string(path) else {
+    let Ok(content) = std::fs::read_to_string(to_fs_path(path)) else {
         return false;
     };
     let mut has_ours = false;
@@ -356,7 +357,7 @@ pub fn resolve_command(
         git_ops::write_blob_to_path(&merge_base, path, &base_tmp)?;
         git_ops::write_blob_to_path(&remote_commit, path, &remote_tmp)?;
 
-        let merged_before = std::fs::read(path).ok();
+        let merged_before = std::fs::read(to_fs_path(path)).ok();
         let base_before = std::fs::read(&base_tmp)
             .with_context(|| format!("failed to read temporary BASE file for '{path}'"))?;
 
@@ -388,12 +389,12 @@ pub fn resolve_command(
         };
 
         if !cmd_uses_merged {
-            let merged_after = std::fs::read(path).ok();
+            let merged_after = std::fs::read(to_fs_path(path)).ok();
             if merged_after == merged_before {
                 let base_after = std::fs::read(&base_tmp)
                     .with_context(|| format!("failed to read temporary BASE file for '{path}'"))?;
                 if base_after != base_before {
-                    std::fs::write(path, &base_after)
+                    std::fs::write(to_fs_path(path), &base_after)
                         .with_context(|| format!("failed to write resolved content to '{path}'"))?;
                     color::print_info(&format!("Applied '{tool_name}' output from BASE temp file back to '{path}'."), None);
                 }

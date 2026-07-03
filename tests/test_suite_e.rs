@@ -1,6 +1,6 @@
 //! suite E integration tests for `mergetopus push`:
 //! happy path, source/target missing on remote, multiple remotes, partial pushes,
-//! and name conflicts from previous merge attempts.
+//! name conflicts from previous merge attempts, and discard workflow.
 
 use std::fs;
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -311,6 +311,172 @@ fn push_includes_kokomeco_when_present() -> TestResult<()> {
     assert!(
         remote_has_branch(&bare, kokomeco_branch())?,
         "kokomeco should have been pushed"
+    );
+
+    Ok(())
+}
+
+// ── discard tests ──────────────────────────────────────────────────────────────
+
+/// Sets up a workflow and discards it by full integration branch name.
+#[test]
+fn discard_discards_workflow_by_integration_name() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    // Create the integration + slice branches.
+    let result = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(result.status.success(), "mergetopus setup failed");
+
+    let integration = integration_branch();
+    let slice = slice_branch();
+
+    // Verify branches exist before discard.
+    assert!(
+        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{integration}")]).is_ok(),
+        "integration branch should exist before discard"
+    );
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+
+    // Discard by full integration branch name.
+    let result = test_helpers::mergetopus(&repo, &["--yes", "discard", integration])?;
+    assert!(
+        result.status.success(),
+        "discard failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    // Verify branches are gone.
+    assert!(
+        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{integration}")]).is_err(),
+        "integration branch should be deleted after discard"
+    );
+    assert!(
+        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{slice}")]).is_err(),
+        "slice branch should be deleted after discard"
+    );
+
+    Ok(())
+}
+
+/// Discards by source ref name (not full integration branch).
+#[test]
+fn discard_discards_by_source_ref() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    let result = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(result.status.success(), "mergetopus setup failed");
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+
+    let result = test_helpers::mergetopus(&repo, &["--yes", "discard", "feature"])?;
+    assert!(
+        result.status.success(),
+        "discard by source ref failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let integration = integration_branch();
+    assert!(
+        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{integration}")]).is_err(),
+        "integration branch should be deleted"
+    );
+
+    Ok(())
+}
+
+/// Errors with a clear message when the integration branch does not exist.
+#[test]
+fn discard_fails_when_branch_not_found() -> TestResult<()> {
+    let repo = test_helpers::init_repo()?;
+    test_helpers::write_file(&repo, "base.txt", "base\n")?;
+    test_helpers::commit_all(&repo, "base")?;
+
+    let result = test_helpers::mergetopus(
+        &repo,
+        &["--yes", "discard", "_mmm/main/nonexistent/integration"],
+    )?;
+    assert!(
+        !result.status.success(),
+        "expected discard to fail for nonexistent workflow"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "expected 'not found' error, got: {stderr}"
+    );
+
+    Ok(())
+}
+
+/// Refuses to run with --quiet but without --yes.
+#[test]
+fn discard_requires_confirmation_in_quiet_mode() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    let result = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(result.status.success(), "mergetopus setup failed");
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+
+    let result = test_helpers::mergetopus(
+        &repo,
+        &["--quiet", "discard", integration_branch()],
+    )?;
+    assert!(
+        !result.status.success(),
+        "expected discard to fail in --quiet mode without --yes"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("--yes"),
+        "expected hint about --yes, got: {stderr}"
+    );
+
+    Ok(())
+}
+
+/// Skipped branch: currently checked-out integration branch is not deleted.
+#[test]
+fn discard_skips_current_branch() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    let result = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(result.status.success(), "mergetopus setup failed");
+
+    // Stay on the integration branch (don't checkout main).
+    let result = test_helpers::mergetopus(
+        &repo,
+        &["--yes", "discard", integration_branch()],
+    )?;
+    // Command should succeed but warn about skipping the current branch.
+    assert!(
+        result.status.success(),
+        "discard should succeed even when current branch is skipped:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr),
+    );
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("cannot delete the currently checked-out branch"),
+        "expected warning about current branch, got stderr: {stderr}"
+    );
+
+    // Integration branch should still exist (it was checked out).
+    let integration = integration_branch();
+    assert!(
+        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{integration}")]).is_ok(),
+        "integration branch should be retained when checked out"
+    );
+
+    // Slice branches should be deleted (they weren't checked out).
+    let slice = slice_branch();
+    assert!(
+        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{slice}")]).is_err(),
+        "slice branch should still be deleted even when integration is retained"
     );
 
     Ok(())

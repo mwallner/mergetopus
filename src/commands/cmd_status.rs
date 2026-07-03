@@ -2,6 +2,8 @@ use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 use crate::color;
 
+use crate::forges;
+use crate::forges::detect::{detect_forge, parse_remote_url};
 use crate::git_ops;
 use crate::helpers;
 use crate::planner;
@@ -13,13 +15,14 @@ use helpers::extract_slice_paths;
 /// including slice merge state and suggested next commands.
 pub fn status_command(
     source_arg: Option<&str>,
+    show_prs: bool,
     quiet: bool,
     current_branch: &str,
     tui_title: &str,
 ) -> Result<()> {
     if let Some(source) = source_arg {
         let integration_branch = resolve_status_integration_branch(source, current_branch)?;
-        return print_integration_status(&integration_branch, quiet, current_branch, tui_title);
+        return print_integration_status(&integration_branch, show_prs, quiet, current_branch, tui_title);
     }
 
     let discovered = discover_global_mmm_units()?;
@@ -46,7 +49,7 @@ pub fn status_command(
 
     if let Some(current_unit) = select_current_branch_unit(&discovered.units, current_branch) {
         color::print_emphasis("\nCurrent branch details:", None);
-        print_integration_status(&current_unit.integration, true, current_branch, tui_title)?;
+        print_integration_status(&current_unit.integration, show_prs, quiet, current_branch, tui_title)?;
     }
 
     Ok(())
@@ -260,6 +263,7 @@ fn slice_merge_status(
 
 fn print_integration_status(
     integration_branch: &str,
+    show_prs: bool,
     quiet: bool,
     current_branch: &str,
     tui_title: &str,
@@ -280,7 +284,8 @@ fn print_integration_status(
             .is_some_and(|target| target != current_branch);
 
         if target_mismatch {
-            let target = expected_target.as_ref().unwrap();
+            let target = expected_target.as_ref()
+                .expect("target_mismatch is only true when expected_target is Some");
             if quiet {
                 color::print_error(&format!(
                     "Warning: current branch '{}' does not match the integration target '{}'.",
@@ -327,6 +332,11 @@ fn print_integration_status(
         println!();
         println!("To clean up slice and integration branches afterward:");
         println!("  mergetopus cleanup");
+
+        if show_prs {
+            print_branch_prs(integration_branch)?;
+        }
+
         return Ok(());
     }
 
@@ -396,6 +406,10 @@ fn print_integration_status(
         }
     }
 
+    if show_prs && !slices.is_empty() {
+        print_branch_prs(integration_branch)?;
+    }
+
     println!("\nSuggested next command(s):");
     if pending == 0 {
         if slices.is_empty() {
@@ -452,6 +466,51 @@ fn resolve_status_integration_branch(source: &str, current_branch: &str) -> Resu
     }
 
     Ok(target)
+}
+
+/// Fetch and display PR URLs for an integration branch and its slices.
+fn print_branch_prs(integration_branch: &str) -> Result<()> {
+    let remotes = git_ops::list_remote_names()?;
+    let remote = remotes.first().ok_or_else(|| anyhow::anyhow!("no remotes configured"))?;
+    let remote_url = git_ops::get_remote_url(remote)?;
+
+    let forge = match detect_forge(&remote_url) {
+        Ok(f) => f,
+        Err(e) => {
+            color::print_warning(&format!("  (skipping PR lookup: {})", e), None);
+            return Ok(());
+        }
+    };
+
+    let info = parse_remote_url(&remote_url)?;
+    let repo_path = format!("{}/{}", info.owner, info.repo);
+
+    let slices = git_ops::list_slice_branches_for_integration(integration_branch)?;
+    let mut branches = vec![integration_branch.to_string()];
+    branches.extend(slices);
+
+    println!("\nPull/merge requests:");
+    for branch in &branches {
+        match forge.find_pr_by_head(&repo_path, branch) {
+            Ok(Some(pr)) => {
+                let state = match pr.state {
+                    forges::PrState::Open => "open",
+                    forges::PrState::Closed => "closed",
+                    forges::PrState::Merged => "merged",
+                };
+                println!("  {branch}: #{pr} ({state})", pr = pr.number);
+                println!("           {url}", url = pr.html_url);
+            }
+            Ok(None) => {
+                println!("  {branch}: (no PR)");
+            }
+            Err(e) => {
+                println!("  {branch}: (error: {e})");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
