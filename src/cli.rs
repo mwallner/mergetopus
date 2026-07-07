@@ -25,6 +25,8 @@ Examples:
   mergetopus verify _mmm/main/feature/integration
   mergetopus discard feature/refactor-auth
   mergetopus discard --close-prs
+  mergetopus consolidate feature/refactor-auth
+  mergetopus consolidate   # when on an integration branch
   mergetopus HERE
 ";
 
@@ -255,6 +257,20 @@ pub enum Commands {
         /// Also create pull requests for the pushed branches.
         #[arg(long, default_value_t = false)]
         pr: bool,
+    },
+
+    /// Create a consolidated kokomeco merge commit branch.
+    ///
+    /// Merges the source branch into the remembered target head to produce a
+    /// proper two-parent merge commit whose tree matches the integration branch.
+    /// Requires all slice branches to be resolved and merged into integration first.
+    ///
+    /// When run from an integration branch, the source is inferred automatically.
+    /// When run from a target branch, SOURCE must be provided.
+    Consolidate {
+        /// Source branch for the merge context (required when not on an integration branch).
+        #[arg(value_name = "SOURCE")]
+        source: Option<String>,
     },
 
     /// Manage pull/merge requests for MMM branches on remote forges.
