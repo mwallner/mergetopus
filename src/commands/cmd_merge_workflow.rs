@@ -402,7 +402,7 @@ fn normalize_merge_source_ref(source_ref: &str) -> Result<String> {
     Ok(local_candidate.to_string())
 }
 
-fn create_consolidated_merge_commit_branch(
+pub(crate) fn create_consolidated_merge_commit_branch(
     integration_branch: &str,
     source_ref: &str,
     slice_merge_status: &BTreeMap<String, bool>,
@@ -443,14 +443,14 @@ fn create_consolidated_merge_commit_branch(
     // index/worktree content with the final integration tree before committing.
     git_ops::merge_no_commit(&source_sha)?;
 
-    // Replace staged/worktree content with the resolved integration branch content.
+    // Replace staged/worktree content with the resolved integration branch tree.
+    // read-tree --reset discards the merge index and replaces it entirely with the
+    // integration tree, correctly reflecting file deletions from slice resolution.
     git_ops::run_git(&[
-        "restore",
-        &format!("--source={integration_branch}"),
-        "--staged",
-        "--worktree",
-        "--",
-        ".",
+        "read-tree",
+        "--reset",
+        "-u",
+        integration_branch,
     ])
     .context("failed to overlay integration branch content onto consolidated branch")?;
 

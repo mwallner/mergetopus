@@ -49,16 +49,21 @@ pub(crate) fn exec_pr_action(
     action: PrAction,
 ) -> Result<()> {
     let slices = git_ops::list_slice_branches_for_integration(integration_branch)?;
-    exec_pr_action_inner(forge, owner, repo, integration_branch, &slices, target, source, remote_name, action)
+    let kokomeco = git_ops::consolidated_branch_name(integration_branch);
+    let kokomeco_exists = git_ops::branch_exists_anywhere(&kokomeco)?;
+    let kokomeco_branch = if kokomeco_exists { Some(kokomeco.as_str()) } else { None };
+    exec_pr_action_inner(forge, owner, repo, integration_branch, &slices, kokomeco_branch, target, source, remote_name, action)
 }
 
-/// Like `exec_pr_action` but accepts pre-resolved slice list (testable without git).
+/// Like `exec_pr_action` but accepts pre-resolved slice list and optional kokomeco branch
+/// (testable without git).
 fn exec_pr_action_inner(
     forge: &dyn forges::Forge,
     owner: &str,
     repo: &str,
     integration_branch: &str,
     slices: &[String],
+    kokomeco_branch: Option<&str>,
     target: &str,
     source: &str,
     remote_name: &str,
@@ -99,6 +104,25 @@ fn exec_pr_action_inner(
         if let Some(pr) = pr {
             results.push(PrResult {
                 branch: slice.clone(),
+                action: action.label().to_string(),
+                pr,
+            });
+        }
+    }
+
+    // If a kokomeco branch exists for this integration, include it as a PR.
+    if let Some(kokomeco) = kokomeco_branch {
+        if let Some(pr) = find_or_create_kokomeco_pr(
+            forge,
+            owner,
+            repo,
+            kokomeco,
+            target,
+            source,
+            action,
+        )? {
+            results.push(PrResult {
+                branch: kokomeco.to_string(),
                 action: action.label().to_string(),
                 pr,
             });
@@ -214,6 +238,31 @@ fn find_or_create_slice_pr(
         integration_branch,
         &format!("[MMM] Slice: {slice_branch}"),
         &format!("Mergetopus slice branch for merging **{_source}** into **{_target}**.\n\nBranch: `{slice_branch}`"),
+        action,
+    )
+}
+
+fn find_or_create_kokomeco_pr(
+    forge: &dyn forges::Forge,
+    owner: &str,
+    repo: &str,
+    kokomeco_branch: &str,
+    target: &str,
+    source: &str,
+    action: PrAction,
+) -> Result<Option<forges::PullRequest>> {
+    find_or_create_pr(
+        forge,
+        owner,
+        repo,
+        kokomeco_branch,
+        target,
+        &format!("[MMM] Consolidated: {source} \u{2192} {target}"),
+        &format!(
+            "Mergetopus consolidated merge branch for **{source}** into **{target}**.\n\n\
+             This branch contains the resolved integration tree as a proper merge commit.\n\n\
+             Branch: `{kokomeco_branch}`"
+        ),
         action,
     )
 }
@@ -420,7 +469,7 @@ mod tests {
     fn exec_pr_action_inner_list_no_prs() {
         let forge = MockForge::new(vec![]);
         exec_pr_action_inner(
-            &forge, "o", "r", "_mmm/main/ts/integration", &[], "main", "ts", "origin",
+            &forge, "o", "r", "_mmm/main/ts/integration", &[], None, "main", "ts", "origin",
             PrAction::List,
         ).unwrap();
     }
@@ -429,7 +478,7 @@ mod tests {
     fn exec_pr_action_inner_creates_draft_prs() {
         let forge = MockForge::new(vec![]);
         exec_pr_action_inner(
-            &forge, "o", "r", "_mmm/main/ts/integration", &["_mmm/main/ts/slice1".to_string()], "main", "ts", "origin",
+            &forge, "o", "r", "_mmm/main/ts/integration", &["_mmm/main/ts/slice1".to_string()], None, "main", "ts", "origin",
             PrAction::Create,
         ).unwrap();
 
@@ -454,7 +503,7 @@ mod tests {
         }];
         let forge = MockForge::new(existing);
         exec_pr_action_inner(
-            &forge, "o", "r", "_mmm/main/ts/integration", &[], "main", "ts", "origin",
+            &forge, "o", "r", "_mmm/main/ts/integration", &[], None, "main", "ts", "origin",
             PrAction::List,
         ).unwrap();
     }
@@ -471,7 +520,7 @@ mod tests {
         }];
         let forge = MockForge::new(existing);
         exec_pr_action_inner(
-            &forge, "o", "r", "_mmm/main/ts/integration", &[], "main", "ts", "origin",
+            &forge, "o", "r", "_mmm/main/ts/integration", &[], None, "main", "ts", "origin",
             PrAction::Sync,
         ).unwrap();
     }
@@ -489,11 +538,28 @@ mod tests {
         let forge = MockForge::new(existing);
         // Should not panic or create a duplicate — reuses existing PR.
         exec_pr_action_inner(
-            &forge, "o", "r", "_mmm/main/ts/integration", &[], "main", "ts", "origin",
+            &forge, "o", "r", "_mmm/main/ts/integration", &[], None, "main", "ts", "origin",
             PrAction::Create,
         ).unwrap();
         // Only the original PR exists.
         let all = forge.existing_prs.lock().unwrap();
         assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn exec_pr_action_inner_creates_kokomeco_pr() {
+        let forge = MockForge::new(vec![]);
+        exec_pr_action_inner(
+            &forge, "o", "r", "_mmm/main/ts/integration", &[], Some("_mmm/main/ts/kokomeco"), "main", "ts", "origin",
+            PrAction::Create,
+        ).unwrap();
+
+        let kok_pr = forge.find_pr_by_head("o/r", "_mmm/main/ts/kokomeco").unwrap();
+        assert!(kok_pr.is_some(), "kokomeco PR should be created");
+        assert!(kok_pr.unwrap().draft);
+
+        // Integration and slice PRs are still created too.
+        let int_pr = forge.find_pr_by_head("o/r", "_mmm/main/ts/integration").unwrap();
+        assert!(int_pr.is_some());
     }
 }

@@ -415,6 +415,198 @@ fn consolidation_uses_original_and_source_as_parents_and_integration_tree() -> T
     Ok(())
 }
 
+/// Consolidating after resolving a conflict by deleting the file must not include it in the
+/// kokomeco tree — git restore --source (the previous approach) would preserve files that existed
+/// in both parents but were deleted in integration; read-tree --reset -u replaces the entire index.
+#[test]
+fn consolidation_excludes_deleted_files_from_slice_resolution() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        create.status.success(),
+        "initial mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    // Resolve the slice by deleting the conflicting file.
+    test_helpers::git(&repo, &["checkout", slice_branch()])?;
+    test_helpers::git(&repo, &["rm", "conflict.txt"])?;
+    test_helpers::git(&repo, &["commit", "-m", "resolve by deleting conflict.txt"])?;
+
+    // Merge the resolved slice into integration.
+    // The slice deleted the file, so this produces a modify/delete conflict —
+    // accept the deletion by removing the file and committing.
+    test_helpers::git(&repo, &["checkout", integration_branch()])?;
+    let merge_result = test_helpers::git(
+        &repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            "merge resolved slice (deletion)",
+            slice_branch(),
+        ],
+    );
+    match merge_result {
+        Ok(_) => { /* clean merge — proceed */ }
+        Err(e) if e.to_string().contains("CONFLICT") => {
+            // Accept the deletion side.
+            test_helpers::git(&repo, &["rm", "conflict.txt"])?;
+            test_helpers::git(&repo, &["commit", "-m", "merge resolved slice (deletion)"])?;
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
+
+    // Verify integration no longer has the file.
+    let integration_files = test_helpers::git(
+        &repo,
+        &["ls-tree", "--name-only", "-r", integration_branch()],
+    )?;
+    assert!(
+        !integration_files.lines().any(|l| l == "conflict.txt"),
+        "conflict.txt should not be in integration after deletion resolution"
+    );
+
+    // Consolidate.
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let consolidate = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--yes"])?;
+    assert!(
+        consolidate.status.success(),
+        "consolidation run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&consolidate.stdout),
+        String::from_utf8_lossy(&consolidate.stderr)
+    );
+
+    // Verify kokomeco tree does NOT contain the deleted file.
+    let kokomeco_files = test_helpers::git(
+        &repo,
+        &["ls-tree", "--name-only", "-r", kokomeco_branch()],
+    )?;
+    assert!(
+        !kokomeco_files.lines().any(|l| l == "conflict.txt"),
+        "conflict.txt must not be in kokomeco tree after deletion resolution:\n{}",
+        kokomeco_files
+    );
+
+    // Double-check via worktree that the file really doesn't exist.
+    let worktree_path = repo.join("conflict.txt");
+    assert!(
+        !worktree_path.exists(),
+        "conflict.txt must not exist in worktree after consolidation"
+    );
+
+    Ok(())
+}
+
+/// Status reports kokomeco as \"Unmerged\" when it exists but has not been merged into its target.
+#[test]
+fn status_shows_kokomeco_unmerged_when_not_merged_into_target() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    // Create the merge plan and resolve the slice.
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(create.status.success(), "initial run failed");
+
+    test_helpers::git(&repo, &["checkout", slice_branch()])?;
+    test_helpers::git(&repo, &["commit", "--allow-empty", "-m", "resolve"])?;
+    test_helpers::git(&repo, &["checkout", integration_branch()])?;
+    let merge_result = test_helpers::git(
+        &repo,
+        &["merge", "--no-ff", "-m", "merge slice", slice_branch()],
+    );
+    if merge_result.is_err() {
+        test_helpers::git(&repo, &["add", "."])?;
+        test_helpers::git(&repo, &["commit", "-m", "merge slice (with conflicts)"])?;
+    }
+
+    // Consolidate.
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let consolidate = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--yes"])?;
+    assert!(consolidate.status.success(), "consolidation failed");
+
+    // Switch back to main before checking status (kokomeco branch is now HEAD).
+    test_helpers::git(&repo, &["checkout", "main"])?;
+
+    // Status should show kokomeco as "Unmerged" (not yet merged into main).
+    let status = test_helpers::mergetopus(&repo, &["--quiet", "status", "feature"])?;
+    assert!(
+        status.status.success(),
+        "status failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("Merged into target:   No"),
+        "expected 'Merged into target:   No' in status output, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("kokomeco"),
+        "expected kokomeco reference in status output:\n{stdout}"
+    );
+
+    Ok(())
+}
+
+/// Status reports kokomeco as \"Merged\" after it has been merged into the target branch.
+#[test]
+fn status_shows_kokomeco_merged_when_merged_into_target() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    // Create plan, resolve, consolidate.
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(create.status.success());
+
+    test_helpers::git(&repo, &["checkout", slice_branch()])?;
+    test_helpers::git(&repo, &["commit", "--allow-empty", "-m", "resolve"])?;
+    test_helpers::git(&repo, &["checkout", integration_branch()])?;
+    let merge_result = test_helpers::git(
+        &repo,
+        &["merge", "--no-ff", "-m", "merge slice", slice_branch()],
+    );
+    if merge_result.is_err() {
+        test_helpers::git(&repo, &["add", "."])?;
+        test_helpers::git(&repo, &["commit", "-m", "merge slice (with conflicts)"])?;
+    }
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let consolidate = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--yes"])?;
+    assert!(consolidate.status.success());
+
+    // Switch back to main before checking status (kokomeco branch is now HEAD).
+    test_helpers::git(&repo, &["checkout", "main"])?;
+
+    // Merge kokomeco into target (main).
+    let kokomeco = kokomeco_branch();
+    test_helpers::git(&repo, &["merge", "--no-ff", "-m", "merge kokomeco", &kokomeco])?;
+
+    // Status should now show "Merged".
+    let status = test_helpers::mergetopus(&repo, &["--quiet", "status", "feature"])?;
+    assert!(
+        status.status.success(),
+        "status failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("Merged into target:   Yes"),
+        "expected 'Merged into target: Yes' in status output, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("has already been merged"),
+        "expected 'has already been merged' in status output:\n{stdout}"
+    );
+
+    Ok(())
+}
+
 /// Verifies selecting a remote-only source creates a local tracking branch and proceeds.
 #[test]
 fn remote_source_creates_local_tracking_branch_when_missing() -> TestResult<()> {

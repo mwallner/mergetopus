@@ -1,4 +1,5 @@
 use crate::color;
+use crate::forges;
 use crate::forges::detect::{detect_forge, parse_remote_url};
 use anyhow::{Result, bail};
 
@@ -132,41 +133,69 @@ fn create_prs_for_plan(
             integration_branch
         };
 
-        let title = if *branch == integration_branch {
-            format!("[MMM] Integration: {source} \u{2192} {target}")
+        let (title, body) = if *branch == integration_branch {
+            (
+                format!("[MMM] Integration: {source} \u{2192} {target}"),
+                format!("Mergetopus integration branch merging **{source}** into **{target}**.\n\nAll slice branches must be resolved before this PR can be merged."),
+            )
         } else {
-            format!("[MMM] Slice: {branch}")
+            (
+                format!("[MMM] Slice: {branch}"),
+                format!("Mergetopus slice branch for merging **{source}** into **{target}**.\n\nBranch: `{branch}`"),
+            )
         };
 
-        let body = if *branch == integration_branch {
-            format!("Mergetopus integration branch merging **{source}** into **{target}**.\n\nAll slice branches must be resolved before this PR can be merged.")
-        } else {
-            format!("Mergetopus slice branch for merging **{source}** into **{target}**.\n\nBranch: `{branch}`")
-        };
+        create_single_pr(forge.as_ref(), &repo_path, &info.owner, &info.repo, branch, &base, &title, &body, quiet)?;
+    }
 
-        let existing = forge.find_pr_by_head(&repo_path, branch)?;
+    // If a kokomeco branch exists, create a PR targeting the base branch directly.
+    let kokomeco = git_ops::consolidated_branch_name(integration_branch);
+    if git_ops::branch_exists(&kokomeco)? {
+        let title = format!("[MMM] Consolidated: {source} \u{2192} {target}");
+        let body = format!(
+            "Mergetopus consolidated merge branch for **{source}** into **{target}**.\n\n\
+             This branch contains the resolved integration tree as a proper merge commit.\n\n\
+             Branch: `{kokomeco}`"
+        );
+        create_single_pr(forge.as_ref(), &repo_path, &info.owner, &info.repo, &kokomeco, target, &title, &body, quiet)?;
+    }
 
-        if let Some(pr) = existing {
-            if !quiet {
-                color::print_info(
-                    &format!("PR already exists for {branch}: #{} ({})", pr.number, pr.html_url),
-                    None,
-                );
-            }
-        } else {
-            forge.create_pr(crate::forges::PrParams {
-                owner: info.owner.clone(),
-                repo: info.repo.clone(),
-                title,
-                body,
-                head: branch.to_string(),
-                base: base.to_string(),
-                draft: true,
-                labels: vec![],
-            })?;
-            if !quiet {
-                color::print_success(&format!("Created PR for {branch}"), None);
-            }
+    Ok(())
+}
+
+fn create_single_pr(
+    forge: &dyn forges::Forge,
+    repo_path: &str,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+    quiet: bool,
+) -> Result<()> {
+    let existing = forge.find_pr_by_head(repo_path, branch)?;
+
+    if let Some(pr) = existing {
+        if !quiet {
+            color::print_info(
+                &format!("PR already exists for {branch}: #{} ({})", pr.number, pr.html_url),
+                None,
+            );
+        }
+    } else {
+        forge.create_pr(crate::forges::PrParams {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            head: branch.to_string(),
+            base: base.to_string(),
+            draft: true,
+            labels: vec![],
+        })?;
+        if !quiet {
+            color::print_success(&format!("Created PR for {branch}"), None);
         }
     }
 

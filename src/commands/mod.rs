@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 mod cmd_cleanup;
+mod cmd_consolidate;
 mod cmd_discard;
 mod cmd_here;
 mod cmd_license;
@@ -70,6 +71,15 @@ pub fn run(args: Args) -> Result<()> {
     if let Some(Commands::Verify { source, global }) = &args.command {
         let (current_branch, _) = current_branch_and_tui_title_worktree()?;
         return cmd_verify::verify_command(source.as_deref(), *global, &current_branch);
+    }
+
+    if let Some(Commands::Consolidate { source }) = &args.command {
+        let (current_branch, _) = current_branch_and_tui_title_worktree()?;
+        return cmd_consolidate::consolidate_command(
+            source.as_deref(),
+            args.quiet,
+            &current_branch,
+        );
     }
 
     if let Some(Commands::Here { source }) = &args.command {
