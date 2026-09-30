@@ -295,13 +295,31 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
-    use std::cell::Cell;
 
-    macro_rules! events {
-        ($($event:expr),* $(,)?) => {{
-            let mut __iter = vec![$($event),*].into_iter();
-            move || Ok(__iter.next().expect("events! exhausted"))
-        }};
+    /// Poll source for the step/dismissal loop tests.
+    ///
+    /// `run_progress_on_terminal` calls this with 80 ms while a step is running
+    /// and 200 ms in the dismissal loop, so the timeout identifies the phase.
+    /// During a step we report "no event available" (after yielding the CPU, so
+    /// the worker thread can finish) and in the dismissal loop we report the
+    /// single Esc. Event availability therefore never depends on how many times
+    /// the loop spins, which is what made a fixed-length event queue flaky on
+    /// slow CI.
+    fn phase_poll() -> impl FnMut(Duration) -> Result<bool> {
+        move |timeout| {
+            if timeout >= Duration::from_millis(200) {
+                Ok(true)
+            } else {
+                thread::sleep(Duration::from_millis(1));
+                Ok(false)
+            }
+        }
+    }
+
+    /// Read source returning Esc on every call — the dismissal loop breaks on the
+    /// first one.
+    fn esc_source() -> impl FnMut() -> Result<Event> {
+        move || Ok(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
     }
 
     fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
@@ -448,63 +466,12 @@ mod tests {
             },
         ];
 
-        // Use a shared counter so poll_event returns true only after
-        // both steps have had time to finish. The loop injects ignored
-        // Tab keys during the render-loop polls; Esc is sent only
-        // once for the dismissal loop.
-        let polls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let polls_clone = polls.clone();
         let result = run_progress_on_terminal(
             &mut terminal,
             "Test",
             steps,
-            move |_| {
-                let n = polls_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(n > 20)
-            },
-            events![
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            ],
+            phase_poll(),
+            esc_source(),
             None,
         );
 
@@ -536,60 +503,12 @@ mod tests {
             },
         ];
 
-        let polls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let polls_clone = polls.clone();
         let result = run_progress_on_terminal(
             &mut terminal,
             "Test",
             steps,
-            move |_| {
-                let n = polls_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(n > 20)
-            },
-            events![
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            ],
+            phase_poll(),
+            esc_source(),
             None,
         );
 
