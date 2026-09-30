@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::cli::Args;
 use crate::color;
-use crate::models::SlicePlanItem;
+use crate::models::{SlicePlanItem, UnassignedPolicy};
 use anyhow::{Context, Result, bail};
 
 use crate::git_ops;
@@ -250,7 +250,7 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         git_ops::commit(&msg)?;
     }
 
-    let explicit_slices = match select_conflicts(
+    let (explicit_slices, unassigned_policy) = match select_conflicts(
         args,
         &actual_source_ref,
         &conflicted_files,
@@ -286,7 +286,15 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
                 tui_progress::ProgressStep {
                     label: "Creating slice branches".into(),
                     action: Box::new(move || {
-                        planner::create_slice_branches(&ib, &mb, &sr, &ss, &cf, &es)
+                        planner::create_slice_branches(
+                            &ib,
+                            &mb,
+                            &sr,
+                            &ss,
+                            &cf,
+                            &es,
+                            unassigned_policy,
+                        )
                     }),
                 },
                 tui_progress::ProgressStep {
@@ -303,6 +311,7 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
             &actual_source_sha,
             &conflicted_files,
             &explicit_slices,
+            unassigned_policy,
         )?;
         git_ops::checkout(&actual_integration_branch)?;
     }
@@ -315,6 +324,19 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         color::print_info(&format!("  - SliceGroup {}: {} file(s)", idx + 1, group.len()), None);
     }
 
+    let leftovers = planner::unassigned_paths(&conflicted_files, &explicit_slices);
+    if !leftovers.is_empty() {
+        let unit = if unassigned_policy.is_separate() {
+            "own slice branch each"
+        } else {
+            "one shared slice branch"
+        };
+        color::print_info(
+            &format!("  Unassigned files: {} ({unit})", leftovers.len()),
+            None,
+        );
+    }
+
     Ok(())
 }
 
@@ -323,19 +345,19 @@ pub fn select_conflicts(
     source_ref: &str,
     all_conflicts: &[String],
     tui_title: &str,
-) -> Result<Vec<Vec<String>>> {
+) -> Result<(Vec<Vec<String>>, UnassignedPolicy)> {
     match args.select_paths.as_deref() {
         Some(csv) => {
             let paths = git_ops::select_conflicts_by_list(all_conflicts, csv)?;
             if paths.is_empty() {
-                Ok(Vec::new())
+                Ok((Vec::new(), args.unassigned))
             } else {
-                Ok(vec![paths])
+                Ok((vec![paths], args.unassigned))
             }
         }
         None => {
             if args.quiet {
-                Ok(Vec::new())
+                Ok((Vec::new(), args.unassigned))
             } else {
                 let diff_tool = git_ops::get_git_config("diff.tool")?;
                 match tui::select_conflicts(
@@ -345,7 +367,7 @@ pub fn select_conflicts(
                     |path| git_ops::launch_difftool(path, source_ref),
                     tui_title,
                 )? {
-                    Some(groups) => Ok(groups),
+                    Some(selection) => Ok(selection),
                     None => bail!("conflict selection canceled"),
                 }
             }

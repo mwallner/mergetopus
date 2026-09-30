@@ -136,6 +136,176 @@ fn release_a_slice_parent_is_merge_base_for_explicit_slice_group() -> TestResult
     Ok(())
 }
 
+fn branch_exists(repo: &std::path::Path, branch: &str) -> bool {
+    test_helpers::git(
+        repo,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
+}
+
+/// `--unassigned single` must collapse every ungrouped conflict into one slice branch.
+#[test]
+fn release_a_unassigned_single_creates_one_shared_slice() -> TestResult<()> {
+    let repo = test_helpers::setup_two_conflicts_repo()?;
+
+    let out = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--unassigned", "single"])?;
+    assert!(
+        out.status.success(),
+        "mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        branch_exists(&repo, "_mmm/main/feature/slice1"),
+        "shared unassigned slice should exist"
+    );
+    assert!(
+        !branch_exists(&repo, "_mmm/main/feature/slice2"),
+        "no second slice should be created when unassigned files share one slice"
+    );
+
+    let message = test_helpers::git(
+        &repo,
+        &["log", "-1", "--format=%B", "_mmm/main/feature/slice1"],
+    )?;
+    assert!(
+        message.contains("* a.txt"),
+        "slice must carry a.txt:\n{message}"
+    );
+    assert!(
+        message.contains("* b.txt"),
+        "slice must carry b.txt:\n{message}"
+    );
+    assert!(
+        message.contains("Slice-Paths: a.txt, b.txt"),
+        "combined slice should list both paths:\n{message}"
+    );
+
+    Ok(())
+}
+
+/// Default behavior stays one slice branch per unassigned file.
+#[test]
+fn release_a_unassigned_defaults_to_separate_slices() -> TestResult<()> {
+    let repo = test_helpers::setup_two_conflicts_repo()?;
+
+    let out = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        out.status.success(),
+        "mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(branch_exists(&repo, "_mmm/main/feature/slice1"));
+    assert!(
+        branch_exists(&repo, "_mmm/main/feature/slice2"),
+        "default policy keeps one slice branch per unassigned file"
+    );
+
+    let first = test_helpers::git(
+        &repo,
+        &["log", "-1", "--format=%B", "_mmm/main/feature/slice1"],
+    )?;
+    assert!(
+        first.contains("* a.txt"),
+        "slice1 should carry a.txt:\n{first}"
+    );
+    assert!(
+        !first.contains("* b.txt"),
+        "slice1 must not carry b.txt:\n{first}"
+    );
+
+    let second = test_helpers::git(
+        &repo,
+        &["log", "-1", "--format=%B", "_mmm/main/feature/slice2"],
+    )?;
+    assert!(
+        second.contains("* b.txt"),
+        "slice2 should carry b.txt:\n{second}"
+    );
+
+    Ok(())
+}
+
+/// An explicit group keeps its own slice; the remaining conflicts share one slice.
+#[test]
+fn release_a_unassigned_single_coexists_with_explicit_group() -> TestResult<()> {
+    let repo = test_helpers::setup_two_conflicts_repo()?;
+
+    let out = test_helpers::mergetopus(
+        &repo,
+        &[
+            "feature",
+            "--quiet",
+            "--select-paths",
+            "a.txt",
+            "--unassigned",
+            "single",
+        ],
+    )?;
+    assert!(
+        out.status.success(),
+        "mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(branch_exists(&repo, "_mmm/main/feature/slice1"));
+    assert!(branch_exists(&repo, "_mmm/main/feature/slice2"));
+    assert!(
+        !branch_exists(&repo, "_mmm/main/feature/slice3"),
+        "explicit group plus one shared slice is two slices"
+    );
+
+    let explicit = test_helpers::git(
+        &repo,
+        &["log", "-1", "--format=%B", "_mmm/main/feature/slice1"],
+    )?;
+    assert!(
+        explicit.contains("* a.txt"),
+        "slice1 should be the explicit group:\n{explicit}"
+    );
+    assert!(
+        !explicit.contains("* b.txt"),
+        "slice1 must not carry b.txt:\n{explicit}"
+    );
+
+    let shared = test_helpers::git(
+        &repo,
+        &["log", "-1", "--format=%B", "_mmm/main/feature/slice2"],
+    )?;
+    assert!(
+        shared.contains("* b.txt"),
+        "slice2 should carry the leftover:\n{shared}"
+    );
+
+    Ok(())
+}
+
+/// An invalid --unassigned value is rejected instead of silently defaulting.
+#[test]
+fn release_a_rejects_invalid_unassigned_mode() -> TestResult<()> {
+    let repo = test_helpers::setup_two_conflicts_repo()?;
+
+    let out = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--unassigned", "bogus"])?;
+    assert!(!out.status.success(), "invalid mode should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("separate") && stderr.contains("single"),
+        "error should list valid modes:\n{stderr}"
+    );
+
+    Ok(())
+}
+
 /// Validates resolve behavior: stage-only resolve does not commit, and --commit writes one integration merge commit.
 #[test]
 fn release_a_resolve_stages_by_default_and_commits_with_flag() -> TestResult<()> {

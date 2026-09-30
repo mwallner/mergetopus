@@ -29,7 +29,7 @@ When you run `mergetopus <source>`, it:
 3. Runs `git merge --no-commit` against the source.
 4. Commits everything that merged cleanly into the integration branch.
 5. Resets conflicted files back to `ours` in that same commit — they'll be dealt with in slices.
-6. Lets you group conflicts into slices (via TUI or `--select-paths`). Any conflicts you don't explicitly group get their own one-file slice.
+6. Lets you group conflicts into slices (via TUI or `--select-paths`). Conflicts you don't explicitly group get their own one-file slice by default, or one shared slice with `--unassigned single` (the TUI asks which one you want).
 7. Creates a branch per slice from the merge base, with the source-side version of each file and a commit message noting where it came from.
 
 From there, use `mergetopus resolve` to work through each slice with your merge tool (see [Resolving Conflicts](#resolving-conflicts)).
@@ -132,6 +132,9 @@ _mmm/main/feature/slice1   B---S1 (explicit group: fileA,fileB)
 _mmm/main/feature/slice2   B---S2 (explicit group: fileC)
 _mmm/main/feature/slice3   B---S3 (auto singleton for unassigned fileD)
 _mmm/main/feature/slice4   B---S4 (auto singleton for unassigned fileE)
+
+with --unassigned single, fileD and fileE share one branch instead:
+_mmm/main/feature/slice3   B---S3 (unassigned: fileD,fileE)
 ```
 
 3. After resolution and optional consolidation:
@@ -428,6 +431,12 @@ Explicit conflict grouping by path list:
 ```bash
 # Put explicit paths into one grouped slice; all remaining conflicts become one-file slices
 mergetopus feature/refactor-auth --select-paths src/a.rs,src/b.rs
+
+# Same, but every remaining conflict shares one slice branch
+mergetopus feature/refactor-auth --select-paths src/a.rs,src/b.rs --unassigned single
+
+# No explicit grouping: one shared slice for every conflict
+mergetopus feature/refactor-auth --quiet --unassigned single
 ```
 
 Interactive conflict grouping (with `F3` opening your configured `diff.tool`, or the inline 3-way view when no `diff.tool` is set) when `--select-paths` is not provided:
@@ -762,10 +771,10 @@ Conflict selector:
 - `Tab`: switch pane
 - `n`: create new explicit slice
 - `Space`: assign/move highlighted conflict into currently selected slice
-- `u`: unassign highlighted conflict (it will become default one-file slice)
+- `u`: unassign highlighted conflict (it will become a default one-file slice, or join the shared slice when `--unassigned single` is in effect)
 - `d`: delete selected explicit slice (its files become unassigned)
 - `F3`: open configured difftool for selected file (or inline 3-way diff if `diff.tool` is not set)
-- `Enter`: apply selection
+- `Enter`: apply selection (when files are still unassigned, asks whether they get separate slices or one shared slice; `Esc` in that prompt returns to the selector)
 - `Esc`: close overlay or cancel selector
 - `q`: cancel selector
 
@@ -821,6 +830,10 @@ The main merge target, created and managed by Mergetopus. Holds all auto-merged 
 ### Slice Branch
 
 A per-conflict-group branch created to isolate and resolve a specific set of conflicted files. Multiple slices can exist for a single merge.
+
+### Unassigned Conflicts
+
+Conflicted files that no explicit slice group covers. By default each one becomes its own slice branch; `--unassigned single` puts them all in one shared slice branch. In interactive mode the conflict selector asks which you want when you apply a grouping that leaves files unassigned.
 
 ### Kokomeco Branch
 

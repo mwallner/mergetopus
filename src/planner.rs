@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use crate::color;
 
 use crate::git_ops;
+use crate::models::UnassignedPolicy;
 
 /// Sanitize a string for use as a Git branch name fragment.
 ///
@@ -106,6 +107,94 @@ pub fn slice_branch_name(integration_branch: &str, index_one_based: usize) -> Re
     Ok(format!("{prefix}/slice{index_one_based}"))
 }
 
+/// Conflicted paths that no explicit slice group covers, in conflict-list order.
+pub fn unassigned_paths<'a>(
+    all_conflicts: &'a [String],
+    explicit_slices: &[Vec<String>],
+) -> Vec<&'a String> {
+    let assigned = explicit_slices
+        .iter()
+        .flatten()
+        .map(|path| path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    all_conflicts
+        .iter()
+        .filter(|path| !assigned.contains(path.as_str()))
+        .collect()
+}
+
+/// Create one slice branch carrying `paths` (source-side content) and commit it
+/// with per-path provenance trailers. Used for explicit groups and for the
+/// combined unassigned slice.
+fn create_group_slice_branch(
+    integration_branch: &str,
+    slice_base: &str,
+    source_ref: &str,
+    source_sha: &str,
+    slice_number: usize,
+    paths: &[String],
+    description: &str,
+) -> Result<()> {
+    let slice_branch = slice_branch_name(integration_branch, slice_number)?;
+    git_ops::checkout_new_or_reset(&slice_branch, slice_base)?;
+
+    for path in paths {
+        if git_ops::path_exists_in_ref(source_ref, path)? {
+            git_ops::restore_from_ref(source_ref, path)?;
+        } else {
+            git_ops::rm_path(path)?;
+        }
+    }
+
+    if !git_ops::staged_has_changes()? {
+        color::print_warning(&format!("Skipped {slice_branch}: no staged changes"), None);
+        return Ok(());
+    }
+
+    let trailers = {
+        let mut t = vec![
+            format!("Source-Ref: {source_ref}"),
+            format!("Source-Commit: {source_sha}"),
+            format!("Slice-Paths: {}", paths.join(", ")),
+        ];
+
+        for path in paths {
+            let p = git_ops::path_provenance(source_ref, source_sha, path)?;
+            t.push(format!("Source-Path: {}", p.path));
+            t.push(format!(
+                "Source-Path-Commit: {}",
+                p.path_commit.unwrap_or_else(|| "(none)".to_string())
+            ));
+            if let (Some(name), Some(email)) = (p.author_name, p.author_email) {
+                t.push(format!("Co-authored-by: {name} <{email}>"));
+            }
+        }
+
+        t.join("\n")
+    };
+
+    let files_list = paths
+        .iter()
+        .map(|p| format!("* {p}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let message = format!(
+        "Mergetopus - slice{slice_number} from {source_ref} (theirs)\n\nFiles:\n{files_list}\n\n{trailers}"
+    );
+
+    git_ops::commit(&message)?;
+    color::print_success(
+        &format!(
+            "Created {description} slice branch {slice_branch} for {} file(s)",
+            paths.len()
+        ),
+        None,
+    );
+    Ok(())
+}
+
 pub fn create_slice_branches(
     integration_branch: &str,
     slice_base: &str,
@@ -113,75 +202,47 @@ pub fn create_slice_branches(
     source_sha: &str,
     all_conflicts: &[String],
     explicit_slices: &[Vec<String>],
+    unassigned_policy: UnassignedPolicy,
 ) -> Result<()> {
     let mut slice_index = 1usize;
-    let mut explicitly_assigned = std::collections::BTreeSet::new();
 
     for group in explicit_slices {
         if group.is_empty() {
             continue;
         }
 
-        let slice_number = slice_index;
-        let slice_branch = slice_branch_name(integration_branch, slice_index)?;
+        create_group_slice_branch(
+            integration_branch,
+            slice_base,
+            source_ref,
+            source_sha,
+            slice_index,
+            group,
+            "explicit",
+        )?;
         slice_index += 1;
-        git_ops::checkout_new_or_reset(&slice_branch, slice_base)?;
-
-        for path in group {
-            explicitly_assigned.insert(path.clone());
-
-            if git_ops::path_exists_in_ref(source_ref, path)? {
-                git_ops::restore_from_ref(source_ref, path)?;
-            } else {
-                git_ops::rm_path(path)?;
-            }
-        }
-
-        if git_ops::staged_has_changes()? {
-            let trailers = {
-                let mut t = vec![
-                    format!("Source-Ref: {source_ref}"),
-                    format!("Source-Commit: {source_sha}"),
-                    format!("Slice-Paths: {}", group.join(", ")),
-                ];
-
-                for path in group {
-                    let p = git_ops::path_provenance(source_ref, source_sha, path)?;
-                    t.push(format!("Source-Path: {}", p.path));
-                    t.push(format!(
-                        "Source-Path-Commit: {}",
-                        p.path_commit.unwrap_or_else(|| "(none)".to_string())
-                    ));
-                    if let (Some(name), Some(email)) = (p.author_name, p.author_email) {
-                        t.push(format!("Co-authored-by: {name} <{email}>"));
-                    }
-                }
-
-                t.join("\n")
-            };
-
-            let files_list = group
-                .iter()
-                .map(|p| format!("* {p}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            let message = format!(
-                "Mergetopus - slice{slice_number} from {source_ref} (theirs)\n\nFiles:\n{files_list}\n\n{trailers}"
-            );
-
-            git_ops::commit(&message)?;
-            color::print_success(&format!("Created explicit slice branch {slice_branch} for {} file(s)", group.len()), None);
-        } else {
-            color::print_warning(&format!("Skipped {slice_branch}: no staged changes"), None);
-        }
     }
 
-    for path in all_conflicts {
-        if explicitly_assigned.contains(path) {
-            continue;
-        }
+    let leftovers = unassigned_paths(all_conflicts, explicit_slices);
 
+    if !leftovers.is_empty() && !unassigned_policy.is_separate() {
+        let paths = leftovers
+            .iter()
+            .map(|path| (*path).clone())
+            .collect::<Vec<String>>();
+        create_group_slice_branch(
+            integration_branch,
+            slice_base,
+            source_ref,
+            source_sha,
+            slice_index,
+            &paths,
+            "unassigned",
+        )?;
+        return Ok(());
+    }
+
+    for path in leftovers {
         let slice_number = slice_index;
         let slice_branch = slice_branch_name(integration_branch, slice_index)?;
         slice_index += 1;
@@ -407,5 +468,50 @@ mod tests {
             None
         );
         assert_eq!(integration_from_slice_branch("slice1"), None);
+    }
+
+    #[test]
+    fn unassigned_paths_excludes_explicit_group_members() {
+        let conflicts = vec!["a.txt".to_string(), "b.txt".to_string(), "c.txt".to_string()];
+        let explicit = vec![vec!["b.txt".to_string()]];
+
+        let leftovers = unassigned_paths(&conflicts, &explicit);
+
+        assert_eq!(leftovers, vec!["a.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn unassigned_paths_keeps_conflict_order() {
+        let conflicts = vec!["z.txt".to_string(), "a.txt".to_string()];
+        let explicit = Vec::new();
+
+        let leftovers = unassigned_paths(&conflicts, &explicit);
+
+        assert_eq!(leftovers, vec!["z.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn unassigned_paths_empty_when_everything_assigned() {
+        let conflicts = vec!["a.txt".to_string()];
+        let explicit = vec![vec!["a.txt".to_string()]];
+
+        assert!(unassigned_paths(&conflicts, &explicit).is_empty());
+    }
+
+    #[test]
+    fn unassigned_policy_parses_modes() {
+        use std::str::FromStr;
+        assert_eq!(
+            UnassignedPolicy::from_str("separate").unwrap(),
+            UnassignedPolicy::Separate
+        );
+        assert_eq!(
+            UnassignedPolicy::from_str("SINGLE").unwrap(),
+            UnassignedPolicy::Single
+        );
+        assert!(UnassignedPolicy::from_str("bogus").is_err());
+        assert_eq!(UnassignedPolicy::default(), UnassignedPolicy::Separate);
+        assert!(UnassignedPolicy::Separate.is_separate());
+        assert!(!UnassignedPolicy::Single.is_separate());
     }
 }

@@ -16,6 +16,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
+use crate::models::UnassignedPolicy;
+
 pub(crate) struct TerminalGuard {
     pub(crate) terminal: Terminal<CrosstermBackend<Stdout>>,
 }
@@ -553,12 +555,18 @@ pub(crate) fn render_select_conflicts(
             ListItem::new(Line::from(vec![Span::raw(format!("{mark} {path}"))]))
         })
         .collect::<Vec<_>>();
+    let unassigned_count = conflicts
+        .iter()
+        .filter(|path| !assignments.contains_key(*path))
+        .count();
+    let left_title = if unassigned_count > 0 {
+        format!("Conflicted Files ({unassigned_count} unassigned)")
+    } else {
+        "Conflicted Files".to_string()
+    };
+
     let left = List::new(left_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Conflicted Files"),
-        )
+        .block(Block::default().borders(Borders::ALL).title(left_title))
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
@@ -659,7 +667,17 @@ pub(crate) fn render_select_conflicts(
     }
 }
 
+/// Options offered when applying a grouping that leaves conflicted files
+/// unassigned. Index 0 is the default (one slice branch per file).
+const UNASSIGNED_POLICY_OPTIONS: [&str; 2] = [
+    "Separate slices — one slice branch per file",
+    "Single slice — one slice branch for all of them",
+];
+
 /// Event-loop variant of [`select_conflicts`] that accepts injectable event sources.
+///
+/// Returns the explicit slice groups plus the chosen
+/// [`UnassignedPolicy`] for the conflicts that were left unassigned.
 pub(crate) fn select_conflicts_on_terminal<B: Backend>(
     terminal: &mut Terminal<B>,
     conflicts: &[String],
@@ -668,7 +686,7 @@ pub(crate) fn select_conflicts_on_terminal<B: Backend>(
     external_diff_runner: impl Fn(&str) -> Result<()>,
     mut poll_event: impl FnMut(Duration) -> Result<bool>,
     mut read_event: impl FnMut() -> Result<Event>,
-) -> Result<Option<Vec<Vec<String>>>>
+) -> Result<Option<(Vec<Vec<String>>, UnassignedPolicy)>>
 where
     B::Error: Send + Sync + 'static,
 {
@@ -836,6 +854,31 @@ where
                 }
             }
             KeyCode::Enter => {
+                let unassigned = conflicts
+                    .iter()
+                    .filter(|path| !assignments.contains_key(*path))
+                    .count();
+
+                let mut policy = UnassignedPolicy::Separate;
+                if unassigned > 0 {
+                    let prompt = format!(
+                        "{unassigned} of {} conflicted file(s) are not assigned to a slice.\n\nWhere should the unassigned files go?",
+                        conflicts.len()
+                    );
+                    match pick_option_on_terminal(
+                        terminal,
+                        &prompt,
+                        &UNASSIGNED_POLICY_OPTIONS,
+                        &mut poll_event,
+                        &mut read_event,
+                    )? {
+                        Some(0) => {}
+                        Some(_) => policy = UnassignedPolicy::Single,
+                        // Esc returns to the grouping screen instead of cancelling.
+                        None => continue,
+                    }
+                }
+
                 let mut out = slices
                     .iter()
                     .filter(|s| !s.is_empty())
@@ -845,7 +888,7 @@ where
                     group.sort();
                     group.dedup();
                 }
-                return Ok(Some(out));
+                return Ok(Some((out, policy)));
             }
             _ => {}
         }
@@ -858,7 +901,7 @@ pub fn select_conflicts(
     external_diff_tool: Option<&str>,
     external_diff_runner: impl Fn(&str) -> Result<()>,
     title: &str,
-) -> Result<Option<Vec<Vec<String>>>> {
+) -> Result<Option<(Vec<Vec<String>>, UnassignedPolicy)>> {
     let started = std::time::Instant::now();
     let debounce = std::time::Duration::from_millis(1000);
     let mut guard = TerminalGuard::new(title)?;
@@ -1833,6 +1876,44 @@ mod tests {
         assert!(all.contains("[--] b.txt"), "buffer:\n{all}");
         // Slice should show count
         assert!(all.contains("Slice 1 (1 file)"), "buffer:\n{all}");
+        // Pane title should report how many files are still unassigned
+        assert!(all.contains("1 unassigned"), "buffer:\n{all}");
+    }
+
+    #[test]
+    fn render_select_conflicts_title_omits_count_when_all_assigned() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let conflicts = vec!["a.txt".into()];
+        let mut assignments = BTreeMap::new();
+        assignments.insert("a.txt".into(), 0usize);
+        let slices = vec![vec!["a.txt".into()]];
+
+        let mut overlay_scroll = 0;
+        let mut overlay_max_scroll = 0;
+        terminal
+            .draw(|f| {
+                render_select_conflicts(
+                    f,
+                    &conflicts,
+                    &slices,
+                    &assignments,
+                    0,
+                    0,
+                    false,
+                    None,
+                    &mut overlay_scroll,
+                    &mut overlay_max_scroll,
+                    None,
+                );
+            })
+            .unwrap();
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        let all = lines.join("\n");
+        assert!(all.contains("Conflicted Files"), "buffer:\n{all}");
+        assert!(!all.contains("unassigned"), "buffer:\n{all}");
     }
 
     #[test]
@@ -2000,10 +2081,104 @@ mod tests {
             None,
             |_| Ok(()),
             |_| Ok(true),
-            events![key!(Enter)],
+            events![
+                key!(Enter), // apply -> unassigned policy prompt
+                key!(Enter), // accept default (separate)
+            ],
         )
         .unwrap();
-        assert_eq!(result, Some(vec![]), "Enter with no slices should return empty vec");
+        assert_eq!(
+            result,
+            Some((vec![], UnassignedPolicy::Separate)),
+            "Enter with no slices should return empty groups and the separate policy"
+        );
+    }
+
+    #[test]
+    fn select_conflicts_unassigned_prompt_can_choose_single_slice() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let conflicts = make_conflicts();
+        let result = select_conflicts_on_terminal(
+            &mut terminal,
+            &conflicts,
+            |_| Ok("diff".into()),
+            None,
+            |_| Ok(()),
+            |_| Ok(true),
+            events![
+                key!(char ' '), // assign a.txt
+                key!(Enter),    // apply -> unassigned policy prompt
+                key!(Down),     // -> single slice
+                key!(Enter),    // confirm
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Some((vec![vec!["a.txt".into()]], UnassignedPolicy::Single)),
+            "choosing the second option should request one shared slice for b.txt and c.txt"
+        );
+    }
+
+    #[test]
+    fn select_conflicts_unassigned_prompt_esc_returns_to_grouping() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let conflicts = make_conflicts();
+        let result = select_conflicts_on_terminal(
+            &mut terminal,
+            &conflicts,
+            |_| Ok("diff".into()),
+            None,
+            |_| Ok(()),
+            |_| Ok(true),
+            events![
+                key!(Enter),    // apply -> unassigned policy prompt
+                key!(Esc),      // dismiss prompt, back to grouping
+                key!(Down),     // -> b.txt
+                key!(char ' '), // assign b.txt
+                key!(Enter),   // apply -> prompt again
+                key!(Enter),   // accept default (separate)
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Some((vec![vec!["b.txt".into()]], UnassignedPolicy::Separate)),
+            "Esc in the prompt should not cancel the whole selection"
+        );
+    }
+
+    #[test]
+    fn select_conflicts_skips_unassigned_prompt_when_all_assigned() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let conflicts = make_conflicts();
+        // Only one Enter: if the policy prompt opened it would need a second
+        // key and exhaust the event queue.
+        let result = select_conflicts_on_terminal(
+            &mut terminal,
+            &conflicts,
+            |_| Ok("diff".into()),
+            None,
+            |_| Ok(()),
+            |_| Ok(true),
+            events![
+                key!(char ' '), // a.txt
+                key!(Down),
+                key!(char ' '), // b.txt
+                key!(Down),
+                key!(char ' '), // c.txt
+                key!(Enter),
+            ],
+        )
+        .unwrap();
+        let expected = Some((
+            vec![vec!["a.txt".into(), "b.txt".into(), "c.txt".into()]],
+            UnassignedPolicy::Separate,
+        ));
+        assert_eq!(result, expected, "no prompt when every file is assigned");
     }
 
     #[test]
@@ -2018,11 +2193,14 @@ mod tests {
             None,
             |_| Ok(()),
             |_| Ok(true),
-            events![key!(char ' '), key!(Enter)],
+            events![key!(char ' '), key!(Enter), key!(Enter)],
         )
         .unwrap();
-        let expected = Some(vec![vec!["a.txt".into()]]);
-        assert_eq!(result, expected, "Space on first conflict should assign to slice 0");
+        let expected = Some((vec![vec!["a.txt".into()]], UnassignedPolicy::Separate));
+        assert_eq!(
+            result, expected,
+            "Space on first conflict should assign to slice 0"
+        );
     }
 
     #[test]
@@ -2037,10 +2215,17 @@ mod tests {
             None,
             |_| Ok(()),
             |_| Ok(true),
-            events![key!(Tab), key!(char ' '), key!(Tab), key!(char ' '), key!(Enter)],
+            events![
+                key!(Tab),
+                key!(char ' '),
+                key!(Tab),
+                key!(char ' '),
+                key!(Enter),
+                key!(Enter)
+            ],
         )
         .unwrap();
-        let expected = Some(vec![vec!["a.txt".into()]]);
+        let expected = Some((vec![vec!["a.txt".into()]], UnassignedPolicy::Separate));
         assert_eq!(
             result, expected,
             "Tab right, Space (no-op), Tab left, Space should assign"
@@ -2059,14 +2244,11 @@ mod tests {
             None,
             |_| Ok(()),
             |_| Ok(true),
-            events![key!(char ' '), key!(char 'u'), key!(Enter)],
+            events![key!(char ' '), key!(char 'u'), key!(Enter), key!(Enter)],
         )
         .unwrap();
-        let expected = Some(vec![]);
-        assert_eq!(
-            result, expected,
-            "Space then 'u' should leave empty slices"
-        );
+        let expected = Some((vec![], UnassignedPolicy::Separate));
+        assert_eq!(result, expected, "Space then 'u' should leave empty slices");
     }
 
     #[test]
@@ -2081,10 +2263,14 @@ mod tests {
             None,
             |_| Ok(()),
             |_| Ok(true),
-            events![key!(char 'u'), key!(Enter)],
+            events![key!(char 'u'), key!(Enter), key!(Enter)],
         )
         .unwrap();
-        assert_eq!(result, Some(vec![]), "'u' on unassigned should be no-op");
+        assert_eq!(
+            result,
+            Some((vec![], UnassignedPolicy::Separate)),
+            "'u' on unassigned should be no-op"
+        );
     }
 
     #[test]
@@ -2111,10 +2297,10 @@ mod tests {
             ],
         )
         .unwrap();
-        let expected = Some(vec![
-            vec!["a.txt".into(), "b.txt".into()],
-            vec!["c.txt".into()],
-        ]);
+        let expected = Some((
+            vec![vec!["a.txt".into(), "b.txt".into()], vec!["c.txt".into()]],
+            UnassignedPolicy::Separate,
+        ));
         assert_eq!(result, expected, "Two slices with 'a+b' and 'c'");
     }
 
@@ -2135,11 +2321,15 @@ mod tests {
                 key!(char 'n'), // new slice 1
                 key!(char 'd'), // drop slice 1
                 key!(Enter),
+                key!(Enter), // unassigned policy prompt
             ],
         )
         .unwrap();
-        let expected = Some(vec![vec!["a.txt".into()]]);
-        assert_eq!(result, expected, "Space, 'n', 'd', Enter should leave one slice with 'a.txt'");
+        let expected = Some((vec![vec!["a.txt".into()]], UnassignedPolicy::Separate));
+        assert_eq!(
+            result, expected,
+            "Space, 'n', 'd', Enter should leave one slice with 'a.txt'"
+        );
     }
 
     #[test]
@@ -2161,10 +2351,14 @@ mod tests {
                 key!(Down),     // -> b.txt
                 key!(char ' '), // assign b.txt
                 key!(Enter),
+                key!(Enter), // unassigned policy prompt
             ],
         )
         .unwrap();
-        let expected = Some(vec![vec!["a.txt".into(), "b.txt".into()]]);
+        let expected = Some((
+            vec![vec!["a.txt".into(), "b.txt".into()]],
+            UnassignedPolicy::Separate,
+        ));
         assert_eq!(result, expected, "Tab to right and back should work");
     }
 
@@ -2180,11 +2374,14 @@ mod tests {
             None,
             |_| Ok(()),
             |_| Ok(true),
-            events![key!(Down), key!(char ' '), key!(Enter)],
+            events![key!(Down), key!(char ' '), key!(Enter), key!(Enter)],
         )
         .unwrap();
-        let expected = Some(vec![vec!["b.txt".into()]]);
-        assert_eq!(result, expected, "Down then Space should assign second conflict");
+        let expected = Some((vec![vec!["b.txt".into()]], UnassignedPolicy::Separate));
+        assert_eq!(
+            result, expected,
+            "Down then Space should assign second conflict"
+        );
     }
 
     #[test]
@@ -2199,10 +2396,17 @@ mod tests {
             None,
             |_| Ok(()),
             |_| Ok(true),
-            events![key!(Down), key!(Down), key!(Up), key!(char ' '), key!(Enter)],
+            events![
+                key!(Down),
+                key!(Down),
+                key!(Up),
+                key!(char ' '),
+                key!(Enter),
+                key!(Enter)
+            ],
         )
         .unwrap();
-        let expected = Some(vec![vec!["b.txt".into()]]);
+        let expected = Some((vec![vec!["b.txt".into()]], UnassignedPolicy::Separate));
         assert_eq!(
             result, expected,
             "Down twice, Up, Space should assign second conflict"
@@ -2221,10 +2425,10 @@ mod tests {
             None,
             |_| Ok(()),
             |_| Ok(true),
-            events![key!(F(3)), key!(Esc), key!(Enter)],
+            events![key!(F(3)), key!(Esc), key!(Enter), key!(Enter)],
         )
         .unwrap();
-        let expected = Some(vec![]);
+        let expected = Some((vec![], UnassignedPolicy::Separate));
         assert_eq!(
             result, expected,
             "F3 then Esc then Enter should return empty slices"
@@ -2249,11 +2453,15 @@ mod tests {
                 Ok(())
             },
             |_| Ok(true),
-            events![key!(F(3)), key!(Enter)],
+            events![key!(F(3)), key!(Enter), key!(Enter)],
         )
         .unwrap();
         assert!(called.get(), "external_diff_runner should have been called");
-        assert_eq!(result, Some(vec![]), "empty slices after external tool");
+        assert_eq!(
+            result,
+            Some((vec![], UnassignedPolicy::Separate)),
+            "empty slices after external tool"
+        );
     }
 
     #[test]

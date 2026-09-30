@@ -137,7 +137,7 @@ pub fn here_command(
         git_ops::commit(&msg)?;
     }
 
-    let explicit_slices = match cmd_merge_workflow::select_conflicts(
+    let (explicit_slices, unassigned_policy) = match cmd_merge_workflow::select_conflicts(
         args,
         &source_ref,
         &unresolved_before,
@@ -175,7 +175,15 @@ pub fn here_command(
                 tui_progress::ProgressStep {
                     label: "Creating slice branches".into(),
                     action: Box::new(move || {
-                        planner::create_slice_branches(&ib, &mb, &sr, &ss, &ub, &es)
+                        planner::create_slice_branches(
+                            &ib,
+                            &mb,
+                            &sr,
+                            &ss,
+                            &ub,
+                            &es,
+                            unassigned_policy,
+                        )
                     }),
                 },
                 tui_progress::ProgressStep {
@@ -192,6 +200,7 @@ pub fn here_command(
             &source_sha,
             &unresolved_before,
             &explicit_slices,
+            unassigned_policy,
         )?;
         git_ops::checkout(&integration_branch)?;
     }
@@ -200,6 +209,19 @@ pub fn here_command(
     color::print_info(&format!("  Source ref: {source_ref} ({source_sha})"), None);
     color::print_info(&format!("  Remaining conflict count: {}", unresolved_before.len()), None);
     color::print_info(&format!("  Explicit slice groups: {}", explicit_slices.len()), None);
+
+    let leftovers = planner::unassigned_paths(&unresolved_before, &explicit_slices);
+    if !leftovers.is_empty() {
+        let unit = if unassigned_policy.is_separate() {
+            "own slice branch each"
+        } else {
+            "one shared slice branch"
+        };
+        color::print_info(
+            &format!("  Unassigned files: {} ({unit})", leftovers.len()),
+            None,
+        );
+    }
 
     Ok(())
 }
