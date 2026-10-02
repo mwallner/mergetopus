@@ -1,6 +1,6 @@
-use crate::color;
-use crate::git_ops;
-use crate::planner;
+use mergetopus::color;
+use mergetopus::git_ops;
+use mergetopus::planner;
 use anyhow::{Context, Result, bail};
 
 use super::cmd_merge_workflow;

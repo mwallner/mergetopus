@@ -1,15 +1,15 @@
 use crate::cli::Args;
-use crate::color;
+use mergetopus::color;
 use crate::commands::cmd_merge_workflow;
-use crate::models::SlicePlanItem;
+use mergetopus::models::SlicePlanItem;
 use crate::tui;
 use crate::tui_progress;
-use crate::win32_path::to_fs_path;
+use mergetopus::win32_path::to_fs_path;
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::git_ops;
-use crate::planner;
+use mergetopus::git_ops;
+use mergetopus::planner;
 
 /// Converts an in-progress manual merge into a Mergetopus-managed integration
 /// flow by preserving resolved work, slicing unresolved conflicts, and creating

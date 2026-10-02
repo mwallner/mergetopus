@@ -70,7 +70,7 @@ pub fn ensure_git_worktree() -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn ensure_longpaths_support() -> Result<()> {
+pub fn ensure_longpaths_support() -> Result<()> {
     let current = get_git_config("core.longpaths")?.unwrap_or_default();
     if current.eq_ignore_ascii_case("true") {
         return Ok(());
@@ -90,7 +90,7 @@ pub(crate) fn ensure_longpaths_support() -> Result<()> {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn ensure_longpaths_support() -> Result<()> {
+pub fn ensure_longpaths_support() -> Result<()> {
     Ok(())
 }
 

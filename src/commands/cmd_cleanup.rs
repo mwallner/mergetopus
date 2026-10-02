@@ -1,11 +1,11 @@
 use crate::tui;
-use crate::color;
-use crate::forges;
-use crate::forges::detect::{detect_forge, parse_remote_url};
+use mergetopus::color;
+use mergetopus::forges;
+use mergetopus::forges::detect::{detect_forge, parse_remote_url};
 use anyhow::{Result, bail};
 
-use crate::git_ops;
-use crate::planner;
+use mergetopus::git_ops;
+use mergetopus::planner;
 
 /// Removes resolved Mergetopus integration/slice branches that already have a
 /// corresponding kokomeco branch, after interactive confirmation.

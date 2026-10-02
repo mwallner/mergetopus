@@ -1,12 +1,12 @@
 use anyhow::{Result, bail};
 use std::collections::BTreeMap;
-use crate::color;
+use mergetopus::color;
 
-use crate::forges;
-use crate::forges::detect::{detect_forge, parse_remote_url};
-use crate::git_ops;
+use mergetopus::forges;
+use mergetopus::forges::detect::{detect_forge, parse_remote_url};
+use mergetopus::git_ops;
 use crate::helpers;
-use crate::planner;
+use mergetopus::planner;
 use crate::tui;
 
 use helpers::extract_slice_paths;

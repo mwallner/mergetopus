@@ -16,7 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::models::UnassignedPolicy;
+use mergetopus::models::UnassignedPolicy;
 
 pub(crate) struct TerminalGuard {
     pub(crate) terminal: Terminal<CrosstermBackend<Stdout>>,

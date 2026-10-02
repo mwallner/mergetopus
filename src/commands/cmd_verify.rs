@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
-use crate::color;
+use mergetopus::color;
 
-use crate::git_ops;
-use crate::planner;
+use mergetopus::git_ops;
+use mergetopus::planner;
 
 pub fn verify_command(source_arg: Option<&str>, global: bool, current_branch: &str) -> Result<()> {
     if global {

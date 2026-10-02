@@ -1,10 +1,10 @@
-use crate::color;
-use crate::forges;
-use crate::forges::detect::{detect_forge, parse_remote_url};
+use mergetopus::color;
+use mergetopus::forges;
+use mergetopus::forges::detect::{detect_forge, parse_remote_url};
 use anyhow::{Result, bail};
 
-use crate::git_ops;
-use crate::planner;
+use mergetopus::git_ops;
+use mergetopus::planner;
 use crate::tui;
 use crate::tui_progress;
 
@@ -184,7 +184,7 @@ fn create_single_pr(
             );
         }
     } else {
-        forge.create_pr(crate::forges::PrParams {
+        forge.create_pr(mergetopus::forges::PrParams {
             owner: owner.to_string(),
             repo: repo.to_string(),
             title: title.to_string(),

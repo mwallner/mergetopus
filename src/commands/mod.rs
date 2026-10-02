@@ -13,7 +13,7 @@ pub(crate) mod cmd_status;
 mod cmd_verify;
 
 use crate::cli::{Args, Commands, PrSubcommand};
-use crate::git_ops;
+use mergetopus::git_ops;
 
 fn current_branch_and_tui_title_worktree() -> Result<(String, String)> {
     git_ops::ensure_git_worktree()?;

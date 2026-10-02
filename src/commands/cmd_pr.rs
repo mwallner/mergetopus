@@ -1,10 +1,10 @@
 use anyhow::{Result, bail};
 
-use crate::color;
-use crate::forges;
-use crate::forges::detect::{detect_forge, parse_remote_url};
-use crate::git_ops;
-use crate::planner;
+use mergetopus::color;
+use mergetopus::forges;
+use mergetopus::forges::detect::{detect_forge, parse_remote_url};
+use mergetopus::git_ops;
+use mergetopus::planner;
 use crate::tui;
 
 pub fn pr_command(
@@ -358,7 +358,7 @@ struct PrResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forges::{self, Forge, ForgeId, PrParams, PrUpdate, PrState};
+    use mergetopus::forges::{self, Forge, ForgeId, PrParams, PrUpdate, PrState};
     use std::sync::Mutex;
 
     type PullRequest = forges::PullRequest;

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 /// Relative paths are resolved against the current directory first.
 /// Non-Windows platforms return the path unchanged.
 #[cfg(target_os = "windows")]
-pub(crate) fn to_fs_path<P: AsRef<Path>>(path: P) -> PathBuf {
+pub fn to_fs_path<P: AsRef<Path>>(path: P) -> PathBuf {
     const MAX_SAFE: usize = 240;
     let path = path.as_ref();
 
@@ -37,7 +37,7 @@ pub(crate) fn to_fs_path<P: AsRef<Path>>(path: P) -> PathBuf {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn to_fs_path<P: AsRef<Path>>(path: P) -> PathBuf {
+pub fn to_fs_path<P: AsRef<Path>>(path: P) -> PathBuf {
     path.as_ref().to_path_buf()
 }
 

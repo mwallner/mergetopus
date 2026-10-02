@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use crate::color::ColorMode;
-use crate::models::UnassignedPolicy;
+use mergetopus::color::ColorMode;
+use mergetopus::models::UnassignedPolicy;
 
 const CLI_LONG_ABOUT: &str = "\
 Mergetopus turns a regular git merge into an integration branch plus optional per-conflict slice branches.

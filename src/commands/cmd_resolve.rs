@@ -2,13 +2,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::color;
-use crate::git_ops;
+use mergetopus::color;
+use mergetopus::git_ops;
 use crate::helpers;
-use crate::planner;
+use mergetopus::planner;
 use crate::tui;
 use crate::tui_progress;
-use crate::win32_path::to_fs_path;
+use mergetopus::win32_path::to_fs_path;
 
 /// RAII guard that creates a temporary directory on construction and deletes
 /// it (including all contents) when the guard is dropped, covering all exit

@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
 use crate::cli::Args;
-use crate::color;
-use crate::models::{SlicePlanItem, UnassignedPolicy};
+use mergetopus::color;
+use mergetopus::models::{SlicePlanItem, UnassignedPolicy};
 use anyhow::{Context, Result, bail};
 
-use crate::git_ops;
-use crate::planner;
+use mergetopus::git_ops;
+use mergetopus::planner;
 use crate::tui;
 use crate::tui_progress;
 
