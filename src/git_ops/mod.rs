@@ -21,9 +21,14 @@ pub use diff::*;
 pub use merge::*;
 pub use refs::*;
 
-pub fn run_git(args: &[&str]) -> Result<String> {
+/// Run a git command inside `repo_path`, ignoring the process working
+/// directory. These `_in` variants are what library consumers (biggit) use;
+/// the CWD-based functions below are thin wrappers for the CLI's own
+/// behaviour.
+pub fn run_git_in(repo_path: &std::path::Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
+        .current_dir(repo_path)
         .output()
         .with_context(|| format!("failed to execute git {}", args.join(" ")))?;
 
@@ -35,9 +40,13 @@ pub fn run_git(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub fn run_git_allow_failure(args: &[&str]) -> Result<(bool, String, String)> {
+pub fn run_git_allow_failure_in(
+    repo_path: &std::path::Path,
+    args: &[&str],
+) -> Result<(bool, String, String)> {
     let output = Command::new("git")
         .args(args)
+        .current_dir(repo_path)
         .output()
         .with_context(|| format!("failed to execute git {}", args.join(" ")))?;
 
@@ -45,6 +54,14 @@ pub fn run_git_allow_failure(args: &[&str]) -> Result<(bool, String, String)> {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     Ok((ok, stdout, stderr))
+}
+
+pub fn run_git(args: &[&str]) -> Result<String> {
+    run_git_in(&std::env::current_dir()?, args)
+}
+
+pub fn run_git_allow_failure(args: &[&str]) -> Result<(bool, String, String)> {
+    run_git_allow_failure_in(&std::env::current_dir()?, args)
 }
 
 pub fn ensure_git_context() -> Result<()> {
@@ -107,7 +124,16 @@ pub fn restore_ours(path: &str) -> Result<()> {
 }
 
 pub fn list_slice_branches_for_integration(integration_branch: &str) -> Result<Vec<String>> {
-    let out = run_git(&[
+    list_slice_branches_for_integration_in(&std::env::current_dir()?, integration_branch)
+}
+
+/// Path-taking variant: enumerate the slice branches of `integration_branch`
+/// inside `repo_path` regardless of the ambient working directory.
+pub fn list_slice_branches_for_integration_in(
+    repo_path: &std::path::Path,
+    integration_branch: &str,
+) -> Result<Vec<String>> {
+    let out = run_git_in(repo_path, &[
         "for-each-ref",
         "--format=%(refname:short)",
         "refs/heads",

@@ -1,14 +1,22 @@
-use super::{head_sha, run_git, run_git_allow_failure};
+use super::{head_sha, run_git, run_git_allow_failure, run_git_allow_failure_in, run_git_in};
 use crate::git_ops::{refs, worktree};
 use anyhow::{Context, Result, bail};
 
 pub fn current_branch() -> Result<String> {
-    let (ok, out, _) = run_git_allow_failure(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    current_branch_in(&std::env::current_dir()?)
+}
+
+/// Path-taking variant of [`current_branch`].
+pub fn current_branch_in(repo_path: &std::path::Path) -> Result<String> {
+    let (ok, out, _) = run_git_allow_failure_in(
+        repo_path,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+    )?;
     if ok && !out.is_empty() {
         return Ok(out);
     }
 
-    let head = head_sha()?;
+    let head = run_git_in(repo_path, &["rev-parse", "HEAD"])?;
     Ok(format!("detached_{}", &head[..8.min(head.len())]))
 }
 
@@ -159,7 +167,12 @@ pub fn list_branch_refs() -> Result<Vec<String>> {
 }
 
 pub fn list_local_branches() -> Result<Vec<String>> {
-    let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
+    list_local_branches_in(&std::env::current_dir()?)
+}
+
+/// Path-taking variant of [`list_local_branches`].
+pub fn list_local_branches_in(repo_path: &std::path::Path) -> Result<Vec<String>> {
+    let out = run_git_in(repo_path, &["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
     let mut branches = out
         .lines()
         .map(str::trim)
