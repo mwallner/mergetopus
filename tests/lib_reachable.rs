@@ -9,7 +9,9 @@ fn planner_branch_logic_is_pure_and_public() {
     let (target, source) = parsed.expect("must parse its own branch naming");
     assert_eq!(target, "main");
     assert!(source.starts_with("feature_x"), "got {source}");
-    assert!(mergetopus::planner::is_slice_branch("_mmm/main/feature_x/slice1"));
+    assert!(mergetopus::planner::is_slice_branch(
+        "_mmm/main/feature_x/slice1"
+    ));
     assert!(!mergetopus::planner::is_slice_branch("main"));
 }
 

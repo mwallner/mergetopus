@@ -1,7 +1,7 @@
-use anyhow::{Result, bail, Context};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use super::{Forge, ForgeId, PrParams, PrUpdate, PullRequest, PrState};
+use super::{Forge, ForgeId, PrParams, PrState, PrUpdate, PullRequest};
 
 type GlResponse = ureq::http::Response<ureq::Body>;
 
@@ -56,10 +56,7 @@ impl GitLab {
         Self::handle_response(resp)
     }
 
-    fn api_get<T: serde::de::DeserializeOwned>(
-        &self,
-        url: &str,
-    ) -> Result<T> {
+    fn api_get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let resp = self
             .headers(self.agent().get(url))
             .call()
@@ -263,9 +260,6 @@ mod tests {
 
     #[test]
     fn encode_project_path_preserves_simple() {
-        assert_eq!(
-            GitLab::encode_project_path("owner/repo"),
-            "owner%2Frepo"
-        );
+        assert_eq!(GitLab::encode_project_path("owner/repo"), "owner%2Frepo");
     }
 }

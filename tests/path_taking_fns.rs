@@ -16,7 +16,11 @@ fn git_in(dir: &Path, args: &[&str]) {
         .env("GIT_COMMITTER_EMAIL", "committer@example.com")
         .output()
         .expect("git is required");
-    assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn seeded_repo() -> (tempfile::TempDir, PathBuf) {
@@ -28,7 +32,10 @@ fn seeded_repo() -> (tempfile::TempDir, PathBuf) {
     git_in(&repo, &["config", "user.name", "T"]);
     std::fs::write(repo.join("a.txt"), "one").unwrap();
     git_in(&repo, &["add", "."]);
-    git_in(&repo, &["-c", "commit.gpgsign=false", "commit", "-m", "init"]);
+    git_in(
+        &repo,
+        &["-c", "commit.gpgsign=false", "commit", "-m", "init"],
+    );
     git_in(&repo, &["branch", "_mmm/main/feature_x/integration"]);
     git_in(&repo, &["branch", "_mmm/main/feature_x/slice1"]);
     git_in(&repo, &["branch", "_mmm/main/feature_x/slice2"]);
@@ -38,8 +45,8 @@ fn seeded_repo() -> (tempfile::TempDir, PathBuf) {
 #[test]
 fn run_git_in_ignores_ambient_cwd() {
     let (_tmp, repo) = seeded_repo();
-    let toplevel = mergetopus::git_ops::run_git_in(&repo, &["rev-parse", "--show-toplevel"])
-        .unwrap();
+    let toplevel =
+        mergetopus::git_ops::run_git_in(&repo, &["rev-parse", "--show-toplevel"]).unwrap();
     let toplevel = Path::new(&toplevel);
     assert!(
         toplevel.ends_with("repo"),
@@ -50,7 +57,10 @@ fn run_git_in_ignores_ambient_cwd() {
 #[test]
 fn current_branch_in_ignores_ambient_cwd() {
     let (_tmp, repo) = seeded_repo();
-    assert_eq!(mergetopus::git_ops::current_branch_in(&repo).unwrap(), "main");
+    assert_eq!(
+        mergetopus::git_ops::current_branch_in(&repo).unwrap(),
+        "main"
+    );
 }
 
 #[test]

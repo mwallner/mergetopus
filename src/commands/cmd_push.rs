@@ -1,12 +1,12 @@
+use anyhow::{Result, bail};
 use mergetopus::color;
 use mergetopus::forges;
 use mergetopus::forges::detect::{detect_forge, parse_remote_url};
-use anyhow::{Result, bail};
 
-use mergetopus::git_ops;
-use mergetopus::planner;
 use crate::tui;
 use crate::tui_progress;
+use mergetopus::git_ops;
+use mergetopus::planner;
 
 /// Push an initialized merge plan (integration + slices + kokomeco) to a remote.
 ///
@@ -136,16 +136,30 @@ fn create_prs_for_plan(
         let (title, body) = if *branch == integration_branch {
             (
                 format!("[MMM] Integration: {source} \u{2192} {target}"),
-                format!("Mergetopus integration branch merging **{source}** into **{target}**.\n\nAll slice branches must be resolved before this PR can be merged."),
+                format!(
+                    "Mergetopus integration branch merging **{source}** into **{target}**.\n\nAll slice branches must be resolved before this PR can be merged."
+                ),
             )
         } else {
             (
                 format!("[MMM] Slice: {branch}"),
-                format!("Mergetopus slice branch for merging **{source}** into **{target}**.\n\nBranch: `{branch}`"),
+                format!(
+                    "Mergetopus slice branch for merging **{source}** into **{target}**.\n\nBranch: `{branch}`"
+                ),
             )
         };
 
-        create_single_pr(forge.as_ref(), &repo_path, &info.owner, &info.repo, branch, &base, &title, &body, quiet)?;
+        create_single_pr(
+            forge.as_ref(),
+            &repo_path,
+            &info.owner,
+            &info.repo,
+            branch,
+            &base,
+            &title,
+            &body,
+            quiet,
+        )?;
     }
 
     // If a kokomeco branch exists, create a PR targeting the base branch directly.
@@ -157,7 +171,17 @@ fn create_prs_for_plan(
              This branch contains the resolved integration tree as a proper merge commit.\n\n\
              Branch: `{kokomeco}`"
         );
-        create_single_pr(forge.as_ref(), &repo_path, &info.owner, &info.repo, &kokomeco, target, &title, &body, quiet)?;
+        create_single_pr(
+            forge.as_ref(),
+            &repo_path,
+            &info.owner,
+            &info.repo,
+            &kokomeco,
+            target,
+            &title,
+            &body,
+            quiet,
+        )?;
     }
 
     Ok(())
@@ -179,7 +203,10 @@ fn create_single_pr(
     if let Some(pr) = existing {
         if !quiet {
             color::print_info(
-                &format!("PR already exists for {branch}: #{} ({})", pr.number, pr.html_url),
+                &format!(
+                    "PR already exists for {branch}: #{} ({})",
+                    pr.number, pr.html_url
+                ),
                 None,
             );
         }

@@ -133,12 +133,15 @@ pub fn list_slice_branches_for_integration_in(
     repo_path: &std::path::Path,
     integration_branch: &str,
 ) -> Result<Vec<String>> {
-    let out = run_git_in(repo_path, &[
-        "for-each-ref",
-        "--format=%(refname:short)",
-        "refs/heads",
-        "refs/remotes",
-    ])?;
+    let out = run_git_in(
+        repo_path,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )?;
     let Some(base) = integration_branch.strip_suffix("/integration") else {
         return Ok(Vec::new());
     };
@@ -391,10 +394,13 @@ pub fn first_mergetopus_partial_merge_commit(integration_branch: &str) -> Result
         }
 
         if !subject.starts_with("Mergetopus: partial merge '") {
-            crate::color::print_error(&format!(
-                "warning: skipping merge commit '{}' on '{}' because subject does not match expected Mergetopus prefix",
-                sha, integration_branch
-            ), None);
+            crate::color::print_error(
+                &format!(
+                    "warning: skipping merge commit '{}' on '{}' because subject does not match expected Mergetopus prefix",
+                    sha, integration_branch
+                ),
+                None,
+            );
             continue;
         }
 
@@ -500,7 +506,9 @@ pub fn select_conflicts_by_list(all_conflicts: &[String], csv: &str) -> Result<V
 
 #[cfg(test)]
 mod tests {
-    use super::{is_slice_branch_ref, list_all_slice_branches, list_slice_branches_for_integration};
+    use super::{
+        is_slice_branch_ref, list_all_slice_branches, list_slice_branches_for_integration,
+    };
     use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -536,8 +544,9 @@ mod tests {
         let all = test_helpers::with_repo_cwd(&repo, list_all_slice_branches)?;
         assert!(all.iter().any(|b| b == slice));
 
-        let for_integration =
-            test_helpers::with_repo_cwd(&repo, || list_slice_branches_for_integration(integration))?;
+        let for_integration = test_helpers::with_repo_cwd(&repo, || {
+            list_slice_branches_for_integration(integration)
+        })?;
         assert!(for_integration.iter().any(|b| b == slice));
         Ok(())
     }

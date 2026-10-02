@@ -1,15 +1,20 @@
 use crate::tui;
+use anyhow::{Result, bail};
 use mergetopus::color;
 use mergetopus::forges;
 use mergetopus::forges::detect::{detect_forge, parse_remote_url};
-use anyhow::{Result, bail};
 
 use mergetopus::git_ops;
 use mergetopus::planner;
 
 /// Removes resolved Mergetopus integration/slice branches that already have a
 /// corresponding kokomeco branch, after interactive confirmation.
-pub fn cleanup_command(close_prs: bool, quiet: bool, current_branch: &str, tui_title: &str) -> Result<()> {
+pub fn cleanup_command(
+    close_prs: bool,
+    quiet: bool,
+    current_branch: &str,
+    tui_title: &str,
+) -> Result<()> {
     let all_local = git_ops::list_local_branches()?;
 
     let mut branches_to_delete: Vec<String> = Vec::new();
@@ -74,7 +79,10 @@ pub fn cleanup_command(close_prs: bool, quiet: bool, current_branch: &str, tui_t
     let mut deleted = 0usize;
     for branch in &branches_to_delete {
         if branch == current_branch {
-            color::print_error(&format!("Skipping '{branch}': cannot delete the currently checked-out branch."), None);
+            color::print_error(
+                &format!("Skipping '{branch}': cannot delete the currently checked-out branch."),
+                None,
+            );
             continue;
         }
         git_ops::delete_branch(branch)?;
@@ -128,15 +136,25 @@ fn close_prs_for_branches(branches: &[String]) -> Result<()> {
                 if pr.state == forges::PrState::Open {
                     match forge.close_pr(&repo_path, pr.number) {
                         Ok(_) => color::print_success(
-                            &format!("  Closed PR #{pr} for {branch}", pr = pr.number), None,
+                            &format!("  Closed PR #{pr} for {branch}", pr = pr.number),
+                            None,
                         ),
                         Err(e) => color::print_error(
-                            &format!("  Failed to close PR #{pr} for {branch}: {e}", pr = pr.number), None,
+                            &format!(
+                                "  Failed to close PR #{pr} for {branch}: {e}",
+                                pr = pr.number
+                            ),
+                            None,
                         ),
                     }
                 } else {
                     color::print_info(
-                        &format!("  Skipping PR #{pr} for {branch} (state: {state})", pr = pr.number, state = pr.state), None,
+                        &format!(
+                            "  Skipping PR #{pr} for {branch} (state: {state})",
+                            pr = pr.number,
+                            state = pr.state
+                        ),
+                        None,
                     );
                 }
             }

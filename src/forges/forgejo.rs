@@ -1,7 +1,7 @@
-use anyhow::{Result, bail, Context};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use super::{Forge, ForgeId, PrParams, PrUpdate, PullRequest, PrState};
+use super::{Forge, ForgeId, PrParams, PrState, PrUpdate, PullRequest};
 
 type FjResponse = ureq::http::Response<ureq::Body>;
 
@@ -52,10 +52,7 @@ impl Forgejo {
         Self::handle_response(resp)
     }
 
-    fn api_get<T: serde::de::DeserializeOwned>(
-        &self,
-        url: &str,
-    ) -> Result<T> {
+    fn api_get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let resp = self
             .headers(self.agent().get(url))
             .call()
@@ -101,10 +98,7 @@ impl Forge for Forgejo {
     }
 
     fn create_pr(&self, params: PrParams) -> Result<PullRequest> {
-        let url = self.api_url(&format!(
-            "/repos/{}/{}/pulls",
-            params.owner, params.repo
-        ));
+        let url = self.api_url(&format!("/repos/{}/{}/pulls", params.owner, params.repo));
 
         let mut body = serde_json::json!({
             "title": params.title,
@@ -197,8 +191,12 @@ mod tests {
             state: state.into(),
             draft: false,
             merged_at: merged_at.map(String::from),
-            head: ForgejoBranchRef { label: "feature".into() },
-            base: ForgejoBranchRef { label: "main".into() },
+            head: ForgejoBranchRef {
+                label: "feature".into(),
+            },
+            base: ForgejoBranchRef {
+                label: "main".into(),
+            },
         }
     }
 

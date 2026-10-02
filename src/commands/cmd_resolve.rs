@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use mergetopus::color;
-use mergetopus::git_ops;
 use crate::helpers;
-use mergetopus::planner;
 use crate::tui;
 use crate::tui_progress;
+use mergetopus::color;
+use mergetopus::git_ops;
+use mergetopus::planner;
 use mergetopus::win32_path::to_fs_path;
 
 /// RAII guard that creates a temporary directory on construction and deletes
@@ -40,7 +40,10 @@ impl MergetopusTempDir {
         };
         std::fs::create_dir_all(&path)
             .context("failed to create temporary directory for merge tool files")?;
-        Ok(MergetopusTempDir { path, cleaned: false })
+        Ok(MergetopusTempDir {
+            path,
+            cleaned: false,
+        })
     }
 
     fn path(&self) -> &Path {
@@ -120,10 +123,13 @@ fn should_stage_after_mergetool(
         Some(true) => {
             // Explicit trust: rely solely on exit code.
             if !exit_success {
-                color::print_error(&format!(
-                    "warning: merge tool exited with non-zero status for '{path}'; \
+                color::print_error(
+                    &format!(
+                        "warning: merge tool exited with non-zero status for '{path}'; \
                      skipping staging (trustExitCode is enabled)"
-                ), None);
+                    ),
+                    None,
+                );
                 return Ok(false);
             }
             Ok(true)
@@ -149,7 +155,10 @@ fn should_stage_after_mergetool(
             };
 
             if quiet {
-                color::print_error(&format!("warning: {reason} for '{path}'; skipping staging in --quiet mode"), None);
+                color::print_error(
+                    &format!("warning: {reason} for '{path}'; skipping staging in --quiet mode"),
+                    None,
+                );
                 return Ok(false);
             }
 
@@ -289,23 +298,35 @@ pub fn resolve_command(
         || tool_cmd.contains("%MERGED%");
 
     if conflicted_paths.is_empty() {
-        color::print_info(&format!(
-            "No conflicted files remain for merge '{}' into '{}'.",
-            slice_branch, integration_branch
-        ), None);
+        color::print_info(
+            &format!(
+                "No conflicted files remain for merge '{}' into '{}'.",
+                slice_branch, integration_branch
+            ),
+            None,
+        );
 
         if do_commit {
             if git_ops::staged_has_changes()? || git_ops::merge_in_progress()? {
                 let msg =
                     format!("Mergetopus resolve: '{slice_branch}' into '{integration_branch}'");
                 git_ops::commit_strict(&msg)?;
-                color::print_success(&format!("  Merge commit created on '{integration_branch}'."), None);
+                color::print_success(
+                    &format!("  Merge commit created on '{integration_branch}'."),
+                    None,
+                );
             } else {
                 color::print_info("  No staged changes to commit.", None);
             }
         } else {
-            color::print_info(&format!("  Merge result is staged on '{integration_branch}' but not committed."), None);
-            color::print_info("  Review and commit when ready, or re-run with --commit.", None);
+            color::print_info(
+                &format!("  Merge result is staged on '{integration_branch}' but not committed."),
+                None,
+            );
+            color::print_info(
+                "  Review and commit when ready, or re-run with --commit.",
+                None,
+            );
         }
 
         return Ok(());
@@ -319,7 +340,8 @@ pub fn resolve_command(
         // Derive a short safe name from the filename alone, suffixed with
         // a hash of the full path to keep unique even if the same filename
         // appears in different directories.
-        let filename = path.rsplit_once(['/', '\\'])
+        let filename = path
+            .rsplit_once(['/', '\\'])
             .map(|(_, name)| name)
             .unwrap_or(path);
         let safe_file: String = filename
@@ -332,9 +354,9 @@ pub fn resolve_command(
                 }
             })
             .collect();
-        let hash = path.bytes().fold(0u32, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u32)
-        });
+        let hash = path
+            .bytes()
+            .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
         let safe_name = format!("{}_{:08x}", safe_file, hash);
 
         let local_tmp = tmp_dir
@@ -396,7 +418,12 @@ pub fn resolve_command(
                 if base_after != base_before {
                     std::fs::write(to_fs_path(path), &base_after)
                         .with_context(|| format!("failed to write resolved content to '{path}'"))?;
-                    color::print_info(&format!("Applied '{tool_name}' output from BASE temp file back to '{path}'."), None);
+                    color::print_info(
+                        &format!(
+                            "Applied '{tool_name}' output from BASE temp file back to '{path}'."
+                        ),
+                        None,
+                    );
                 }
             }
         }
@@ -420,25 +447,34 @@ pub fn resolve_command(
         .collect::<Vec<_>>()
         .join(", ");
 
-    color::print_success(&format!(
-        "Resolve complete for merge '{}' into '{}'",
-        slice_branch, integration_branch
-    ), None);
-    color::print_info(&format!(
-        "  Staged {} file(s): {}",
-        staged_count,
-        if paths_list.is_empty() {
-            "(none)".to_string()
-        } else {
-            paths_list.clone()
-        }
-    ), None);
+    color::print_success(
+        &format!(
+            "Resolve complete for merge '{}' into '{}'",
+            slice_branch, integration_branch
+        ),
+        None,
+    );
+    color::print_info(
+        &format!(
+            "  Staged {} file(s): {}",
+            staged_count,
+            if paths_list.is_empty() {
+                "(none)".to_string()
+            } else {
+                paths_list.clone()
+            }
+        ),
+        None,
+    );
     if !skipped_paths.is_empty() {
-        color::print_warning(&format!(
-            "  Skipped {} file(s): {}",
-            skipped_paths.len(),
-            skipped_paths.join(", ")
-        ), None);
+        color::print_warning(
+            &format!(
+                "  Skipped {} file(s): {}",
+                skipped_paths.len(),
+                skipped_paths.join(", ")
+            ),
+            None,
+        );
     }
 
     if do_commit {
@@ -447,13 +483,22 @@ pub fn resolve_command(
                 "Mergetopus resolve: '{slice_branch}' into '{integration_branch}'\n\nResolved-Paths: {paths_list}\nSource-Commit: {remote_commit}"
             );
             git_ops::commit_strict(&msg)?;
-            color::print_success(&format!("  Merge commit created on '{integration_branch}'."), None);
+            color::print_success(
+                &format!("  Merge commit created on '{integration_branch}'."),
+                None,
+            );
         } else {
             color::print_info("  No staged changes to commit.", None);
         }
     } else {
-        color::print_info(&format!("  Merge result is staged on '{integration_branch}' but not committed."), None);
-        color::print_info("  Review and commit when ready, or re-run with --commit.", None);
+        color::print_info(
+            &format!("  Merge result is staged on '{integration_branch}' but not committed."),
+            None,
+        );
+        color::print_info(
+            "  Review and commit when ready, or re-run with --commit.",
+            None,
+        );
     }
 
     tmp_dir.clean();

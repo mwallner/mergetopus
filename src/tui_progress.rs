@@ -411,9 +411,7 @@ mod tests {
                     label: "error test".into(),
                     status: StepStatus::Error,
                 }];
-                render_progress(
-                    f, &states, 0, "Title", 0, 1, 1, "something failed", false,
-                );
+                render_progress(f, &states, 0, "Title", 0, 1, 1, "something failed", false);
             })
             .unwrap();
 

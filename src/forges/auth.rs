@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
-use crate::git_ops;
 use super::ForgeId;
+use crate::git_ops;
 
 pub fn resolve_token(forge: ForgeId) -> Result<String> {
     let key = config_key(forge);

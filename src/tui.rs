@@ -117,8 +117,8 @@ pub(crate) fn render_pick_branch(
         .margin(1)
         .split(size);
 
-    let filter_line = Paragraph::new(format!("Filter: {filter}"))
-        .block(Block::default().borders(Borders::ALL));
+    let filter_line =
+        Paragraph::new(format!("Filter: {filter}")).block(Block::default().borders(Borders::ALL));
     f.render_widget(filter_line, chunks[0]);
 
     let list = List::new(items)
@@ -922,7 +922,11 @@ pub fn select_conflicts(
     )
 }
 
-pub(crate) fn render_keybar(f: &mut ratatui::Frame, area: ratatui::layout::Rect, items: &[(&str, &str)]) {
+pub(crate) fn render_keybar(
+    f: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    items: &[(&str, &str)],
+) {
     let mut spans = Vec::new();
     for (idx, (key, action)) in items.iter().enumerate() {
         spans.push(Span::styled(
@@ -1075,9 +1079,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
         let long = "This is a very long confirmation prompt that should wrap across multiple lines in the terminal display area";
-        terminal
-            .draw(|f| render_confirm(f, long))
-            .unwrap();
+        terminal.draw(|f| render_confirm(f, long)).unwrap();
 
         let lines = buffer_lines(terminal.backend().buffer());
         let all = lines.join("\n");
@@ -1137,13 +1139,9 @@ mod tests {
     fn confirm_esc_rejects() {
         let backend = TestBackend::new(50, 5);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        let result = confirm_on_terminal(
-            &mut terminal,
-            "Proceed?",
-            |_| Ok(true),
-            events![key!(Esc)],
-        )
-        .unwrap();
+        let result =
+            confirm_on_terminal(&mut terminal, "Proceed?", |_| Ok(true), events![key!(Esc)])
+                .unwrap();
         assert!(!result, "Esc should reject");
     }
 
@@ -1316,7 +1314,11 @@ mod tests {
             events![key!(Down), key!(Enter)],
         )
         .unwrap();
-        assert_eq!(result, Some(1), "Down then Enter should select second option");
+        assert_eq!(
+            result,
+            Some(1),
+            "Down then Enter should select second option"
+        );
     }
 
     #[test]
@@ -1346,7 +1348,11 @@ mod tests {
             events![key!(Down), key!(Down), key!(Enter)],
         )
         .unwrap();
-        assert_eq!(result, Some(1), "Down twice on 2 options should select last");
+        assert_eq!(
+            result,
+            Some(1),
+            "Down twice on 2 options should select last"
+        );
     }
 
     #[test]
@@ -1396,9 +1402,7 @@ mod tests {
         let mut scroll = 0;
         let mut max_scroll = 0;
         terminal
-            .draw(|f| {
-                render_confirm_list(f, &items, "Delete these?", &mut scroll, &mut max_scroll)
-            })
+            .draw(|f| render_confirm_list(f, &items, "Delete these?", &mut scroll, &mut max_scroll))
             .unwrap();
 
         let lines = buffer_lines(terminal.backend().buffer());
@@ -1417,9 +1421,7 @@ mod tests {
         let mut scroll = 0;
         let mut max_scroll = 0;
         terminal
-            .draw(|f| {
-                render_confirm_list(f, &items, "Go?", &mut scroll, &mut max_scroll)
-            })
+            .draw(|f| render_confirm_list(f, &items, "Go?", &mut scroll, &mut max_scroll))
             .unwrap();
 
         let lines = buffer_lines(terminal.backend().buffer());
@@ -1438,9 +1440,7 @@ mod tests {
         let mut scroll = 10;
         let mut max_scroll = 0;
         terminal
-            .draw(|f| {
-                render_confirm_list(f, &items, "Go?", &mut scroll, &mut max_scroll)
-            })
+            .draw(|f| render_confirm_list(f, &items, "Go?", &mut scroll, &mut max_scroll))
             .unwrap();
 
         let lines = buffer_lines(terminal.backend().buffer());
@@ -1616,7 +1616,11 @@ mod tests {
             events![key!(Enter)],
         )
         .unwrap();
-        assert_eq!(result, Some("main".into()), "Enter should select first branch");
+        assert_eq!(
+            result,
+            Some("main".into()),
+            "Enter should select first branch"
+        );
     }
 
     #[test]
@@ -1750,10 +1754,19 @@ mod tests {
             None,
             &[],
             |_| Ok(true),
-            events![key!(char 'x'), key!(char 'y'), key!(char 'z'), key!(Enter), key!(Esc)],
+            events![
+                key!(char 'x'),
+                key!(char 'y'),
+                key!(char 'z'),
+                key!(Enter),
+                key!(Esc)
+            ],
         )
         .unwrap();
-        assert_eq!(result, None, "Enter on empty filter should be ignored, then Esc cancels");
+        assert_eq!(
+            result, None,
+            "Enter on empty filter should be ignored, then Esc cancels"
+        );
     }
 
     #[test]
@@ -1954,9 +1967,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
         // 100 lines of content — guaranteed longer than visible area
-        let content: String = (0..100)
-            .map(|i| format!("line {i}\n"))
-            .collect();
+        let content: String = (0..100).map(|i| format!("line {i}\n")).collect();
 
         let mut overlay_scroll = 0;
         let mut overlay_max_scroll = 0;
@@ -1993,9 +2004,7 @@ mod tests {
         let backend = TestBackend::new(80, 25);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
-        let content: String = (0..100)
-            .map(|i| format!("line {i}\n"))
-            .collect();
+        let content: String = (0..100).map(|i| format!("line {i}\n")).collect();
 
         let mut overlay_scroll = 9999;
         let mut overlay_max_scroll = 0;
@@ -2138,8 +2147,8 @@ mod tests {
                 key!(Esc),      // dismiss prompt, back to grouping
                 key!(Down),     // -> b.txt
                 key!(char ' '), // assign b.txt
-                key!(Enter),   // apply -> prompt again
-                key!(Enter),   // accept default (separate)
+                key!(Enter),    // apply -> prompt again
+                key!(Enter),    // accept default (separate)
             ],
         )
         .unwrap();

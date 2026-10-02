@@ -1,11 +1,11 @@
 use crate::cli::Args;
-use mergetopus::color;
 use crate::commands::cmd_merge_workflow;
-use mergetopus::models::SlicePlanItem;
 use crate::tui;
 use crate::tui_progress;
-use mergetopus::win32_path::to_fs_path;
 use anyhow::{Context, Result, bail};
+use mergetopus::color;
+use mergetopus::models::SlicePlanItem;
+use mergetopus::win32_path::to_fs_path;
 use std::collections::{BTreeMap, BTreeSet};
 
 use mergetopus::git_ops;
@@ -50,7 +50,10 @@ pub fn here_command(
 
     let unresolved_before = git_ops::conflicted_files()?;
     if unresolved_before.is_empty() {
-        color::print_info("No unresolved conflicts found in current merge. Nothing to slice.", None);
+        color::print_info(
+            "No unresolved conflicts found in current merge. Nothing to slice.",
+            None,
+        );
         return Ok(());
     }
 
@@ -146,15 +149,21 @@ pub fn here_command(
         Ok(slices) => slices,
         Err(e) => {
             if let Err(checkout_err) = git_ops::checkout(current_branch) {
-                color::print_error(&format!(
-                    "Warning: failed to checkout '{current_branch}' during HERE cleanup: {checkout_err}"
-                ), None);
+                color::print_error(
+                    &format!(
+                        "Warning: failed to checkout '{current_branch}' during HERE cleanup: {checkout_err}"
+                    ),
+                    None,
+                );
             }
             if let Err(delete_err) = git_ops::delete_branch(&integration_branch) {
-                color::print_error(&format!(
-                    "Warning: failed to delete integration branch '{}' during HERE cleanup: {}",
-                    integration_branch, delete_err
-                ), None);
+                color::print_error(
+                    &format!(
+                        "Warning: failed to delete integration branch '{}' during HERE cleanup: {}",
+                        integration_branch, delete_err
+                    ),
+                    None,
+                );
             }
             return Err(e)
                 .context("conflict selection canceled during HERE; integration branch cleaned up");
@@ -207,8 +216,14 @@ pub fn here_command(
     color::print_emphasis("Mergetopus HERE takeover complete", None);
     color::print_info(&format!("  Integration branch: {integration_branch}"), None);
     color::print_info(&format!("  Source ref: {source_ref} ({source_sha})"), None);
-    color::print_info(&format!("  Remaining conflict count: {}", unresolved_before.len()), None);
-    color::print_info(&format!("  Explicit slice groups: {}", explicit_slices.len()), None);
+    color::print_info(
+        &format!("  Remaining conflict count: {}", unresolved_before.len()),
+        None,
+    );
+    color::print_info(
+        &format!("  Explicit slice groups: {}", explicit_slices.len()),
+        None,
+    );
 
     let leftovers = planner::unassigned_paths(&unresolved_before, &explicit_slices);
     if !leftovers.is_empty() {
@@ -312,7 +327,11 @@ fn choose_source_ref_label(
                 bail!(
                     "ambiguous source ref '{:.8}'; candidates: {}. Use --source to specify.",
                     source_sha,
-                    candidates.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(", ")
+                    candidates
+                        .iter()
+                        .map(|r| r.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
             1 => Ok(filtered[0].clone()),
@@ -320,18 +339,17 @@ fn choose_source_ref_label(
                 bail!(
                     "ambiguous source ref '{:.8}'; candidates: {}. Use --source to specify.",
                     source_sha,
-                    filtered.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(", ")
+                    filtered
+                        .iter()
+                        .map(|r| r.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
         }
     } else {
         let candidates: Vec<String> = local_refs.iter().map(|r| (*r).clone()).collect();
-        match tui::pick_branch(
-            &candidates,
-            tui_title,
-            Some(current_branch),
-            &[],
-        )? {
+        match tui::pick_branch(&candidates, tui_title, Some(current_branch), &[])? {
             Some(choice) => Ok(choice),
             None => bail!("source ref selection canceled"),
         }

@@ -65,7 +65,10 @@ mod tests {
         let long = "C:\\".to_string() + &"a".repeat(250);
         let p = to_fs_path(&long);
         let s = p.to_string_lossy();
-        assert!(s.starts_with(r"\\?\C:\"), "expected \\\\?\\ prefix, got {s}");
+        assert!(
+            s.starts_with(r"\\?\C:\"),
+            "expected \\\\?\\ prefix, got {s}"
+        );
         assert_eq!(s.len(), long.len() + 4, "prefix adds 4 chars");
     }
 
@@ -75,7 +78,10 @@ mod tests {
         let unc = r"\\server\share\".to_string() + &"a".repeat(250);
         let p = to_fs_path(&unc);
         let s = p.to_string_lossy();
-        assert!(s.starts_with(r"\\?\UNC\server\share"), "expected \\\\?\\UNC\\ prefix, got {s}");
+        assert!(
+            s.starts_with(r"\\?\UNC\server\share"),
+            "expected \\\\?\\UNC\\ prefix, got {s}"
+        );
     }
 
     #[cfg(target_os = "windows")]

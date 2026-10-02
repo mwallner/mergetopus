@@ -86,9 +86,9 @@ pub fn init_config(config: ColorConfig) {
 /// Get the current global color configuration.
 /// Primarily for internal use; prefer the typed helper functions below.
 pub fn get_config(override_config: Option<&ColorConfig>) -> ColorConfig {
-    override_config.copied().unwrap_or_else(|| {
-        COLOR_CONFIG.with(|cfg| *cfg.borrow())
-    })
+    override_config
+        .copied()
+        .unwrap_or_else(|| COLOR_CONFIG.with(|cfg| *cfg.borrow()))
 }
 
 // ============================================================================

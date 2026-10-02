@@ -1,5 +1,5 @@
-use anyhow::{Result, bail};
 use crate::color;
+use anyhow::{Result, bail};
 
 use crate::git_ops;
 use crate::models::UnassignedPolicy;
@@ -285,9 +285,15 @@ pub fn create_slice_branches(
             );
 
             git_ops::commit_slice(&message, &provenance)?;
-            color::print_success(&format!("Created default single-file slice branch {slice_branch} for {path}"), None);
+            color::print_success(
+                &format!("Created default single-file slice branch {slice_branch} for {path}"),
+                None,
+            );
         } else {
-            color::print_warning(&format!("Skipped {slice_branch} for {path}: no staged changes"), None);
+            color::print_warning(
+                &format!("Skipped {slice_branch} for {path}: no staged changes"),
+                None,
+            );
         }
     }
 
@@ -346,9 +352,15 @@ mod tests {
     fn sanitize_fragment_keeps_safe_chars() {
         // Characters that are replaced get a short disambiguation hash suffix.
         let a = sanitize_branch_fragment("feature/refactor-auth");
-        assert!(a.starts_with("feature_refactor-auth_"), "expected hash suffix, got {a}");
+        assert!(
+            a.starts_with("feature_refactor-auth_"),
+            "expected hash suffix, got {a}"
+        );
         let b = sanitize_branch_fragment("release 1.0");
-        assert!(b.starts_with("release_1.0_"), "expected hash suffix, got {b}");
+        assert!(
+            b.starts_with("release_1.0_"),
+            "expected hash suffix, got {b}"
+        );
         // All-invalid input still produces empty (no hash needed).
         assert_eq!(sanitize_branch_fragment("***"), "");
         // Purely safe input has no hash suffix (backward compatible).
@@ -385,14 +397,8 @@ mod tests {
         // Values below were computed by the current polynomial hash.
         // If CI fails here, the hash algorithm changed and branch names
         // will differ from previous runs — update intentionally.
-        assert_eq!(
-            sanitize_branch_fragment("feature/foo"),
-            "feature_foo_fa2d",
-        );
-        assert_eq!(
-            sanitize_branch_fragment("feature:foo"),
-            "feature_foo_fa42",
-        );
+        assert_eq!(sanitize_branch_fragment("feature/foo"), "feature_foo_fa2d",);
+        assert_eq!(sanitize_branch_fragment("feature:foo"), "feature_foo_fa42",);
     }
 
     #[test]
@@ -407,7 +413,11 @@ mod tests {
         );
         // Verify the suffix is a 4-char hex string.
         let suffix = a.strip_prefix(expected_prefix).unwrap();
-        assert_eq!(suffix.len(), 4, "hash suffix should be 4 hex chars, got '{suffix}'");
+        assert_eq!(
+            suffix.len(),
+            4,
+            "hash suffix should be 4 hex chars, got '{suffix}'"
+        );
         assert!(
             suffix.chars().all(|c| c.is_ascii_hexdigit()),
             "hash suffix should be hex, got '{suffix}'"
@@ -472,7 +482,11 @@ mod tests {
 
     #[test]
     fn unassigned_paths_excludes_explicit_group_members() {
-        let conflicts = vec!["a.txt".to_string(), "b.txt".to_string(), "c.txt".to_string()];
+        let conflicts = vec![
+            "a.txt".to_string(),
+            "b.txt".to_string(),
+            "c.txt".to_string(),
+        ];
         let explicit = vec![vec!["b.txt".to_string()]];
 
         let leftovers = unassigned_paths(&conflicts, &explicit);

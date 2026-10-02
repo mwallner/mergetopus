@@ -652,10 +652,8 @@ fn consolidation_excludes_deleted_files_from_slice_resolution() -> TestResult<()
     );
 
     // Verify kokomeco tree does NOT contain the deleted file.
-    let kokomeco_files = test_helpers::git(
-        &repo,
-        &["ls-tree", "--name-only", "-r", kokomeco_branch()],
-    )?;
+    let kokomeco_files =
+        test_helpers::git(&repo, &["ls-tree", "--name-only", "-r", kokomeco_branch()])?;
     assert!(
         !kokomeco_files.lines().any(|l| l == "conflict.txt"),
         "conflict.txt must not be in kokomeco tree after deletion resolution:\n{}",
@@ -753,7 +751,10 @@ fn status_shows_kokomeco_merged_when_merged_into_target() -> TestResult<()> {
 
     // Merge kokomeco into target (main).
     let kokomeco = kokomeco_branch();
-    test_helpers::git(&repo, &["merge", "--no-ff", "-m", "merge kokomeco", &kokomeco])?;
+    test_helpers::git(
+        &repo,
+        &["merge", "--no-ff", "-m", "merge kokomeco", &kokomeco],
+    )?;
 
     // Status should now show "Merged".
     let status = test_helpers::mergetopus(&repo, &["--quiet", "status", "feature"])?;
@@ -1283,8 +1284,7 @@ fn configure_marker_tool(repo: &std::path::Path) -> TestResult<()> {
     #[cfg(target_os = "windows")]
     let cmd = r#"(echo ^<^<^<^<^<^<^< HEAD & echo ours & echo ======= & echo theirs & echo ^>^>^>^>^>^>^> branch) > "%MERGED%""#;
     #[cfg(not(target_os = "windows"))]
-    let cmd =
-        r#"printf '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n' > "$MERGED""#;
+    let cmd = r#"printf '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n' > "$MERGED""#;
     test_helpers::git(repo, &["config", "mergetool.testmerge.cmd", cmd])?;
     Ok(())
 }
@@ -1307,7 +1307,10 @@ fn setup_resolve_scenario() -> TestResult<(std::path::PathBuf, String)> {
 fn resolve_trust_exit_code_true_exit_zero_stages_file() -> TestResult<()> {
     let (repo, slice) = setup_resolve_scenario()?;
     configure_resolve_tool(&repo, 0)?;
-    test_helpers::git(&repo, &["config", "mergetool.testmerge.trustExitCode", "true"])?;
+    test_helpers::git(
+        &repo,
+        &["config", "mergetool.testmerge.trustExitCode", "true"],
+    )?;
 
     let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
     assert!(
@@ -1335,7 +1338,10 @@ fn resolve_trust_exit_code_true_exit_zero_stages_file() -> TestResult<()> {
 fn resolve_trust_exit_code_true_exit_nonzero_skips_file() -> TestResult<()> {
     let (repo, slice) = setup_resolve_scenario()?;
     configure_resolve_tool(&repo, 1)?;
-    test_helpers::git(&repo, &["config", "mergetool.testmerge.trustExitCode", "true"])?;
+    test_helpers::git(
+        &repo,
+        &["config", "mergetool.testmerge.trustExitCode", "true"],
+    )?;
 
     let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
     assert!(
@@ -1477,7 +1483,10 @@ fn resolve_tool_specific_trust_overrides_global() -> TestResult<()> {
     configure_resolve_tool(&repo, 1)?;
     // Global says don't trust, tool-specific says trust
     test_helpers::git(&repo, &["config", "mergetool.trustExitCode", "false"])?;
-    test_helpers::git(&repo, &["config", "mergetool.testmerge.trustExitCode", "true"])?;
+    test_helpers::git(
+        &repo,
+        &["config", "mergetool.testmerge.trustExitCode", "true"],
+    )?;
 
     let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
     assert!(

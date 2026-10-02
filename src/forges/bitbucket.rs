@@ -1,8 +1,8 @@
-use anyhow::{Result, bail, Context};
+use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as base64_engine};
 use serde::Deserialize;
 
-use super::{Forge, ForgeId, PrParams, PrUpdate, PullRequest, PrState};
+use super::{Forge, ForgeId, PrParams, PrState, PrUpdate, PullRequest};
 
 type BbResponse = ureq::http::Response<ureq::Body>;
 
@@ -22,7 +22,10 @@ impl Bitbucket {
 
     /// Web UI URL for a pull request on Bitbucket Data Center.
     fn pr_web_url(&self, project: &str, repo: &str, id: u64) -> String {
-        format!("https://{}/projects/{project}/repos/{repo}/pull-requests/{id}", self.host)
+        format!(
+            "https://{}/projects/{project}/repos/{repo}/pull-requests/{id}",
+            self.host
+        )
     }
 
     fn agent(&self) -> ureq::Agent {
@@ -59,10 +62,7 @@ impl Bitbucket {
         Self::handle_response(resp)
     }
 
-    fn api_get<T: serde::de::DeserializeOwned>(
-        &self,
-        url: &str,
-    ) -> Result<T> {
+    fn api_get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let resp = self
             .headers(self.agent().get(url))
             .call()
@@ -254,17 +254,27 @@ mod tests {
             id,
             version: 1,
             state: state.into(),
-            from_ref: BitbucketRef { id: "refs/heads/feature".into() },
-            to_ref: BitbucketRef { id: "refs/heads/main".into() },
+            from_ref: BitbucketRef {
+                id: "refs/heads/feature".into(),
+            },
+            to_ref: BitbucketRef {
+                id: "refs/heads/main".into(),
+            },
         }
     }
 
     #[test]
     fn convert_open_pr() {
         let resp = make_response(42, "OPEN");
-        let pr = convert_pr(resp, "https://bb.example.com/projects/PROJ/repos/repo/pull-requests/42".into());
+        let pr = convert_pr(
+            resp,
+            "https://bb.example.com/projects/PROJ/repos/repo/pull-requests/42".into(),
+        );
         assert_eq!(pr.number, 42);
-        assert_eq!(pr.html_url, "https://bb.example.com/projects/PROJ/repos/repo/pull-requests/42");
+        assert_eq!(
+            pr.html_url,
+            "https://bb.example.com/projects/PROJ/repos/repo/pull-requests/42"
+        );
         assert_eq!(pr.state, PrState::Open);
         assert!(!pr.draft);
     }
@@ -272,14 +282,20 @@ mod tests {
     #[test]
     fn convert_merged_pr() {
         let resp = make_response(42, "MERGED");
-        let pr = convert_pr(resp, "https://bb.example.com/projects/PROJ/repos/repo/pull-requests/42".into());
+        let pr = convert_pr(
+            resp,
+            "https://bb.example.com/projects/PROJ/repos/repo/pull-requests/42".into(),
+        );
         assert_eq!(pr.state, PrState::Merged);
     }
 
     #[test]
     fn convert_declined_pr() {
         let resp = make_response(42, "DECLINED");
-        let pr = convert_pr(resp, "https://bb.example.com/projects/PROJ/repos/repo/pull-requests/42".into());
+        let pr = convert_pr(
+            resp,
+            "https://bb.example.com/projects/PROJ/repos/repo/pull-requests/42".into(),
+        );
         assert_eq!(pr.state, PrState::Closed);
     }
 

@@ -56,7 +56,11 @@ pub fn run(args: Args) -> Result<()> {
         return cmd_cleanup::cleanup_command(*close_prs, args.quiet, &current_branch, &tui_title);
     }
 
-    if let Some(Commands::Discard { integration, close_prs }) = &args.command {
+    if let Some(Commands::Discard {
+        integration,
+        close_prs,
+    }) = &args.command
+    {
         let (current_branch, tui_title) = current_branch_and_tui_title_worktree()?;
         return cmd_discard::discard_command(
             integration.as_deref(),

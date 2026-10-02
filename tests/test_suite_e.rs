@@ -33,7 +33,10 @@ fn create_bare_remote(_name: &str) -> TestResult<std::path::PathBuf> {
 
 /// Add a named remote pointing at `remote_path` in `repo`.
 fn add_remote(repo: &std::path::Path, name: &str, remote_path: &std::path::Path) -> TestResult<()> {
-    test_helpers::git(repo, &["remote", "add", name, remote_path.to_str().unwrap()])?;
+    test_helpers::git(
+        repo,
+        &["remote", "add", name, remote_path.to_str().unwrap()],
+    )?;
     Ok(())
 }
 
@@ -47,7 +50,12 @@ fn push(repo: &std::path::Path, remote: &str, branch: &str) -> TestResult<()> {
 fn remote_has_branch(remote_path: &std::path::Path, branch: &str) -> TestResult<bool> {
     let result = test_helpers::git(
         remote_path,
-        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
     );
     Ok(result.is_ok())
 }
@@ -276,10 +284,8 @@ fn push_overwrites_leftover_branches_from_previous_attempt() -> TestResult<()> {
     );
 
     // Verify the remote tip was updated (local sha == remote sha)
-    let local_sha =
-        test_helpers::git(&repo, &["rev-parse", integration_branch()])?;
-    let remote_sha =
-        test_helpers::git(&bare, &["rev-parse", integration_branch()])?;
+    let local_sha = test_helpers::git(&repo, &["rev-parse", integration_branch()])?;
+    let remote_sha = test_helpers::git(&bare, &["rev-parse", integration_branch()])?;
     assert_eq!(
         local_sha, remote_sha,
         "remote was not updated to latest commit"
@@ -295,10 +301,7 @@ fn push_includes_kokomeco_when_present() -> TestResult<()> {
 
     // Manually create a kokomeco branch to simulate a completed consolidation
     test_helpers::git(&repo, &["checkout", integration_branch()])?;
-    test_helpers::git(
-        &repo,
-        &["branch", kokomeco_branch(), integration_branch()],
-    )?;
+    test_helpers::git(&repo, &["branch", kokomeco_branch(), integration_branch()])?;
 
     let result = test_helpers::mergetopus(&repo, &["--quiet", "push", "origin"])?;
     assert!(
@@ -332,7 +335,16 @@ fn discard_discards_workflow_by_integration_name() -> TestResult<()> {
 
     // Verify branches exist before discard.
     assert!(
-        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{integration}")]).is_ok(),
+        test_helpers::git(
+            &repo,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{integration}")
+            ]
+        )
+        .is_ok(),
         "integration branch should exist before discard"
     );
 
@@ -349,11 +361,29 @@ fn discard_discards_workflow_by_integration_name() -> TestResult<()> {
 
     // Verify branches are gone.
     assert!(
-        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{integration}")]).is_err(),
+        test_helpers::git(
+            &repo,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{integration}")
+            ]
+        )
+        .is_err(),
         "integration branch should be deleted after discard"
     );
     assert!(
-        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{slice}")]).is_err(),
+        test_helpers::git(
+            &repo,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{slice}")
+            ]
+        )
+        .is_err(),
         "slice branch should be deleted after discard"
     );
 
@@ -380,7 +410,16 @@ fn discard_discards_by_source_ref() -> TestResult<()> {
 
     let integration = integration_branch();
     assert!(
-        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{integration}")]).is_err(),
+        test_helpers::git(
+            &repo,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{integration}")
+            ]
+        )
+        .is_err(),
         "integration branch should be deleted"
     );
 
@@ -421,10 +460,7 @@ fn discard_requires_confirmation_in_quiet_mode() -> TestResult<()> {
 
     test_helpers::git(&repo, &["checkout", "main"])?;
 
-    let result = test_helpers::mergetopus(
-        &repo,
-        &["--quiet", "discard", integration_branch()],
-    )?;
+    let result = test_helpers::mergetopus(&repo, &["--quiet", "discard", integration_branch()])?;
     assert!(
         !result.status.success(),
         "expected discard to fail in --quiet mode without --yes"
@@ -447,10 +483,7 @@ fn discard_skips_current_branch() -> TestResult<()> {
     assert!(result.status.success(), "mergetopus setup failed");
 
     // Stay on the integration branch (don't checkout main).
-    let result = test_helpers::mergetopus(
-        &repo,
-        &["--yes", "discard", integration_branch()],
-    )?;
+    let result = test_helpers::mergetopus(&repo, &["--yes", "discard", integration_branch()])?;
     // Command should succeed but warn about skipping the current branch.
     assert!(
         result.status.success(),
@@ -468,14 +501,32 @@ fn discard_skips_current_branch() -> TestResult<()> {
     // Integration branch should still exist (it was checked out).
     let integration = integration_branch();
     assert!(
-        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{integration}")]).is_ok(),
+        test_helpers::git(
+            &repo,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{integration}")
+            ]
+        )
+        .is_ok(),
         "integration branch should be retained when checked out"
     );
 
     // Slice branches should be deleted (they weren't checked out).
     let slice = slice_branch();
     assert!(
-        test_helpers::git(&repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{slice}")]).is_err(),
+        test_helpers::git(
+            &repo,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{slice}")
+            ]
+        )
+        .is_err(),
         "slice branch should still be deleted even when integration is retained"
     );
 
