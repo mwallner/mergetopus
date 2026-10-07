@@ -431,6 +431,14 @@ fn print_integration_status(
     println!("  Merged slices: {merged}");
     println!("  Pending slices: {pending}");
 
+    let auto_applied = helpers::extract_auto_applied(&initial_message);
+    if !auto_applied.is_empty() {
+        println!("  Auto-applied source decisions (no conflict):");
+        for entry in &auto_applied {
+            println!("    * {entry}");
+        }
+    }
+
     if pending > 0 {
         println!("\nPending slice details:");
         for slice in &slices {

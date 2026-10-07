@@ -71,10 +71,12 @@ pub fn here_command(
     let remembered_head = git_ops::head_sha()?;
     let merge_base = git_ops::merge_base(&remembered_head, &source_sha)?;
 
-    if !args.quiet {
+    let merge_output = if !args.quiet {
         let ib = integration_branch.clone();
         let rh = remembered_head.clone();
         let ss = source_sha.clone();
+        let out = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let out_step = out.clone();
         tui_progress::run_progress(
             tui_title,
             vec![
@@ -84,16 +86,24 @@ pub fn here_command(
                 },
                 tui_progress::ProgressStep {
                     label: format!("Merging source: {source_ref}"),
-                    action: Box::new(move || git_ops::merge_no_commit(&ss)),
+                    action: Box::new(move || {
+                        let output = git_ops::merge_no_commit(&ss)?;
+                        *out_step.lock().unwrap() = output;
+                        Ok(())
+                    }),
                 },
             ],
         )?;
+        out.lock().unwrap().clone()
     } else {
         git_ops::checkout_new_or_reset(&integration_branch, &remembered_head)?;
-        git_ops::merge_no_commit(&source_sha)?;
-    }
+        git_ops::merge_no_commit(&source_sha)?
+    };
 
     let conflicted_now = git_ops::conflicted_files()?;
+    let stage_map = git_ops::conflict_stage_map()?;
+    let conflict_groups =
+        planner::build_conflict_groups(&merge_output, &conflicted_now, &stage_map);
     for path in &conflicted_now {
         git_ops::restore_ours(path)?;
     }
@@ -140,10 +150,11 @@ pub fn here_command(
         git_ops::commit(&msg)?;
     }
 
-    let (explicit_slices, unassigned_policy) = match cmd_merge_workflow::select_conflicts(
+    let (mut explicit_slices, unassigned_policy) = match cmd_merge_workflow::select_conflicts(
         args,
         &source_ref,
         &unresolved_before,
+        &conflict_groups,
         tui_title,
     ) {
         Ok(slices) => slices,
@@ -170,6 +181,8 @@ pub fn here_command(
         }
     };
 
+    planner::expand_slices_to_groups(&mut explicit_slices, &conflict_groups);
+
     if !args.quiet {
         let ib = integration_branch.clone();
         let ib2 = integration_branch.clone();
@@ -178,6 +191,7 @@ pub fn here_command(
         let ss = source_sha.clone();
         let ub = unresolved_before.clone();
         let es = explicit_slices.clone();
+        let groups = conflict_groups.clone();
         tui_progress::run_progress(
             tui_title,
             vec![
@@ -192,6 +206,7 @@ pub fn here_command(
                             &ub,
                             &es,
                             unassigned_policy,
+                            &groups,
                         )
                     }),
                 },
@@ -210,6 +225,7 @@ pub fn here_command(
             &unresolved_before,
             &explicit_slices,
             unassigned_policy,
+            &conflict_groups,
         )?;
         git_ops::checkout(&integration_branch)?;
     }
@@ -227,10 +243,22 @@ pub fn here_command(
 
     let leftovers = planner::unassigned_paths(&unresolved_before, &explicit_slices);
     if !leftovers.is_empty() {
+        let leftover_groups = conflict_groups
+            .iter()
+            .filter(|g| {
+                g.paths
+                    .iter()
+                    .any(|p| leftovers.iter().any(|l| *l == p.as_str()))
+            })
+            .count();
         let unit = if unassigned_policy.is_separate() {
-            "own slice branch each"
+            if leftover_groups < leftovers.len() {
+                format!("grouped into {leftover_groups} slice branch(es)")
+            } else {
+                "own slice branch each".to_string()
+            }
         } else {
-            "one shared slice branch"
+            "one shared slice branch".to_string()
         };
         color::print_info(
             &format!("  Unassigned files: {} ({unit})", leftovers.len()),

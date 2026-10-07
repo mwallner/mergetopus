@@ -35,9 +35,20 @@ pub fn run(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(Commands::Resolve { branch, commit }) = &args.command {
+    if let Some(Commands::Resolve {
+        branch,
+        commit,
+        on_group,
+    }) = &args.command
+    {
         let (_, tui_title) = current_branch_and_tui_title_worktree()?;
-        return cmd_resolve::resolve_command(branch.as_deref(), *commit, args.quiet, &tui_title);
+        return cmd_resolve::resolve_command(
+            branch.as_deref(),
+            *commit,
+            args.quiet,
+            *on_group,
+            &tui_title,
+        );
     }
 
     if let Some(Commands::Status { source, pr }) = &args.command {

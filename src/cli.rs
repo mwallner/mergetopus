@@ -178,6 +178,13 @@ pub enum Commands {
         /// Commit staged resolution changes at the end.
         #[arg(long, default_value_t = false)]
         commit: bool,
+
+        /// How to settle rename/delete conflict groups without asking:
+        /// theirs (apply the slice's decision, default with --quiet),
+        /// ours, both (keep all content), delete, or tool (per-file merge tool).
+        /// Interactive runs show a decision menu per group instead unless set.
+        #[arg(long, value_name = "MODE")]
+        on_group: Option<mergetopus::models::GroupMode>,
     },
 
     /// Show integration branch and slice progress status.

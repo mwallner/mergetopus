@@ -16,7 +16,52 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use mergetopus::models::UnassignedPolicy;
+use mergetopus::models::{ConflictGroup, UnassignedPolicy};
+
+/// One selectable left-pane row in the conflict selector. A row represents a
+/// logical conflict group: rename/rename, rename/delete and file-location
+/// conflicts render as a single row joining their correlated paths, so the
+/// group can never be split across slices by assignment.
+#[derive(Clone, Debug)]
+pub(crate) struct ConflictRow {
+    pub(crate) label: String,
+    pub(crate) paths: Vec<String>,
+}
+
+impl ConflictRow {
+    fn single(path: &str) -> Self {
+        Self {
+            label: path.to_string(),
+            paths: vec![path.to_string()],
+        }
+    }
+}
+
+/// Build selector rows from conflict groups (one row per group), appending a
+/// single-path row for every conflicted path no group covers (defensive).
+pub(crate) fn conflict_rows(conflicts: &[String], groups: &[ConflictGroup]) -> Vec<ConflictRow> {
+    if groups.is_empty() {
+        return conflicts.iter().map(|p| ConflictRow::single(p)).collect();
+    }
+
+    let mut rows: Vec<ConflictRow> = groups
+        .iter()
+        .map(|g| ConflictRow {
+            label: g.display_label(),
+            paths: g.paths.clone(),
+        })
+        .collect();
+    let covered: std::collections::BTreeSet<&str> = groups
+        .iter()
+        .flat_map(|g| g.paths.iter().map(String::as_str))
+        .collect();
+    for p in conflicts {
+        if !covered.contains(p.as_str()) {
+            rows.push(ConflictRow::single(p));
+        }
+    }
+    rows
+}
 
 pub(crate) struct TerminalGuard {
     pub(crate) terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -523,7 +568,7 @@ pub fn confirm_list(items: &[String], prompt: &str, title: &str) -> Result<bool>
 /// use by the caller's event handler.
 pub(crate) fn render_select_conflicts(
     f: &mut ratatui::Frame,
-    conflicts: &[String],
+    rows: &[ConflictRow],
     slices: &[Vec<String>],
     assignments: &BTreeMap<String, usize>,
     left_cursor: usize,
@@ -545,19 +590,25 @@ pub(crate) fn render_select_conflicts(
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(root[0]);
 
-    let left_items = conflicts
+    let row_assigned = |row: &ConflictRow| -> Option<usize> {
+        row.paths
+            .iter()
+            .filter_map(|p| assignments.get(p).copied())
+            .min()
+    };
+    let left_items = rows
         .iter()
-        .map(|path| {
-            let mark = assignments
-                .get(path)
-                .map(|slice_idx| format!("[S{}]", slice_idx + 1))
-                .unwrap_or_else(|| "[--]".to_string());
-            ListItem::new(Line::from(vec![Span::raw(format!("{mark} {path}"))]))
+        .map(|row| {
+            let mark = match row_assigned(row) {
+                Some(slice_idx) => format!("[S{}]", slice_idx + 1),
+                None => "[--]".to_string(),
+            };
+            ListItem::new(Line::from(vec![Span::raw(format!("{mark} {}", row.label))]))
         })
         .collect::<Vec<_>>();
-    let unassigned_count = conflicts
+    let unassigned_count = rows
         .iter()
-        .filter(|path| !assignments.contains_key(*path))
+        .filter(|row| row_assigned(row).is_none())
         .count();
     let left_title = if unassigned_count > 0 {
         format!("Conflicted Files ({unassigned_count} unassigned)")
@@ -579,7 +630,7 @@ pub(crate) fn render_select_conflicts(
         );
 
     let mut left_state = ListState::default();
-    if !conflicts.is_empty() {
+    if !rows.is_empty() {
         left_state.select(Some(left_cursor));
     }
     f.render_stateful_widget(left, panes[0], &mut left_state);
@@ -681,6 +732,7 @@ const UNASSIGNED_POLICY_OPTIONS: [&str; 2] = [
 pub(crate) fn select_conflicts_on_terminal<B: Backend>(
     terminal: &mut Terminal<B>,
     conflicts: &[String],
+    groups: &[ConflictGroup],
     diff_provider: impl Fn(&str) -> Result<String>,
     external_diff_tool: Option<&str>,
     external_diff_runner: impl Fn(&str) -> Result<()>,
@@ -690,6 +742,7 @@ pub(crate) fn select_conflicts_on_terminal<B: Backend>(
 where
     B::Error: Send + Sync + 'static,
 {
+    let rows = conflict_rows(conflicts, groups);
     let mut assignments: BTreeMap<String, usize> = BTreeMap::new();
     let mut slices: Vec<Vec<String>> = Vec::new();
     let mut left_cursor = 0usize;
@@ -701,8 +754,8 @@ where
     let mut overlay_max_scroll = 0usize;
 
     loop {
-        if left_cursor >= conflicts.len() {
-            left_cursor = conflicts.len().saturating_sub(1);
+        if left_cursor >= rows.len() {
+            left_cursor = rows.len().saturating_sub(1);
         }
         if right_cursor >= slices.len() {
             right_cursor = slices.len().saturating_sub(1);
@@ -711,7 +764,7 @@ where
         terminal.draw(|f| {
             render_select_conflicts(
                 f,
-                conflicts,
+                &rows,
                 &slices,
                 &assignments,
                 left_cursor,
@@ -770,7 +823,7 @@ where
                 let len = if focus_right {
                     slices.len()
                 } else {
-                    conflicts.len()
+                    rows.len()
                 };
                 if len > 0 {
                     if focus_right {
@@ -792,28 +845,34 @@ where
                         right_cursor = 0;
                     }
 
-                    if let Some(path) = conflicts.get(left_cursor) {
-                        if let Some(old_idx) = assignments.get(path).copied() {
-                            if let Some(old) = slices.get_mut(old_idx) {
+                    if let Some(row) = rows.get(left_cursor) {
+                        for path in &row.paths {
+                            if let Some(old) = assignments
+                                .get(path)
+                                .copied()
+                                .and_then(|old_idx| slices.get_mut(old_idx))
+                            {
                                 old.retain(|p| p != path);
                                 old.sort();
                             }
-                        }
 
-                        if let Some(target) = slices.get_mut(right_cursor) {
-                            if !target.iter().any(|p| p == path) {
-                                target.push(path.clone());
-                                target.sort();
+                            if let Some(target) = slices.get_mut(right_cursor) {
+                                if !target.iter().any(|p| p == path) {
+                                    target.push(path.clone());
+                                    target.sort();
+                                }
+                                assignments.insert(path.clone(), right_cursor);
                             }
-                            assignments.insert(path.clone(), right_cursor);
                         }
                     }
                 }
             }
             KeyCode::Char('u') => {
-                if let Some(path) = conflicts.get(left_cursor) {
-                    if let Some(old_idx) = assignments.remove(path) {
-                        if let Some(old) = slices.get_mut(old_idx) {
+                if let Some(row) = rows.get(left_cursor) {
+                    for path in &row.paths {
+                        if let Some(old) =
+                            assignments.remove(path).and_then(|idx| slices.get_mut(idx))
+                        {
                             old.retain(|p| p != path);
                             old.sort();
                         }
@@ -843,11 +902,25 @@ where
                 }
             }
             KeyCode::F(3) => {
-                if let Some(path) = conflicts.get(left_cursor) {
+                if let Some(row) = rows.get(left_cursor) {
                     if external_diff_tool.is_some() {
-                        external_diff_runner(path)?;
+                        for path in &row.paths {
+                            external_diff_runner(path)?;
+                        }
                     } else {
-                        overlay = Some(diff_provider(path)?);
+                        // Group rows show every member's 3-way diff, stacked.
+                        let mut content = String::new();
+                        for (i, path) in row.paths.iter().enumerate() {
+                            if row.paths.len() > 1 {
+                                if i > 0 {
+                                    content.push('\n');
+                                }
+                                content.push_str(&format!("── {path} ──\n"));
+                            }
+                            content.push_str(&diff_provider(path)?);
+                            content.push('\n');
+                        }
+                        overlay = Some(content);
                         overlay_scroll = 0;
                         overlay_max_scroll = 0;
                     }
@@ -897,6 +970,7 @@ where
 
 pub fn select_conflicts(
     conflicts: &[String],
+    groups: &[ConflictGroup],
     diff_provider: impl Fn(&str) -> Result<String>,
     external_diff_tool: Option<&str>,
     external_diff_runner: impl Fn(&str) -> Result<()>,
@@ -908,6 +982,7 @@ pub fn select_conflicts(
     select_conflicts_on_terminal(
         &mut guard.terminal,
         conflicts,
+        groups,
         diff_provider,
         external_diff_tool,
         external_diff_runner,
@@ -1867,7 +1942,7 @@ mod tests {
             .draw(|f| {
                 render_select_conflicts(
                     f,
-                    &conflicts,
+                    &conflict_rows(&conflicts, &[]),
                     &slices,
                     &assignments,
                     0,
@@ -1909,7 +1984,7 @@ mod tests {
             .draw(|f| {
                 render_select_conflicts(
                     f,
-                    &conflicts,
+                    &conflict_rows(&conflicts, &[]),
                     &slices,
                     &assignments,
                     0,
@@ -1940,7 +2015,7 @@ mod tests {
             .draw(|f| {
                 render_select_conflicts(
                     f,
-                    &["x.txt".into()],
+                    &conflict_rows(&["x.txt".to_string()], &[]),
                     &[],
                     &BTreeMap::new(),
                     0,
@@ -2050,6 +2125,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2068,6 +2144,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2086,6 +2163,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2111,6 +2189,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2138,6 +2217,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2169,6 +2249,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2198,6 +2279,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2220,6 +2302,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2249,6 +2332,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2268,6 +2352,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2290,6 +2375,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2321,6 +2407,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2349,6 +2436,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2379,6 +2467,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2401,6 +2490,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("diff".into()),
             None,
             |_| Ok(()),
@@ -2430,6 +2520,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| Ok("DIFF CONTENT".into()),
             None,
             |_| Ok(()),
@@ -2454,6 +2545,7 @@ mod tests {
         let result = select_conflicts_on_terminal(
             &mut terminal,
             &conflicts,
+            &[],
             |_| panic!("should not be called"),
             Some("tool"),
             |path| {
@@ -2498,5 +2590,139 @@ mod tests {
         let all = lines.join("\n");
         assert!(all.contains("Alpha"), "buffer:\n{all}");
         assert!(all.contains("Epsilon"), "buffer:\n{all}");
+    }
+
+    // -- group-row rendering tests --
+
+    fn make_rename_group() -> ConflictGroup {
+        ConflictGroup {
+            kind: mergetopus::models::ConflictKind::RenameRename,
+            paths: vec![
+                "src/a.txt".into(),
+                "renamed_main.txt".into(),
+                "renamed_feature.txt".into(),
+            ],
+            stage_blobs: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn render_shows_rename_group_as_single_row() {
+        // Wide terminal so the joined group label is not truncated by the
+        // 55%-width left pane.
+        let backend = TestBackend::new(160, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let groups = vec![make_rename_group()];
+        let conflicts: Vec<String> = groups[0].paths.clone();
+        let rows = conflict_rows(&conflicts, &groups);
+
+        let mut overlay_scroll = 0;
+        let mut overlay_max_scroll = 0;
+        terminal
+            .draw(|f| {
+                render_select_conflicts(
+                    f,
+                    &rows,
+                    &[],
+                    &BTreeMap::new(),
+                    0,
+                    0,
+                    false,
+                    None,
+                    &mut overlay_scroll,
+                    &mut overlay_max_scroll,
+                    None,
+                );
+            })
+            .unwrap();
+
+        let lines = buffer_lines(terminal.backend().buffer());
+        let all = lines.join("\n");
+        assert_eq!(
+            all.matches("[--]").count(),
+            1,
+            "the 3-member group must render as ONE row:\n{all}"
+        );
+        assert!(all.contains("src/a.txt"), "buffer:\n{all}");
+        assert!(all.contains("[rename/rename]"), "buffer:\n{all}");
+        assert!(all.contains("(1 unassigned)"), "buffer:\n{all}");
+    }
+
+    #[test]
+    fn space_assigns_whole_group() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let groups = vec![make_rename_group()];
+        let conflicts: Vec<String> = groups[0].paths.clone();
+        let result = select_conflicts_on_terminal(
+            &mut terminal,
+            &conflicts,
+            &groups,
+            |_| Ok("diff".into()),
+            None,
+            |_| Ok(()),
+            |_| Ok(true),
+            events![key!(char ' '), key!(Enter)],
+        )
+        .unwrap();
+
+        let (slices, policy) = result.expect("group assignment should apply");
+        assert_eq!(
+            slices,
+            vec![vec![
+                "renamed_feature.txt".to_string(),
+                "renamed_main.txt".to_string(),
+                "src/a.txt".to_string()
+            ]],
+            "Space must assign ALL group members to the slice"
+        );
+        assert_eq!(policy, UnassignedPolicy::Separate);
+    }
+
+    #[test]
+    fn unassign_removes_whole_group() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        let groups = vec![make_rename_group()];
+        let conflicts: Vec<String> = groups[0].paths.clone();
+        let result = select_conflicts_on_terminal(
+            &mut terminal,
+            &conflicts,
+            &groups,
+            |_| Ok("diff".into()),
+            None,
+            |_| Ok(()),
+            |_| Ok(true),
+            events![key!(char ' '), key!(char 'u'), key!(Enter), key!(Enter)],
+        )
+        .unwrap();
+
+        // After un-assigning the group, no explicit slice exists: the
+        // unassigned-policy prompt fired (first Enter) and 'separate' was
+        // chosen (second Enter), returning no explicit slices.
+        let (slices, policy) = result.expect("apply should succeed");
+        assert!(
+            slices.is_empty(),
+            "un-assigning the whole group must leave no explicit slices, got {slices:?}"
+        );
+        assert_eq!(policy, UnassignedPolicy::Separate);
+    }
+
+    #[test]
+    fn conflict_rows_appends_uncovered_conflicts() {
+        let groups = vec![make_rename_group()];
+        let conflicts = vec![
+            "src/a.txt".to_string(),
+            "renamed_main.txt".to_string(),
+            "renamed_feature.txt".to_string(),
+            "lonely.txt".to_string(),
+        ];
+        let rows = conflict_rows(&conflicts, &groups);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].paths, vec!["lonely.txt"]);
+        assert_eq!(rows[1].label, "lonely.txt");
     }
 }

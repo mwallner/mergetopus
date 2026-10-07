@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::cli::Args;
 use anyhow::{Context, Result, bail};
 use mergetopus::color;
-use mergetopus::models::{SlicePlanItem, UnassignedPolicy};
+use mergetopus::models::{ConflictGroup, SlicePlanItem, UnassignedPolicy};
 
 use crate::tui;
 use crate::tui_progress;
@@ -193,10 +193,12 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         return Ok(());
     }
 
-    if !args.quiet {
+    let merge_output = if !args.quiet {
         let ib = actual_integration_branch.clone();
         let head = actual_remembered_head.clone();
         let src = actual_source_ref.clone();
+        let out = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let out_step = out.clone();
         tui_progress::run_progress(
             tui_title,
             vec![
@@ -206,21 +208,35 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
                 },
                 tui_progress::ProgressStep {
                     label: format!("Merging source: {src}"),
-                    action: Box::new(move || git_ops::merge_no_commit(&src)),
+                    action: Box::new(move || {
+                        let output = git_ops::merge_no_commit(&src)?;
+                        *out_step.lock().unwrap() = output;
+                        Ok(())
+                    }),
                 },
             ],
         )?;
+        out.lock().unwrap().clone()
     } else {
         git_ops::checkout_new_or_reset(&actual_integration_branch, &actual_remembered_head)?;
-        git_ops::merge_no_commit(&actual_source_ref)?;
-    }
+        git_ops::merge_no_commit(&actual_source_ref)?
+    };
 
     let conflicted_files = git_ops::conflicted_files()?;
+
+    // Capture unmerged index stages BEFORE restore_ours resolves them away;
+    // file-location conflicts need the staged blob to materialize slices.
+    let stage_map = git_ops::conflict_stage_map()?;
+    let conflict_groups =
+        planner::build_conflict_groups(&merge_output, &conflicted_files, &stage_map);
+
     for path in &conflicted_files {
         git_ops::restore_ours(path)?;
     }
 
     let auto_merged_files = git_ops::staged_files()?;
+    let auto_applied =
+        git_ops::auto_applied_entries(&actual_merge_base, &actual_source_sha, &conflicted_files)?;
 
     let slice_plan = conflicted_files
         .iter()
@@ -255,17 +271,28 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
                 .join("\n")
         };
 
+        let auto_applied_section = if auto_applied.is_empty() {
+            "* (none)".to_string()
+        } else {
+            auto_applied
+                .iter()
+                .map(|(status, detail)| format!("* {status} {detail}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
         let msg = format!(
-            "Mergetopus: partial merge '{actual_source_ref}' into '{actual_integration_branch}' (conflicts sliced)\n\nmerged:\n{merged_section}\n\nsliced:\n{sliced_section}"
+            "Mergetopus: partial merge '{actual_source_ref}' into '{actual_integration_branch}' (conflicts sliced)\n\nmerged:\n{merged_section}\n\nsliced:\n{sliced_section}\n\nauto-applied:\n{auto_applied_section}"
         );
 
         git_ops::commit(&msg)?;
     }
 
-    let (explicit_slices, unassigned_policy) = match select_conflicts(
+    let (mut explicit_slices, unassigned_policy) = match select_conflicts(
         args,
         &actual_source_ref,
         &conflicted_files,
+        &conflict_groups,
         tui_title,
     ) {
         Ok(slices) => slices,
@@ -284,6 +311,10 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
             return Err(e).context("conflict selection canceled; integration branch cleaned up");
         }
     };
+
+    // Rename/file-location members must not be split across slices.
+    planner::expand_slices_to_groups(&mut explicit_slices, &conflict_groups);
+
     if !args.quiet {
         let ib = actual_integration_branch.clone();
         let ib2 = actual_integration_branch.clone();
@@ -292,6 +323,7 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         let ss = actual_source_sha.clone();
         let cf = conflicted_files.clone();
         let es = explicit_slices.clone();
+        let groups = conflict_groups.clone();
         tui_progress::run_progress(
             tui_title,
             vec![
@@ -306,6 +338,7 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
                             &cf,
                             &es,
                             unassigned_policy,
+                            &groups,
                         )
                     }),
                 },
@@ -324,6 +357,7 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
             &conflicted_files,
             &explicit_slices,
             unassigned_policy,
+            &conflict_groups,
         )?;
         git_ops::checkout(&actual_integration_branch)?;
     }
@@ -353,15 +387,41 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
 
     let leftovers = planner::unassigned_paths(&conflicted_files, &explicit_slices);
     if !leftovers.is_empty() {
+        let leftover_groups = conflict_groups
+            .iter()
+            .filter(|g| {
+                g.paths
+                    .iter()
+                    .any(|p| leftovers.iter().any(|l| *l == p.as_str()))
+            })
+            .count();
         let unit = if unassigned_policy.is_separate() {
-            "own slice branch each"
+            if leftover_groups < leftovers.len() {
+                format!("grouped into {leftover_groups} slice branch(es)")
+            } else {
+                "own slice branch each".to_string()
+            }
         } else {
-            "one shared slice branch"
+            "one shared slice branch".to_string()
         };
         color::print_info(
             &format!("  Unassigned files: {} ({unit})", leftovers.len()),
             None,
         );
+    }
+
+    if !auto_applied.is_empty() {
+        color::print_info(
+            &format!(
+                "  Auto-applied source decisions (no conflict): {}",
+                auto_applied.len()
+            ),
+            None,
+        );
+        for (kind, detail) in &auto_applied {
+            let label = if *kind == "D" { "deleted" } else { "renamed" };
+            color::print_info(&format!("  - [{label}] {detail}"), None);
+        }
     }
 
     Ok(())
@@ -371,6 +431,7 @@ pub fn select_conflicts(
     args: &Args,
     source_ref: &str,
     all_conflicts: &[String],
+    groups: &[ConflictGroup],
     tui_title: &str,
 ) -> Result<(Vec<Vec<String>>, UnassignedPolicy)> {
     match args.select_paths.as_deref() {
@@ -389,6 +450,7 @@ pub fn select_conflicts(
                 let diff_tool = git_ops::get_git_config("diff.tool")?;
                 match tui::select_conflicts(
                     all_conflicts,
+                    groups,
                     |path| git_ops::three_way_diff(path, source_ref),
                     diff_tool.as_deref(),
                     |path| git_ops::launch_difftool(path, source_ref),

@@ -11,15 +11,25 @@ pub fn merge_head_sha() -> Result<String> {
         .context("failed to resolve MERGE_HEAD for in-progress merge")
 }
 
-pub fn merge_no_commit(source: &str) -> Result<()> {
-    let (ok, _, stderr) = run_git_allow_failure(&["merge", "--no-ff", "--no-commit", source])?;
+/// Run `git merge --no-ff --no-commit <source>` and return its combined
+/// stdout/stderr so callers can parse `CONFLICT (...)` descriptions.
+pub fn merge_no_commit(source: &str) -> Result<String> {
+    let (ok, stdout, stderr) = run_git_allow_failure(&["merge", "--no-ff", "--no-commit", source])?;
+    let combined = if stderr.is_empty() {
+        stdout
+    } else if stdout.is_empty() {
+        stderr.clone()
+    } else {
+        format!("{stdout}\n{stderr}")
+    };
+
     if ok {
-        return Ok(());
+        return Ok(combined);
     }
 
     // Expected conflict path: merge exits non-zero but leaves MERGE_HEAD.
     if merge_in_progress()? {
-        return Ok(());
+        return Ok(combined);
     }
 
     bail!(
