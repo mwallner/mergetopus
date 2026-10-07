@@ -13,7 +13,7 @@ pub(crate) mod cmd_status;
 mod cmd_verify;
 
 use crate::cli::{Args, Commands, PrSubcommand};
-use crate::git_ops;
+use mergetopus::git_ops;
 
 fn current_branch_and_tui_title_worktree() -> Result<(String, String)> {
     git_ops::ensure_git_worktree()?;
@@ -35,9 +35,20 @@ pub fn run(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(Commands::Resolve { branch, commit }) = &args.command {
+    if let Some(Commands::Resolve {
+        branch,
+        commit,
+        on_group,
+    }) = &args.command
+    {
         let (_, tui_title) = current_branch_and_tui_title_worktree()?;
-        return cmd_resolve::resolve_command(branch.as_deref(), *commit, args.quiet, &tui_title);
+        return cmd_resolve::resolve_command(
+            branch.as_deref(),
+            *commit,
+            args.quiet,
+            *on_group,
+            &tui_title,
+        );
     }
 
     if let Some(Commands::Status { source, pr }) = &args.command {
@@ -56,7 +67,11 @@ pub fn run(args: Args) -> Result<()> {
         return cmd_cleanup::cleanup_command(*close_prs, args.quiet, &current_branch, &tui_title);
     }
 
-    if let Some(Commands::Discard { integration, close_prs }) = &args.command {
+    if let Some(Commands::Discard {
+        integration,
+        close_prs,
+    }) = &args.command
+    {
         let (current_branch, tui_title) = current_branch_and_tui_title_worktree()?;
         return cmd_discard::discard_command(
             integration.as_deref(),

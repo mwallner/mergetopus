@@ -1,4 +1,4 @@
-use crate::git_ops::{run_git, ensure_longpaths_support};
+use crate::git_ops::{ensure_longpaths_support, run_git};
 use crate::win32_path::to_fs_path;
 use anyhow::{Context, Result, bail};
 use std::env;
@@ -178,9 +178,9 @@ fn branch_to_worktree_leaf(branch: &str) -> String {
             let target = parts[0];
             let source = parts[1];
             let key = format!("{target}/{source}");
-            let hash = key.bytes().fold(0u32, |acc, b| {
-                acc.wrapping_mul(31).wrapping_add(b as u32)
-            });
+            let hash = key
+                .bytes()
+                .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
             let base = format!("_mmm-{:08x}", hash);
             return match parts.last() {
                 Some(suffix) if *suffix == "integration" => base,
@@ -208,9 +208,9 @@ fn branch_to_worktree_leaf(branch: &str) -> String {
 
     const MAX_LEAF: usize = 80;
     if out.len() > MAX_LEAF {
-        let hash = branch.bytes().fold(0u32, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u32)
-        });
+        let hash = branch
+            .bytes()
+            .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
         let suffix = format!("_{:04x}", hash & 0xFFFF);
         let trunc = MAX_LEAF.saturating_sub(suffix.len());
         out.truncate(trunc);
@@ -231,19 +231,21 @@ fn pick_new_worktree_path(base: &Path, branch: &str, entries: &[WorktreeEntry]) 
     const MAX_PATH_LEN: usize = 240;
     let base_len = base.to_string_lossy().len() + 1; // +1 for separator
     if base_len + base_name.len() > MAX_PATH_LEN {
-        let hash = branch.bytes().fold(0u32, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u32)
-        });
+        let hash = branch
+            .bytes()
+            .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
         // Ensure the fallback also respects the limit.
         let fallback_leaf = {
             // Try progressively shorter prefixes until one fits.
             let candidates = [
-                format!("mm-{:08x}", hash),   // 11 chars
-                format!("wt-{:08x}", hash),   // 11 chars
-                format!("m{:08x}", hash),     // 9 chars
-                format!("{:08x}", hash),      // 8 chars
+                format!("mm-{:08x}", hash), // 11 chars
+                format!("wt-{:08x}", hash), // 11 chars
+                format!("m{:08x}", hash),   // 9 chars
+                format!("{:08x}", hash),    // 8 chars
             ];
-            candidates.into_iter().find(|leaf| base_len + leaf.len() <= MAX_PATH_LEN)
+            candidates
+                .into_iter()
+                .find(|leaf| base_len + leaf.len() <= MAX_PATH_LEN)
                 .unwrap_or_else(|| format!("{:08x}", hash))
         };
         return base.join(fallback_leaf);
@@ -432,7 +434,10 @@ mod tests {
     fn repository_base_dir_matches_repo_root() -> TestResult<()> {
         let repo = test_helpers::init_repo_with_base_file()?;
         let got = test_helpers::with_repo_cwd(&repo, repository_base_dir)?;
-        assert_eq!(normalize_existing_path(&got), normalize_existing_path(&repo));
+        assert_eq!(
+            normalize_existing_path(&got),
+            normalize_existing_path(&repo)
+        );
         Ok(())
     }
 
@@ -480,8 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn infer_worktree_base_dir_stays_stable_after_cwd_moves_to_linked_worktree() -> TestResult<()>
-    {
+    fn infer_worktree_base_dir_stays_stable_after_cwd_moves_to_linked_worktree() -> TestResult<()> {
         let repo = test_helpers::init_repo_with_base_file()?;
         let base = test_helpers::unique_temp_repo_dir();
         let wta = base.join("wta");
@@ -515,8 +519,7 @@ mod tests {
         ];
 
         // CWD = integration (the newly-created linked worktree).
-        let got =
-            test_helpers::with_repo_cwd(&integration, || infer_worktree_base_dir(&entries))?;
+        let got = test_helpers::with_repo_cwd(&integration, || infer_worktree_base_dir(&entries))?;
         assert_eq!(
             got,
             normalize_existing_path(&base),
@@ -537,8 +540,16 @@ mod tests {
     #[test]
     fn branch_to_worktree_leaf_uses_hash_for_mmm_integration() {
         let leaf = branch_to_worktree_leaf("_mmm/main/feature/integration");
-        assert!(leaf.starts_with("_mmm-"), "expected _mmm-{{hash}}, got {leaf}");
-        assert_eq!(leaf.len(), 13, "expected '_mmm-XXXXXXXX' (13 chars), got '{leaf}' ({})", leaf.len());
+        assert!(
+            leaf.starts_with("_mmm-"),
+            "expected _mmm-{{hash}}, got {leaf}"
+        );
+        assert_eq!(
+            leaf.len(),
+            13,
+            "expected '_mmm-XXXXXXXX' (13 chars), got '{leaf}' ({})",
+            leaf.len()
+        );
         // Same target/source → same hash.
         let leaf2 = branch_to_worktree_leaf("_mmm/main/feature/integration");
         assert_eq!(leaf, leaf2);
@@ -548,7 +559,10 @@ mod tests {
     fn branch_to_worktree_leaf_uses_hash_for_mmm_slice() {
         let integration = branch_to_worktree_leaf("_mmm/main/feature/integration");
         let slice = branch_to_worktree_leaf("_mmm/main/feature/slice3");
-        assert!(slice.starts_with(&integration), "slice should share integration prefix");
+        assert!(
+            slice.starts_with(&integration),
+            "slice should share integration prefix"
+        );
         assert!(slice.ends_with("-s3"), "expected suffix -s3, got {slice}");
     }
 
@@ -556,8 +570,14 @@ mod tests {
     fn branch_to_worktree_leaf_uses_hash_for_mmm_kokomeco() {
         let integration = branch_to_worktree_leaf("_mmm/main/feature/integration");
         let kokomeco = branch_to_worktree_leaf("_mmm/main/feature/kokomeco");
-        assert!(kokomeco.starts_with(&integration), "kokomeco should share integration prefix");
-        assert!(kokomeco.ends_with("-kc"), "expected suffix -kc, got {kokomeco}");
+        assert!(
+            kokomeco.starts_with(&integration),
+            "kokomeco should share integration prefix"
+        );
+        assert!(
+            kokomeco.ends_with("-kc"),
+            "expected suffix -kc, got {kokomeco}"
+        );
     }
 
     #[test]
@@ -572,8 +592,15 @@ mod tests {
         let long = "a".repeat(200);
         let leaf = branch_to_worktree_leaf(&long);
         // Should be truncated to 80 chars + hash suffix.
-        assert!(leaf.len() <= 85, "expected truncation, got {leaf} ({} chars)", leaf.len());
-        assert!(leaf.starts_with("aaaaaaaaa"), "should start with a's, got {leaf}");
+        assert!(
+            leaf.len() <= 85,
+            "expected truncation, got {leaf} ({} chars)",
+            leaf.len()
+        );
+        assert!(
+            leaf.starts_with("aaaaaaaaa"),
+            "should start with a's, got {leaf}"
+        );
     }
 
     #[test]
@@ -600,7 +627,10 @@ mod tests {
         let picked = pick_new_worktree_path(&base, &long_branch, &entries);
         let picked_str = picked.to_string_lossy();
         assert!(picked_str.len() <= 240);
-        assert!(picked_str.contains("mm-"), "expected 'mm-{{hash}}', got {picked_str}");
+        assert!(
+            picked_str.contains("mm-"),
+            "expected 'mm-{{hash}}', got {picked_str}"
+        );
     }
 
     #[test]
@@ -620,11 +650,20 @@ mod tests {
             picked_str.len()
         );
         // Should NOT contain the "mm-" prefix (that would exceed the limit).
-        assert!(!picked_str.contains("mm-"), "mm- should be too long, got {picked_str}");
+        assert!(
+            !picked_str.contains("mm-"),
+            "mm- should be too long, got {picked_str}"
+        );
         // Should contain a shortened hash-based leaf (hex digits).
         let leaf = picked.file_name().unwrap().to_string_lossy();
-        assert!(leaf.len() < 11, "leaf should be shorter than mm-prefix version, got {leaf}");
-        assert!(!leaf.contains("aaaaa"), "leaf should not contain the original branch name");
+        assert!(
+            leaf.len() < 11,
+            "leaf should be shorter than mm-prefix version, got {leaf}"
+        );
+        assert!(
+            !leaf.contains("aaaaa"),
+            "leaf should not contain the original branch name"
+        );
     }
 
     #[test]
@@ -637,7 +676,10 @@ mod tests {
             switch_to_dir(&child)?;
             Ok(std::env::current_dir()?)
         })?;
-        assert_eq!(normalize_existing_path(&cwd), normalize_existing_path(&child));
+        assert_eq!(
+            normalize_existing_path(&cwd),
+            normalize_existing_path(&child)
+        );
         Ok(())
     }
 

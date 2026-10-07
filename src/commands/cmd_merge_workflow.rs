@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 
 use crate::cli::Args;
-use crate::color;
-use crate::models::SlicePlanItem;
 use anyhow::{Context, Result, bail};
+use mergetopus::color;
+use mergetopus::models::{ConflictGroup, SlicePlanItem, UnassignedPolicy};
 
-use crate::git_ops;
-use crate::planner;
 use crate::tui;
 use crate::tui_progress;
+use mergetopus::git_ops;
+use mergetopus::planner;
 
 use super::cmd_status;
 
@@ -27,9 +27,8 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
 
             // Slice branches are resolve targets only; don't allow selecting them as a source.
             // Bare remote names (e.g. "origin") are not branches; exclude them too.
-            branches.retain(|b| {
-                !planner::is_slice_branch(b) && !remote_names.iter().any(|r| r == b)
-            });
+            branches
+                .retain(|b| !planner::is_slice_branch(b) && !remote_names.iter().any(|r| r == b));
 
             match tui::pick_branch(&branches, tui_title, Some(current_branch), &remote_names)? {
                 Some(b) => b,
@@ -40,71 +39,78 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
     let source_ref = normalize_merge_source_ref(&selected_source_ref)?;
 
     // If an integration branch is selected, ask the user what they intend.
-    let (actual_source_ref, actual_integration_branch, target_branch_for_merge) =
-        if let Some((original, source)) = planner::parse_integration_branch(&source_ref) {
-            if args.quiet {
-                bail!(
-                    "'{}' is an integration branch; in --quiet mode, provide the actual source branch instead",
-                    source_ref
-                );
-            }
-
-            let prompt = format!(
-                "'{source_ref}' is an integration branch (target='{original}', source='{source}').\n\n\
-                 What would you like to do?"
+    let (actual_source_ref, actual_integration_branch, target_branch_for_merge) = if let Some((
+        original,
+        source,
+    )) =
+        planner::parse_integration_branch(&source_ref)
+    {
+        if args.quiet {
+            bail!(
+                "'{}' is an integration branch; in --quiet mode, provide the actual source branch instead",
+                source_ref
             );
-            let choice = tui::pick_option(
-                &prompt,
-                &[
-                    "Switch to this integration branch and view its status",
-                    "Create a new merge targeting this integration branch",
-                ],
-                tui_title,
-            )?;
+        }
 
-            match choice {
-                Some(0) => {
-                    // Switch to the integration branch and show status.
-                    let local = git_ops::ensure_local_branch_for_operation(&source_ref)?;
-                    git_ops::checkout(&local)?;
-                    let branch_now = git_ops::current_branch()?;
-                    let tui_title = format!("Mergetopus [{branch_now}]");
-                    return cmd_status::status_command(
-                        None,
-                        false,
-                        false,
-                        &branch_now,
-                        &tui_title,
-                    );
-                }
-                Some(1) => {
-                    // Redirect: checkout original and merge source.
-                    color::print_info(&format!("Redirecting: checking out '{original}' and merging '{source}'.\n"), None);
-                    git_ops::checkout(&original)?;
-                    let new_current = git_ops::current_branch()?;
-                    let new_integration = planner::integration_branch_name(&new_current, &source);
-                    (source.clone(), new_integration, new_current)
-                }
-                _ => bail!("integration branch action selection was canceled"),
+        let prompt = format!(
+            "'{source_ref}' is an integration branch (target='{original}', source='{source}').\n\n\
+                 What would you like to do?"
+        );
+        let choice = tui::pick_option(
+            &prompt,
+            &[
+                "Switch to this integration branch and view its status",
+                "Create a new merge targeting this integration branch",
+            ],
+            tui_title,
+        )?;
+
+        match choice {
+            Some(0) => {
+                // Switch to the integration branch and show status.
+                let local = git_ops::ensure_local_branch_for_operation(&source_ref)?;
+                git_ops::checkout(&local)?;
+                let branch_now = git_ops::current_branch()?;
+                let tui_title = format!("Mergetopus [{branch_now}]");
+                return cmd_status::status_command(None, false, false, &branch_now, &tui_title);
             }
-        } else {
-            let integration_branch = planner::integration_branch_name(current_branch, &source_ref);
-            (
-                source_ref.clone(),
-                integration_branch,
-                current_branch.to_string(),
-            )
-        };
+            Some(1) => {
+                // Redirect: checkout original and merge source.
+                color::print_info(
+                    &format!("Redirecting: checking out '{original}' and merging '{source}'.\n"),
+                    None,
+                );
+                git_ops::checkout(&original)?;
+                let new_current = git_ops::current_branch()?;
+                let new_integration = planner::integration_branch_name(&new_current, &source);
+                (source.clone(), new_integration, new_current)
+            }
+            _ => bail!("integration branch action selection was canceled"),
+        }
+    } else {
+        let integration_branch = planner::integration_branch_name(current_branch, &source_ref);
+        (
+            source_ref.clone(),
+            integration_branch,
+            current_branch.to_string(),
+        )
+    };
 
     let kokomeco_branch = git_ops::consolidated_branch_name(&actual_integration_branch);
     if git_ops::branch_exists_anywhere(&kokomeco_branch)? {
         let kokomeco_ref = git_ops::best_ref_for_local_branch(&kokomeco_branch)?
             .unwrap_or_else(|| kokomeco_branch.clone());
-        color::print_emphasis(&format!("Kokomeco branch already exists for this merge context: {kokomeco_branch}"), None);
+        color::print_emphasis(
+            &format!("Kokomeco branch already exists for this merge context: {kokomeco_branch}"),
+            None,
+        );
         color::print_info("To merge it back into your current target branch:", None);
         color::print_info(&format!("  git checkout {target_branch_for_merge}"), None);
         color::print_info(&format!("  git merge --no-ff {kokomeco_ref}"), None);
-        color::print_info("After promotion, delete it manually when no longer needed:", None);
+        color::print_info(
+            "After promotion, delete it manually when no longer needed:",
+            None,
+        );
         color::print_info(&format!("  git branch -d {kokomeco_ref}"), None);
         return Ok(());
     }
@@ -124,7 +130,10 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         let status = git_ops::slice_merge_status(&actual_integration_branch, &slices)?;
 
         if !status.is_empty() {
-            color::print_emphasis(&format!("Existing slice merge status for {actual_integration_branch}:"), None);
+            color::print_emphasis(
+                &format!("Existing slice merge status for {actual_integration_branch}:"),
+                None,
+            );
             for (slice, merged) in &status {
                 if *merged {
                     color::print_info(&format!("  - {slice}: merged"), None);
@@ -171,7 +180,10 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         }
 
         if !all_merged {
-            color::print_warning("Integration branch already exists and has pending slice merges.", None);
+            color::print_warning(
+                "Integration branch already exists and has pending slice merges.",
+                None,
+            );
             color::print_info(
                 "Resolve pending slices first, then re-run for consolidation or new operations.",
                 None,
@@ -181,10 +193,12 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         return Ok(());
     }
 
-    if !args.quiet {
+    let merge_output = if !args.quiet {
         let ib = actual_integration_branch.clone();
         let head = actual_remembered_head.clone();
         let src = actual_source_ref.clone();
+        let out = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let out_step = out.clone();
         tui_progress::run_progress(
             tui_title,
             vec![
@@ -194,21 +208,35 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
                 },
                 tui_progress::ProgressStep {
                     label: format!("Merging source: {src}"),
-                    action: Box::new(move || git_ops::merge_no_commit(&src)),
+                    action: Box::new(move || {
+                        let output = git_ops::merge_no_commit(&src)?;
+                        *out_step.lock().unwrap() = output;
+                        Ok(())
+                    }),
                 },
             ],
         )?;
+        out.lock().unwrap().clone()
     } else {
         git_ops::checkout_new_or_reset(&actual_integration_branch, &actual_remembered_head)?;
-        git_ops::merge_no_commit(&actual_source_ref)?;
-    }
+        git_ops::merge_no_commit(&actual_source_ref)?
+    };
 
     let conflicted_files = git_ops::conflicted_files()?;
+
+    // Capture unmerged index stages BEFORE restore_ours resolves them away;
+    // file-location conflicts need the staged blob to materialize slices.
+    let stage_map = git_ops::conflict_stage_map()?;
+    let conflict_groups =
+        planner::build_conflict_groups(&merge_output, &conflicted_files, &stage_map);
+
     for path in &conflicted_files {
         git_ops::restore_ours(path)?;
     }
 
     let auto_merged_files = git_ops::staged_files()?;
+    let auto_applied =
+        git_ops::auto_applied_entries(&actual_merge_base, &actual_source_sha, &conflicted_files)?;
 
     let slice_plan = conflicted_files
         .iter()
@@ -243,17 +271,28 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
                 .join("\n")
         };
 
+        let auto_applied_section = if auto_applied.is_empty() {
+            "* (none)".to_string()
+        } else {
+            auto_applied
+                .iter()
+                .map(|(status, detail)| format!("* {status} {detail}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
         let msg = format!(
-            "Mergetopus: partial merge '{actual_source_ref}' into '{actual_integration_branch}' (conflicts sliced)\n\nmerged:\n{merged_section}\n\nsliced:\n{sliced_section}"
+            "Mergetopus: partial merge '{actual_source_ref}' into '{actual_integration_branch}' (conflicts sliced)\n\nmerged:\n{merged_section}\n\nsliced:\n{sliced_section}\n\nauto-applied:\n{auto_applied_section}"
         );
 
         git_ops::commit(&msg)?;
     }
 
-    let explicit_slices = match select_conflicts(
+    let (mut explicit_slices, unassigned_policy) = match select_conflicts(
         args,
         &actual_source_ref,
         &conflicted_files,
+        &conflict_groups,
         tui_title,
     ) {
         Ok(slices) => slices,
@@ -272,6 +311,10 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
             return Err(e).context("conflict selection canceled; integration branch cleaned up");
         }
     };
+
+    // Rename/file-location members must not be split across slices.
+    planner::expand_slices_to_groups(&mut explicit_slices, &conflict_groups);
+
     if !args.quiet {
         let ib = actual_integration_branch.clone();
         let ib2 = actual_integration_branch.clone();
@@ -280,13 +323,23 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         let ss = actual_source_sha.clone();
         let cf = conflicted_files.clone();
         let es = explicit_slices.clone();
+        let groups = conflict_groups.clone();
         tui_progress::run_progress(
             tui_title,
             vec![
                 tui_progress::ProgressStep {
                     label: "Creating slice branches".into(),
                     action: Box::new(move || {
-                        planner::create_slice_branches(&ib, &mb, &sr, &ss, &cf, &es)
+                        planner::create_slice_branches(
+                            &ib,
+                            &mb,
+                            &sr,
+                            &ss,
+                            &cf,
+                            &es,
+                            unassigned_policy,
+                            &groups,
+                        )
                     }),
                 },
                 tui_progress::ProgressStep {
@@ -303,16 +356,72 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
             &actual_source_sha,
             &conflicted_files,
             &explicit_slices,
+            unassigned_policy,
+            &conflict_groups,
         )?;
         git_ops::checkout(&actual_integration_branch)?;
     }
     color::print_emphasis("Mergetopus complete", None);
-    color::print_info(&format!("  Integration branch: {actual_integration_branch}"), None);
-    color::print_info(&format!("  Source ref: {actual_source_ref} ({actual_source_sha})"), None);
-    color::print_info(&format!("  Conflict count: {}", conflicted_files.len()), None);
-    color::print_info(&format!("  Explicit slice groups: {}", explicit_slices.len()), None);
+    color::print_info(
+        &format!("  Integration branch: {actual_integration_branch}"),
+        None,
+    );
+    color::print_info(
+        &format!("  Source ref: {actual_source_ref} ({actual_source_sha})"),
+        None,
+    );
+    color::print_info(
+        &format!("  Conflict count: {}", conflicted_files.len()),
+        None,
+    );
+    color::print_info(
+        &format!("  Explicit slice groups: {}", explicit_slices.len()),
+        None,
+    );
     for (idx, group) in explicit_slices.iter().enumerate() {
-        color::print_info(&format!("  - SliceGroup {}: {} file(s)", idx + 1, group.len()), None);
+        color::print_info(
+            &format!("  - SliceGroup {}: {} file(s)", idx + 1, group.len()),
+            None,
+        );
+    }
+
+    let leftovers = planner::unassigned_paths(&conflicted_files, &explicit_slices);
+    if !leftovers.is_empty() {
+        let leftover_groups = conflict_groups
+            .iter()
+            .filter(|g| {
+                g.paths
+                    .iter()
+                    .any(|p| leftovers.iter().any(|l| *l == p.as_str()))
+            })
+            .count();
+        let unit = if unassigned_policy.is_separate() {
+            if leftover_groups < leftovers.len() {
+                format!("grouped into {leftover_groups} slice branch(es)")
+            } else {
+                "own slice branch each".to_string()
+            }
+        } else {
+            "one shared slice branch".to_string()
+        };
+        color::print_info(
+            &format!("  Unassigned files: {} ({unit})", leftovers.len()),
+            None,
+        );
+    }
+
+    if !auto_applied.is_empty() {
+        color::print_info(
+            &format!(
+                "  Auto-applied source decisions (no conflict): {}",
+                auto_applied.len()
+            ),
+            None,
+        );
+        for (kind, detail) in &auto_applied {
+            let label = if *kind == "D" { "deleted" } else { "renamed" };
+            color::print_info(&format!("  - [{label}] {detail}"), None);
+        }
     }
 
     Ok(())
@@ -322,30 +431,32 @@ pub fn select_conflicts(
     args: &Args,
     source_ref: &str,
     all_conflicts: &[String],
+    groups: &[ConflictGroup],
     tui_title: &str,
-) -> Result<Vec<Vec<String>>> {
+) -> Result<(Vec<Vec<String>>, UnassignedPolicy)> {
     match args.select_paths.as_deref() {
         Some(csv) => {
             let paths = git_ops::select_conflicts_by_list(all_conflicts, csv)?;
             if paths.is_empty() {
-                Ok(Vec::new())
+                Ok((Vec::new(), args.unassigned))
             } else {
-                Ok(vec![paths])
+                Ok((vec![paths], args.unassigned))
             }
         }
         None => {
             if args.quiet {
-                Ok(Vec::new())
+                Ok((Vec::new(), args.unassigned))
             } else {
                 let diff_tool = git_ops::get_git_config("diff.tool")?;
                 match tui::select_conflicts(
                     all_conflicts,
+                    groups,
                     |path| git_ops::three_way_diff(path, source_ref),
                     diff_tool.as_deref(),
                     |path| git_ops::launch_difftool(path, source_ref),
                     tui_title,
                 )? {
-                    Some(groups) => Ok(groups),
+                    Some(selection) => Ok(selection),
                     None => bail!("conflict selection canceled"),
                 }
             }
@@ -378,7 +489,12 @@ fn normalize_merge_source_ref(source_ref: &str) -> Result<String> {
 
         if local_sha == remote_sha {
             // Local is in sync with remote; use it.
-            color::print_info(&format!("Using existing local branch '{local_candidate}' (in sync with '{trimmed}')."), None);
+            color::print_info(
+                &format!(
+                    "Using existing local branch '{local_candidate}' (in sync with '{trimmed}')."
+                ),
+                None,
+            );
             return Ok(local_candidate.to_string());
         } else {
             // Local and remote diverge.
@@ -394,10 +510,18 @@ fn normalize_merge_source_ref(source_ref: &str) -> Result<String> {
     }
 
     git_ops::create_tracking_branch(local_candidate, trimmed)?;
-    color::print_info(&format!("Using remote source '{trimmed}' via new local tracking branch '{local_candidate}'"), None);
-    color::print_info(&format!(
-        "Tip: remote name '{remote_name}' is omitted for this merge context (source = '{local_candidate}')."
-    ), None);
+    color::print_info(
+        &format!(
+            "Using remote source '{trimmed}' via new local tracking branch '{local_candidate}'"
+        ),
+        None,
+    );
+    color::print_info(
+        &format!(
+            "Tip: remote name '{remote_name}' is omitted for this merge context (source = '{local_candidate}')."
+        ),
+        None,
+    );
 
     Ok(local_candidate.to_string())
 }
@@ -446,13 +570,8 @@ pub(crate) fn create_consolidated_merge_commit_branch(
     // Replace staged/worktree content with the resolved integration branch tree.
     // read-tree --reset discards the merge index and replaces it entirely with the
     // integration tree, correctly reflecting file deletions from slice resolution.
-    git_ops::run_git(&[
-        "read-tree",
-        "--reset",
-        "-u",
-        integration_branch,
-    ])
-    .context("failed to overlay integration branch content onto consolidated branch")?;
+    git_ops::run_git(&["read-tree", "--reset", "-u", integration_branch])
+        .context("failed to overlay integration branch content onto consolidated branch")?;
 
     git_ops::commit(&message)?;
     Ok(branch)

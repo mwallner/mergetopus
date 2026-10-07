@@ -1,11 +1,11 @@
 use anyhow::{Result, bail};
 
-use crate::color;
-use crate::forges;
-use crate::forges::detect::{detect_forge, parse_remote_url};
-use crate::git_ops;
-use crate::planner;
 use crate::tui;
+use mergetopus::color;
+use mergetopus::forges;
+use mergetopus::forges::detect::{detect_forge, parse_remote_url};
+use mergetopus::git_ops;
+use mergetopus::planner;
 
 /// Discard a Mergetopus workflow by deleting all associated branches.
 ///
@@ -34,7 +34,10 @@ pub fn discard_command(
         branch_info.push((branch.clone(), local, on_remote));
     }
 
-    if branch_info.iter().all(|(_, local, on_remote)| !local && !on_remote) {
+    if branch_info
+        .iter()
+        .all(|(_, local, on_remote)| !local && !on_remote)
+    {
         color::print_warning(
             &format!("No branches found for workflow '{integration_branch}'"),
             None,
@@ -57,17 +60,20 @@ pub fn discard_command(
         .collect();
 
     if quiet && !yes {
-        bail!("discard requires interactive confirmation; re-run without --quiet to proceed, or use --yes to auto-confirm");
+        bail!(
+            "discard requires interactive confirmation; re-run without --quiet to proceed, or use --yes to auto-confirm"
+        );
     }
 
-    let confirmed = yes || tui::confirm_list(
-        &display,
-        &format!(
-            "Delete {} branch(es)? This cannot be undone.",
-            display.len()
-        ),
-        tui_title,
-    )?;
+    let confirmed = yes
+        || tui::confirm_list(
+            &display,
+            &format!(
+                "Delete {} branch(es)? This cannot be undone.",
+                display.len()
+            ),
+            tui_title,
+        )?;
 
     if !confirmed {
         color::print_warning("Discard canceled.", None);
@@ -118,7 +124,10 @@ pub fn discard_command(
                 if *on_remote {
                     match git_ops::run_git(&["push", "--delete", &remote, name]) {
                         Ok(_) => {
-                            color::print_success(&format!("Deleted remote ({remote}): {name}"), None);
+                            color::print_success(
+                                &format!("Deleted remote ({remote}): {name}"),
+                                None,
+                            );
                             deleted_remote += 1;
                         }
                         Err(e) => {
@@ -189,12 +198,7 @@ fn resolve_workflow(
 }
 
 /// Check for open PRs and ask the user whether to close them.
-fn prompt_close_prs(
-    branches: &[String],
-    yes: bool,
-    quiet: bool,
-    tui_title: &str,
-) -> Result<()> {
+fn prompt_close_prs(branches: &[String], yes: bool, quiet: bool, tui_title: &str) -> Result<()> {
     let (forge, repo_path) = match resolve_forge_and_repo() {
         Ok(pair) => pair,
         Err(_) => return Ok(()),
@@ -227,9 +231,7 @@ fn prompt_close_prs(
             .map(|(num, name)| format!("  PR #{num} for {name}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let prompt = format!(
-            "Open pull/merge requests found:\n{branch_list}\n\nClose these PRs?"
-        );
+        let prompt = format!("Open pull/merge requests found:\n{branch_list}\n\nClose these PRs?");
         tui::confirm(&prompt, tui_title)?
     };
 
@@ -237,11 +239,10 @@ fn prompt_close_prs(
         color::print_emphasis("\nClosing pull/merge requests:", None);
         for (num, branch) in &prs_to_close {
             match forge.close_pr(&repo_path, *num) {
-                Ok(_) => color::print_success(
-                    &format!("  Closed PR #{num} for {branch}"), None,
-                ),
+                Ok(_) => color::print_success(&format!("  Closed PR #{num} for {branch}"), None),
                 Err(e) => color::print_error(
-                    &format!("  Failed to close PR #{num} for {branch}: {e}"), None,
+                    &format!("  Failed to close PR #{num} for {branch}: {e}"),
+                    None,
                 ),
             }
         }
@@ -252,7 +253,9 @@ fn prompt_close_prs(
 
 fn resolve_forge_and_repo() -> Result<(Box<dyn forges::Forge>, String)> {
     let remotes = git_ops::list_remote_names()?;
-    let remote = remotes.first().ok_or_else(|| anyhow::anyhow!("no remotes configured"))?;
+    let remote = remotes
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no remotes configured"))?;
     let remote_url = git_ops::get_remote_url(remote)?;
     let forge = detect_forge(&remote_url)?;
     let info = parse_remote_url(&remote_url)?;
@@ -276,15 +279,25 @@ fn close_prs_for_branches(branches: &[String]) -> Result<()> {
                 if pr.state == forges::PrState::Open {
                     match forge.close_pr(&repo_path, pr.number) {
                         Ok(_) => color::print_success(
-                            &format!("  Closed PR #{pr} for {branch}", pr = pr.number), None,
+                            &format!("  Closed PR #{pr} for {branch}", pr = pr.number),
+                            None,
                         ),
                         Err(e) => color::print_error(
-                            &format!("  Failed to close PR #{pr} for {branch}: {e}", pr = pr.number), None,
+                            &format!(
+                                "  Failed to close PR #{pr} for {branch}: {e}",
+                                pr = pr.number
+                            ),
+                            None,
                         ),
                     }
                 } else {
                     color::print_info(
-                        &format!("  Skipping PR #{pr} for {branch} (state: {state})", pr = pr.number, state = pr.state), None,
+                        &format!(
+                            "  Skipping PR #{pr} for {branch} (state: {state})",
+                            pr = pr.number,
+                            state = pr.state
+                        ),
+                        None,
                     );
                 }
             }

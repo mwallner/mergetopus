@@ -1,11 +1,11 @@
 use anyhow::{Result, bail};
 
-use crate::color;
-use crate::forges;
-use crate::forges::detect::{detect_forge, parse_remote_url};
-use crate::git_ops;
-use crate::planner;
 use crate::tui;
+use mergetopus::color;
+use mergetopus::forges;
+use mergetopus::forges::detect::{detect_forge, parse_remote_url};
+use mergetopus::git_ops;
+use mergetopus::planner;
 
 pub fn pr_command(
     action: PrAction,
@@ -14,11 +14,12 @@ pub fn pr_command(
     current_branch: &str,
     tui_title: &str,
 ) -> Result<()> {
-    let integration_branch =
-        resolve_integration_branch(source, quiet, current_branch, tui_title)?;
+    let integration_branch = resolve_integration_branch(source, quiet, current_branch, tui_title)?;
 
     let (safe_target, safe_source) = planner::parse_integration_branch(&integration_branch)
-        .ok_or_else(|| anyhow::anyhow!("'{}' is not a valid integration branch", integration_branch))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("'{}' is not a valid integration branch", integration_branch)
+        })?;
 
     let remote = resolve_remote(None, quiet, tui_title)?;
     let remote_url = git_ops::get_remote_url(&remote)?;
@@ -51,8 +52,23 @@ pub(crate) fn exec_pr_action(
     let slices = git_ops::list_slice_branches_for_integration(integration_branch)?;
     let kokomeco = git_ops::consolidated_branch_name(integration_branch);
     let kokomeco_exists = git_ops::branch_exists_anywhere(&kokomeco)?;
-    let kokomeco_branch = if kokomeco_exists { Some(kokomeco.as_str()) } else { None };
-    exec_pr_action_inner(forge, owner, repo, integration_branch, &slices, kokomeco_branch, target, source, remote_name, action)
+    let kokomeco_branch = if kokomeco_exists {
+        Some(kokomeco.as_str())
+    } else {
+        None
+    };
+    exec_pr_action_inner(
+        forge,
+        owner,
+        repo,
+        integration_branch,
+        &slices,
+        kokomeco_branch,
+        target,
+        source,
+        remote_name,
+        action,
+    )
 }
 
 /// Like `exec_pr_action` but accepts pre-resolved slice list and optional kokomeco branch
@@ -69,7 +85,6 @@ fn exec_pr_action_inner(
     remote_name: &str,
     action: PrAction,
 ) -> Result<()> {
-
     let integration_pr = find_or_create_integration_pr(
         forge,
         owner,
@@ -112,15 +127,9 @@ fn exec_pr_action_inner(
 
     // If a kokomeco branch exists for this integration, include it as a PR.
     if let Some(kokomeco) = kokomeco_branch {
-        if let Some(pr) = find_or_create_kokomeco_pr(
-            forge,
-            owner,
-            repo,
-            kokomeco,
-            target,
-            source,
-            action,
-        )? {
+        if let Some(pr) =
+            find_or_create_kokomeco_pr(forge, owner, repo, kokomeco, target, source, action)?
+        {
             results.push(PrResult {
                 branch: kokomeco.to_string(),
                 action: action.label().to_string(),
@@ -136,7 +145,10 @@ fn exec_pr_action_inner(
             forges::PrState::Merged => "merged",
         };
         color::print_info(
-            &format!("{} {} #{} ({status}): {}", r.action, r.branch, r.pr.number, r.pr.html_url),
+            &format!(
+                "{} {} #{} ({status}): {}",
+                r.action, r.branch, r.pr.number, r.pr.html_url
+            ),
             None,
         );
     }
@@ -145,7 +157,10 @@ fn exec_pr_action_inner(
         color::print_info("No pull requests to manage.", None);
     } else {
         color::print_success(
-            &format!("\n{} pull request(s) for '{source}' on '{remote_name}'.", results.len()),
+            &format!(
+                "\n{} pull request(s) for '{source}' on '{remote_name}'.",
+                results.len()
+            ),
             None,
         );
     }
@@ -168,10 +183,14 @@ fn find_or_create_pr(
         PrAction::Create | PrAction::Sync => {
             if let Some(existing) = forge.find_pr_by_head(&repo_path, head)? {
                 if matches!(action, PrAction::Sync) {
-                    let updated = forge.update_pr(&repo_path, existing.number, forges::PrUpdate {
-                        title: Some(title.to_string()),
-                        body: Some(body.to_string()),
-                    })?;
+                    let updated = forge.update_pr(
+                        &repo_path,
+                        existing.number,
+                        forges::PrUpdate {
+                            title: Some(title.to_string()),
+                            body: Some(body.to_string()),
+                        },
+                    )?;
                     return Ok(Some(updated));
                 }
                 return Ok(Some(existing));
@@ -215,7 +234,9 @@ fn find_or_create_integration_pr(
         integration_branch,
         target,
         &format!("[MMM] Integration: {source} \u{2192} {target}"),
-        &format!("Mergetopus integration branch merging **{source}** into **{target}**.\n\nAll slice branches must be resolved before this PR can be merged."),
+        &format!(
+            "Mergetopus integration branch merging **{source}** into **{target}**.\n\nAll slice branches must be resolved before this PR can be merged."
+        ),
         action,
     )
 }
@@ -237,7 +258,9 @@ fn find_or_create_slice_pr(
         slice_branch,
         integration_branch,
         &format!("[MMM] Slice: {slice_branch}"),
-        &format!("Mergetopus slice branch for merging **{_source}** into **{_target}**.\n\nBranch: `{slice_branch}`"),
+        &format!(
+            "Mergetopus slice branch for merging **{_source}** into **{_target}**.\n\nBranch: `{slice_branch}`"
+        ),
         action,
     )
 }
@@ -358,7 +381,7 @@ struct PrResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forges::{self, Forge, ForgeId, PrParams, PrUpdate, PrState};
+    use mergetopus::forges::{self, Forge, ForgeId, PrParams, PrState, PrUpdate};
     use std::sync::Mutex;
 
     type PullRequest = forges::PullRequest;
@@ -378,9 +401,15 @@ mod tests {
     }
 
     impl Forge for MockForge {
-        fn id(&self) -> ForgeId { ForgeId::GitHub }
-        fn name(&self) -> &str { "MockForge" }
-        fn base_url(&self) -> &str { "https://mock.example.com" }
+        fn id(&self) -> ForgeId {
+            ForgeId::GitHub
+        }
+        fn name(&self) -> &str {
+            "MockForge"
+        }
+        fn base_url(&self) -> &str {
+            "https://mock.example.com"
+        }
 
         fn create_pr(&self, params: PrParams) -> Result<PullRequest> {
             let mut prs = self.existing_prs.lock().unwrap();
@@ -399,7 +428,12 @@ mod tests {
             Ok(pr)
         }
 
-        fn update_pr(&self, _repo_path: &str, number: u64, _params: PrUpdate) -> Result<PullRequest> {
+        fn update_pr(
+            &self,
+            _repo_path: &str,
+            number: u64,
+            _params: PrUpdate,
+        ) -> Result<PullRequest> {
             Ok(PullRequest {
                 number,
                 html_url: format!("https://mock.example.com/pr/{number}"),
@@ -434,11 +468,18 @@ mod tests {
     #[test]
     fn mock_forge_create_and_find() {
         let forge = MockForge::new(vec![]);
-        let pr = forge.create_pr(PrParams {
-            owner: "o".into(), repo: "r".into(), title: "test".into(),
-            body: "".into(), head: "feature".into(), base: "main".into(),
-            draft: true, labels: vec![],
-        }).unwrap();
+        let pr = forge
+            .create_pr(PrParams {
+                owner: "o".into(),
+                repo: "r".into(),
+                title: "test".into(),
+                body: "".into(),
+                head: "feature".into(),
+                base: "main".into(),
+                draft: true,
+                labels: vec![],
+            })
+            .unwrap();
         assert_eq!(pr.number, 100);
         assert_eq!(pr.head, "feature");
         assert_eq!(pr.base, "main");
@@ -454,11 +495,18 @@ mod tests {
     #[test]
     fn mock_forge_close() {
         let forge = MockForge::new(vec![]);
-        let pr = forge.create_pr(PrParams {
-            owner: "o".into(), repo: "r".into(), title: "x".into(),
-            body: "".into(), head: "branch".into(), base: "main".into(),
-            draft: false, labels: vec![],
-        }).unwrap();
+        let pr = forge
+            .create_pr(PrParams {
+                owner: "o".into(),
+                repo: "r".into(),
+                title: "x".into(),
+                body: "".into(),
+                head: "branch".into(),
+                base: "main".into(),
+                draft: false,
+                labels: vec![],
+            })
+            .unwrap();
         let closed = forge.close_pr("o/r", pr.number).unwrap();
         assert_eq!(closed.state, PrState::Closed);
         let found = forge.find_pr_by_head("o/r", "branch").unwrap().unwrap();
@@ -469,20 +517,40 @@ mod tests {
     fn exec_pr_action_inner_list_no_prs() {
         let forge = MockForge::new(vec![]);
         exec_pr_action_inner(
-            &forge, "o", "r", "_mmm/main/ts/integration", &[], None, "main", "ts", "origin",
+            &forge,
+            "o",
+            "r",
+            "_mmm/main/ts/integration",
+            &[],
+            None,
+            "main",
+            "ts",
+            "origin",
             PrAction::List,
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
     fn exec_pr_action_inner_creates_draft_prs() {
         let forge = MockForge::new(vec![]);
         exec_pr_action_inner(
-            &forge, "o", "r", "_mmm/main/ts/integration", &["_mmm/main/ts/slice1".to_string()], None, "main", "ts", "origin",
+            &forge,
+            "o",
+            "r",
+            "_mmm/main/ts/integration",
+            &["_mmm/main/ts/slice1".to_string()],
+            None,
+            "main",
+            "ts",
+            "origin",
             PrAction::Create,
-        ).unwrap();
+        )
+        .unwrap();
 
-        let int_pr = forge.find_pr_by_head("o/r", "_mmm/main/ts/integration").unwrap();
+        let int_pr = forge
+            .find_pr_by_head("o/r", "_mmm/main/ts/integration")
+            .unwrap();
         assert!(int_pr.is_some());
         assert!(int_pr.unwrap().draft);
 
@@ -503,9 +571,18 @@ mod tests {
         }];
         let forge = MockForge::new(existing);
         exec_pr_action_inner(
-            &forge, "o", "r", "_mmm/main/ts/integration", &[], None, "main", "ts", "origin",
+            &forge,
+            "o",
+            "r",
+            "_mmm/main/ts/integration",
+            &[],
+            None,
+            "main",
+            "ts",
+            "origin",
             PrAction::List,
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
@@ -520,9 +597,18 @@ mod tests {
         }];
         let forge = MockForge::new(existing);
         exec_pr_action_inner(
-            &forge, "o", "r", "_mmm/main/ts/integration", &[], None, "main", "ts", "origin",
+            &forge,
+            "o",
+            "r",
+            "_mmm/main/ts/integration",
+            &[],
+            None,
+            "main",
+            "ts",
+            "origin",
             PrAction::Sync,
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
@@ -538,9 +624,18 @@ mod tests {
         let forge = MockForge::new(existing);
         // Should not panic or create a duplicate — reuses existing PR.
         exec_pr_action_inner(
-            &forge, "o", "r", "_mmm/main/ts/integration", &[], None, "main", "ts", "origin",
+            &forge,
+            "o",
+            "r",
+            "_mmm/main/ts/integration",
+            &[],
+            None,
+            "main",
+            "ts",
+            "origin",
             PrAction::Create,
-        ).unwrap();
+        )
+        .unwrap();
         // Only the original PR exists.
         let all = forge.existing_prs.lock().unwrap();
         assert_eq!(all.len(), 1);
@@ -550,16 +645,29 @@ mod tests {
     fn exec_pr_action_inner_creates_kokomeco_pr() {
         let forge = MockForge::new(vec![]);
         exec_pr_action_inner(
-            &forge, "o", "r", "_mmm/main/ts/integration", &[], Some("_mmm/main/ts/kokomeco"), "main", "ts", "origin",
+            &forge,
+            "o",
+            "r",
+            "_mmm/main/ts/integration",
+            &[],
+            Some("_mmm/main/ts/kokomeco"),
+            "main",
+            "ts",
+            "origin",
             PrAction::Create,
-        ).unwrap();
+        )
+        .unwrap();
 
-        let kok_pr = forge.find_pr_by_head("o/r", "_mmm/main/ts/kokomeco").unwrap();
+        let kok_pr = forge
+            .find_pr_by_head("o/r", "_mmm/main/ts/kokomeco")
+            .unwrap();
         assert!(kok_pr.is_some(), "kokomeco PR should be created");
         assert!(kok_pr.unwrap().draft);
 
         // Integration and slice PRs are still created too.
-        let int_pr = forge.find_pr_by_head("o/r", "_mmm/main/ts/integration").unwrap();
+        let int_pr = forge
+            .find_pr_by_head("o/r", "_mmm/main/ts/integration")
+            .unwrap();
         assert!(int_pr.is_some());
     }
 }

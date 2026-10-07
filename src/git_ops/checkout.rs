@@ -84,7 +84,10 @@ mod tests {
         // Normalize path separators: git porcelain uses '/' on Windows while
         // std::env::current_dir() returns the native '\' separator.
         let to_forward_slashes = |s: &str| s.replace('\\', "/");
-        assert_eq!(to_forward_slashes(&cwd_after_checkout), to_forward_slashes(&expected_path));
+        assert_eq!(
+            to_forward_slashes(&cwd_after_checkout),
+            to_forward_slashes(&expected_path)
+        );
 
         Ok(())
     }

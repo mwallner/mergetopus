@@ -1,11 +1,11 @@
-use anyhow::{Result, bail, Context};
+use anyhow::{Context, Result, bail};
 
-use super::{Forge, ForgeId};
 use super::auth;
 use super::bitbucket::Bitbucket;
 use super::forgejo::Forgejo;
 use super::github::GitHub;
 use super::gitlab::GitLab;
+use super::{Forge, ForgeId};
 
 const SAAS_GITLAB_HOSTS: &[&str] = &["gitlab.com", "gitlab.example.com"];
 const SAAS_BITBUCKET_HOSTS: &[&str] = &["bitbucket.org", "bitbucket.example.com"];
@@ -21,7 +21,10 @@ pub struct RemoteInfo {
 pub fn parse_remote_url(raw: &str) -> Result<RemoteInfo> {
     let raw = raw.trim();
 
-    if let Some(rest) = raw.strip_prefix("https://").or_else(|| raw.strip_prefix("http://")) {
+    if let Some(rest) = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+    {
         parse_https_url(raw, rest)
     } else if let Some(rest) = raw.strip_prefix("ssh://") {
         parse_ssh_url(rest)
@@ -43,9 +46,7 @@ fn parse_https_url(_full: &str, rest: &str) -> Result<RemoteInfo> {
         .split_once('/')
         .context("HTTPS URL missing path")?;
 
-    let path = path
-        .trim_end_matches(".git")
-        .trim_matches('/');
+    let path = path.trim_end_matches(".git").trim_matches('/');
 
     // Strip known Bitbucket Data Center path prefix.
     let path = path.strip_prefix("scm/").unwrap_or(path);
@@ -72,9 +73,7 @@ fn parse_ssh_url(rest: &str) -> Result<RemoteInfo> {
         .split_once('/')
         .context("SSH URL missing path")?;
 
-    let path = path
-        .trim_end_matches(".git")
-        .trim_matches('/');
+    let path = path.trim_end_matches(".git").trim_matches('/');
 
     let (owner, repo) = path
         .split_once('/')
@@ -93,9 +92,7 @@ fn parse_scp_url(full: &str, at_pos: usize) -> Result<RemoteInfo> {
         .split_once(':')
         .context("SCP-style URL missing colon separator")?;
 
-    let path = path
-        .trim_end_matches(".git")
-        .trim_matches('/');
+    let path = path.trim_end_matches(".git").trim_matches('/');
 
     let (owner, repo) = path
         .split_once('/')

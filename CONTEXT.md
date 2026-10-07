@@ -282,6 +282,7 @@ Terminal user interface components using ratatui:
 
 - **Branch Picker:** Interactive branch selection with filtering
 - **Conflict Selector:** Multi-pane interface for grouping conflicts into slices
+  - On apply, asks whether unassigned conflicts get separate slices or one shared slice
   - File list navigation
   - Slice group management
   - F3 difftool integration
@@ -297,6 +298,7 @@ Command-line interface definition using clap:
   - `--quiet` - Suppress interactive prompts
   - `--yes` - Auto-confirm prompts
   - `--select-paths` - Filter specific paths
+  - `--unassigned <separate|single>` - How to slice conflicts left unassigned
   - `--color` - Color output control
 - Subcommands enum defining all available commands
 - Help text and documentation strings
@@ -306,6 +308,7 @@ Command-line interface definition using clap:
 #### `models.rs` - Data Structures
 - `SlicePlanItem` - Represents a planned slice with file paths
 - `PathProvenance` - Tracks file origin (target, source, both)
+- `UnassignedPolicy` - `Separate` (one slice per unassigned file, default) or `Single` (all unassigned files share one slice)
 
 #### `helpers.rs` - Utility Functions
 - Command parsing (e.g., `parse_difftool_command`)
@@ -600,6 +603,7 @@ mergetopus license
 - `--quiet` - Suppress interactive prompts, use defaults
 - `--yes` - Auto-confirm all prompts
 - `--select-paths <paths>` - Filter specific paths during merge
+- `--unassigned <separate|single>` - Slice handling for unassigned conflicted files
 - `--color <mode>` - Control color output (auto/always/never)
 
 ---

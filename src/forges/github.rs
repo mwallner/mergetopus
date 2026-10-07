@@ -1,7 +1,7 @@
-use anyhow::{Result, bail, Context};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use super::{Forge, ForgeId, PrParams, PrUpdate, PullRequest, PrState};
+use super::{Forge, ForgeId, PrParams, PrState, PrUpdate, PullRequest};
 
 type GhResponse = ureq::http::Response<ureq::Body>;
 
@@ -58,10 +58,7 @@ impl GitHub {
         Self::handle_response(resp)
     }
 
-    fn api_get<T: serde::de::DeserializeOwned>(
-        &self,
-        url: &str,
-    ) -> Result<T> {
+    fn api_get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let resp = self
             .headers(self.agent().get(url))
             .call()
@@ -107,10 +104,7 @@ impl Forge for GitHub {
     }
 
     fn create_pr(&self, params: PrParams) -> Result<PullRequest> {
-        let url = self.api_url(&format!(
-            "/repos/{}/{}/pulls",
-            self.owner, self.repo
-        ));
+        let url = self.api_url(&format!("/repos/{}/{}/pulls", self.owner, self.repo));
 
         let mut body = serde_json::json!({
             "title": params.title,
@@ -205,8 +199,12 @@ mod tests {
             state: "open".into(),
             draft: Some(false),
             merged_at: None,
-            head: GithubBranchRef { ref_field: "head-branch".into() },
-            base: GithubBranchRef { ref_field: "base-branch".into() },
+            head: GithubBranchRef {
+                ref_field: "head-branch".into(),
+            },
+            base: GithubBranchRef {
+                ref_field: "base-branch".into(),
+            },
         };
         let pr = convert_pr(resp);
         assert_eq!(pr.number, 42);
@@ -222,8 +220,12 @@ mod tests {
             state: "closed".into(),
             draft: Some(false),
             merged_at: Some("2024-01-01T00:00:00Z".into()),
-            head: GithubBranchRef { ref_field: "head".into() },
-            base: GithubBranchRef { ref_field: "base".into() },
+            head: GithubBranchRef {
+                ref_field: "head".into(),
+            },
+            base: GithubBranchRef {
+                ref_field: "base".into(),
+            },
         };
         let pr = convert_pr(resp);
         assert_eq!(pr.state, PrState::Merged);
@@ -237,8 +239,12 @@ mod tests {
             state: "closed".into(),
             draft: Some(false),
             merged_at: None,
-            head: GithubBranchRef { ref_field: "head".into() },
-            base: GithubBranchRef { ref_field: "base".into() },
+            head: GithubBranchRef {
+                ref_field: "head".into(),
+            },
+            base: GithubBranchRef {
+                ref_field: "base".into(),
+            },
         };
         let pr = convert_pr(resp);
         assert_eq!(pr.state, PrState::Closed);
@@ -252,8 +258,12 @@ mod tests {
             state: "open".into(),
             draft: Some(true),
             merged_at: None,
-            head: GithubBranchRef { ref_field: "head".into() },
-            base: GithubBranchRef { ref_field: "base".into() },
+            head: GithubBranchRef {
+                ref_field: "head".into(),
+            },
+            base: GithubBranchRef {
+                ref_field: "base".into(),
+            },
         };
         let pr = convert_pr(resp);
         assert!(pr.draft);

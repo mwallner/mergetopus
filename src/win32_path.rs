@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 /// Relative paths are resolved against the current directory first.
 /// Non-Windows platforms return the path unchanged.
 #[cfg(target_os = "windows")]
-pub(crate) fn to_fs_path<P: AsRef<Path>>(path: P) -> PathBuf {
+pub fn to_fs_path<P: AsRef<Path>>(path: P) -> PathBuf {
     const MAX_SAFE: usize = 240;
     let path = path.as_ref();
 
@@ -37,7 +37,7 @@ pub(crate) fn to_fs_path<P: AsRef<Path>>(path: P) -> PathBuf {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn to_fs_path<P: AsRef<Path>>(path: P) -> PathBuf {
+pub fn to_fs_path<P: AsRef<Path>>(path: P) -> PathBuf {
     path.as_ref().to_path_buf()
 }
 
@@ -65,7 +65,10 @@ mod tests {
         let long = "C:\\".to_string() + &"a".repeat(250);
         let p = to_fs_path(&long);
         let s = p.to_string_lossy();
-        assert!(s.starts_with(r"\\?\C:\"), "expected \\\\?\\ prefix, got {s}");
+        assert!(
+            s.starts_with(r"\\?\C:\"),
+            "expected \\\\?\\ prefix, got {s}"
+        );
         assert_eq!(s.len(), long.len() + 4, "prefix adds 4 chars");
     }
 
@@ -75,7 +78,10 @@ mod tests {
         let unc = r"\\server\share\".to_string() + &"a".repeat(250);
         let p = to_fs_path(&unc);
         let s = p.to_string_lossy();
-        assert!(s.starts_with(r"\\?\UNC\server\share"), "expected \\\\?\\UNC\\ prefix, got {s}");
+        assert!(
+            s.starts_with(r"\\?\UNC\server\share"),
+            "expected \\\\?\\UNC\\ prefix, got {s}"
+        );
     }
 
     #[cfg(target_os = "windows")]

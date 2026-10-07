@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
-use crate::color;
+use mergetopus::color;
 
-use crate::git_ops;
-use crate::planner;
+use mergetopus::git_ops;
+use mergetopus::planner;
 
 pub fn verify_command(source_arg: Option<&str>, global: bool, current_branch: &str) -> Result<()> {
     if global {
@@ -34,7 +34,10 @@ pub fn verify_command(source_arg: Option<&str>, global: bool, current_branch: &s
     color::print_emphasis("Mergetopus verify", None);
     color::print_info(&format!("  Integration branch: {integration_branch}"), None);
     color::print_info(&format!("  Kokomeco branch:    {kokomeco_branch}"), None);
-    color::print_success("verification passed: no integration commits newer than kokomeco", None);
+    color::print_success(
+        "verification passed: no integration commits newer than kokomeco",
+        None,
+    );
 
     Ok(())
 }
@@ -43,7 +46,10 @@ fn verify_global_command() -> Result<()> {
     let integrations = discover_integration_branches()?;
     if integrations.is_empty() {
         color::print_emphasis("Mergetopus verify --global", None);
-        color::print_info("No integration branches found under '_mmm/' across local and configured remotes.", None);
+        color::print_info(
+            "No integration branches found under '_mmm/' across local and configured remotes.",
+            None,
+        );
         return Ok(());
     }
 
@@ -96,11 +102,13 @@ fn verify_global_command() -> Result<()> {
     }
 
     color::print_emphasis("Mergetopus verify --global", None);
-    color::print_success(&format!(
-        "verification passed: checked {} integration branch(es); skipped {} without kokomeco",
-        checked,
-        skipped_missing_kokomeco
-    ), None);
+    color::print_success(
+        &format!(
+            "verification passed: checked {} integration branch(es); skipped {} without kokomeco",
+            checked, skipped_missing_kokomeco
+        ),
+        None,
+    );
 
     Ok(())
 }
@@ -149,10 +157,12 @@ fn find_newer_integration_commits(integration_branch: &str) -> Result<Vec<String
         .unwrap_or_else(|| kokomeco_branch.clone());
 
     let kokomeco_ts_raw = git_ops::run_git(&["show", "-s", "--format=%ct", &kokomeco_ref])?;
-    let kokomeco_ts: i64 = kokomeco_ts_raw
-        .trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("failed to parse kokomeco timestamp '{}': {e}", kokomeco_ts_raw.trim()))?;
+    let kokomeco_ts: i64 = kokomeco_ts_raw.trim().parse().map_err(|e| {
+        anyhow::anyhow!(
+            "failed to parse kokomeco timestamp '{}': {e}",
+            kokomeco_ts_raw.trim()
+        )
+    })?;
 
     let integration_log = git_ops::run_git(&[
         "log",
@@ -183,7 +193,10 @@ fn find_newer_integration_commits(integration_branch: &str) -> Result<Vec<String
     Ok(newer)
 }
 
-fn resolve_verify_integration_branch(source_arg: Option<&str>, current_branch: &str) -> Result<String> {
+fn resolve_verify_integration_branch(
+    source_arg: Option<&str>,
+    current_branch: &str,
+) -> Result<String> {
     if let Some(source) = source_arg {
         let target = if planner::parse_integration_branch(source).is_some() {
             source.to_string()

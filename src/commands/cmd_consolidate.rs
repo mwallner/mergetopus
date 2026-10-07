@@ -1,7 +1,7 @@
-use crate::color;
-use crate::git_ops;
-use crate::planner;
 use anyhow::{Context, Result, bail};
+use mergetopus::color;
+use mergetopus::git_ops;
+use mergetopus::planner;
 
 use super::cmd_merge_workflow;
 
@@ -10,13 +10,16 @@ use super::cmd_merge_workflow;
 /// When on an integration branch, the source ref is parsed from the branch name.
 /// When on any other branch, SOURCE must be provided explicitly.
 pub fn consolidate_command(source: Option<&str>, quiet: bool, current_branch: &str) -> Result<()> {
-    let (integration_branch, source_ref) =
-        resolve_integration_and_source(current_branch, source)?;
+    let (integration_branch, source_ref) = resolve_integration_and_source(current_branch, source)?;
 
     if !git_ops::branch_exists_anywhere(&integration_branch)? {
         bail!(
             "no merge context found for '{}' (integration branch '{integration_branch}' does not exist)",
-            if let Some(s) = source { s } else { current_branch }
+            if let Some(s) = source {
+                s
+            } else {
+                current_branch
+            }
         );
     }
 
@@ -41,9 +44,12 @@ pub fn consolidate_command(source: Option<&str>, quiet: bool, current_branch: &s
     }
 
     if !quiet {
-        color::print_info(&format!(
-            "All slices are merged into '{local_integration}'. Creating kokomeco branch ...",
-        ), None);
+        color::print_info(
+            &format!(
+                "All slices are merged into '{local_integration}'. Creating kokomeco branch ...",
+            ),
+            None,
+        );
     }
 
     let branch = cmd_merge_workflow::create_consolidated_merge_commit_branch(

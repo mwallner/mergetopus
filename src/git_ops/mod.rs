@@ -21,9 +21,14 @@ pub use diff::*;
 pub use merge::*;
 pub use refs::*;
 
-pub fn run_git(args: &[&str]) -> Result<String> {
+/// Run a git command inside `repo_path`, ignoring the process working
+/// directory. These `_in` variants are what library consumers (biggit) use;
+/// the CWD-based functions below are thin wrappers for the CLI's own
+/// behaviour.
+pub fn run_git_in(repo_path: &std::path::Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
+        .current_dir(repo_path)
         .output()
         .with_context(|| format!("failed to execute git {}", args.join(" ")))?;
 
@@ -35,9 +40,13 @@ pub fn run_git(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub fn run_git_allow_failure(args: &[&str]) -> Result<(bool, String, String)> {
+pub fn run_git_allow_failure_in(
+    repo_path: &std::path::Path,
+    args: &[&str],
+) -> Result<(bool, String, String)> {
     let output = Command::new("git")
         .args(args)
+        .current_dir(repo_path)
         .output()
         .with_context(|| format!("failed to execute git {}", args.join(" ")))?;
 
@@ -45,6 +54,14 @@ pub fn run_git_allow_failure(args: &[&str]) -> Result<(bool, String, String)> {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     Ok((ok, stdout, stderr))
+}
+
+pub fn run_git(args: &[&str]) -> Result<String> {
+    run_git_in(&std::env::current_dir()?, args)
+}
+
+pub fn run_git_allow_failure(args: &[&str]) -> Result<(bool, String, String)> {
+    run_git_allow_failure_in(&std::env::current_dir()?, args)
 }
 
 pub fn ensure_git_context() -> Result<()> {
@@ -70,7 +87,7 @@ pub fn ensure_git_worktree() -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn ensure_longpaths_support() -> Result<()> {
+pub fn ensure_longpaths_support() -> Result<()> {
     let current = get_git_config("core.longpaths")?.unwrap_or_default();
     if current.eq_ignore_ascii_case("true") {
         return Ok(());
@@ -90,29 +107,116 @@ pub(crate) fn ensure_longpaths_support() -> Result<()> {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn ensure_longpaths_support() -> Result<()> {
+pub fn ensure_longpaths_support() -> Result<()> {
     Ok(())
 }
 
 pub fn restore_ours(path: &str) -> Result<()> {
-    run_git(&[
-        "restore",
-        "--source=HEAD",
-        "--staged",
-        "--worktree",
-        "--",
-        path,
-    ])
-    .map(|_| ())
+    if path_exists_in_ref("HEAD", path)? {
+        return run_git(&[
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "--",
+            path,
+        ])
+        .map(|_| ());
+    }
+
+    // Ours side has no content at this path (deleted by us, renamed away,
+    // added by them, or a dir-rename "file location" suggestion at a path
+    // HEAD does not contain). `git restore --source=HEAD` refuses such
+    // unmerged paths, so "ours" is expressed as removal from the index plus
+    // the worktree copy the merge may have left behind.
+    resolve_path_as_deleted(path)
+}
+
+/// Settle a conflicted (or vanished) path as a deletion: drop the index
+/// entry — forcing it past git's conflict checks if needed — and remove the
+/// worktree copy. Absence is the expected end state.
+pub fn resolve_path_as_deleted(path: &str) -> Result<()> {
+    let (ok, _, stderr) = run_git_allow_failure(&["rm", "--cached", "--", path])?;
+    if !ok && !stderr.contains("did not match any files") {
+        run_git(&["rm", "-f", "--cached", "--", path])?;
+    }
+
+    let fs_path = crate::win32_path::to_fs_path(path);
+    // Missing worktree file is the expected state for "absent in ours".
+    let _ = std::fs::remove_file(&fs_path);
+    Ok(())
+}
+
+/// Parse unmerged index entries (`git ls-files -u`) into
+/// `path -> (stage -> blob oid)`. Stage 1 = base, 2 = ours, 3 = theirs.
+pub fn conflict_stage_map()
+-> Result<std::collections::BTreeMap<String, std::collections::BTreeMap<usize, String>>> {
+    let out = run_git(&["ls-files", "-u", "-z"])?;
+    let mut map = std::collections::BTreeMap::new();
+    for record in out.split('\0') {
+        let record = record.trim();
+        if record.is_empty() {
+            continue;
+        }
+        let Some((meta, path)) = record.split_once('\t') else {
+            continue;
+        };
+        let mut meta_parts = meta.split_whitespace();
+        let (Some(_mode), Some(oid), Some(stage)) =
+            (meta_parts.next(), meta_parts.next(), meta_parts.next())
+        else {
+            continue;
+        };
+        let Ok(stage) = stage.parse::<usize>() else {
+            continue;
+        };
+        if !(1..=3).contains(&stage) {
+            continue;
+        }
+        map.entry(path.to_string())
+            .or_insert_with(std::collections::BTreeMap::new)
+            .insert(stage, oid.to_string());
+    }
+    Ok(map)
+}
+
+/// Write the blob identified by `oid` to `dest`, creating parent directories
+/// and staging the result. Used to materialize stage blobs that no longer
+/// exist in any branch tree (e.g. file-location conflict content).
+pub fn write_oid_to_staged_path(oid: &str, path: &str) -> Result<()> {
+    let (ok, stdout, stderr) = run_git_allow_failure(&["cat-file", "blob", oid])?;
+    if !ok {
+        bail!("git cat-file blob {oid} failed: {stderr}");
+    }
+    let fs_path = crate::win32_path::to_fs_path(path);
+    if let Some(parent) = std::path::Path::new(&fs_path).parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent directory for '{path}'"))?;
+    }
+    std::fs::write(&fs_path, stdout.as_bytes())
+        .with_context(|| format!("failed to write '{path}' from blob {oid}"))?;
+    stage_path(path)
 }
 
 pub fn list_slice_branches_for_integration(integration_branch: &str) -> Result<Vec<String>> {
-    let out = run_git(&[
-        "for-each-ref",
-        "--format=%(refname:short)",
-        "refs/heads",
-        "refs/remotes",
-    ])?;
+    list_slice_branches_for_integration_in(&std::env::current_dir()?, integration_branch)
+}
+
+/// Path-taking variant: enumerate the slice branches of `integration_branch`
+/// inside `repo_path` regardless of the ambient working directory.
+pub fn list_slice_branches_for_integration_in(
+    repo_path: &std::path::Path,
+    integration_branch: &str,
+) -> Result<Vec<String>> {
+    let out = run_git_in(
+        repo_path,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )?;
     let Some(base) = integration_branch.strip_suffix("/integration") else {
         return Ok(Vec::new());
     };
@@ -365,10 +469,13 @@ pub fn first_mergetopus_partial_merge_commit(integration_branch: &str) -> Result
         }
 
         if !subject.starts_with("Mergetopus: partial merge '") {
-            crate::color::print_error(&format!(
-                "warning: skipping merge commit '{}' on '{}' because subject does not match expected Mergetopus prefix",
-                sha, integration_branch
-            ), None);
+            crate::color::print_error(
+                &format!(
+                    "warning: skipping merge commit '{}' on '{}' because subject does not match expected Mergetopus prefix",
+                    sha, integration_branch
+                ),
+                None,
+            );
             continue;
         }
 
@@ -430,19 +537,40 @@ fn is_local_slice_branch_name(branch: &str) -> bool {
 /// Write the content of `reference:path` from the object store to the file at
 /// `dest`.  If the path does not exist at that ref (e.g. new file / deleted
 /// file), an empty file is written instead.
-pub fn write_blob_to_path(reference: &str, path: &str, dest: &str) -> Result<()> {
+/// Write the content of `reference:path` from the object store to the file at
+/// `dest`. Returns whether the path exists at that ref: callers use this to
+/// distinguish "side was deleted/renamed away" from "side is a zero-byte file"
+/// when preparing LOCAL/BASE/REMOTE inputs for the merge tool.
+pub fn write_blob_to_path(reference: &str, path: &str, dest: &str) -> Result<bool> {
     let output = Command::new("git")
         .args(["show", &format!("{reference}:{path}")])
         .output()
         .with_context(|| format!("failed to execute git show {reference}:{path}"))?;
 
-    let content: &[u8] = if output.status.success() {
-        &output.stdout
-    } else {
-        b""
-    };
+    let present = output.status.success();
+    let content: &[u8] = if present { &output.stdout } else { b"" };
 
-    fs::write(dest, content).with_context(|| format!("failed to write '{dest}'"))
+    fs::write(dest, content).with_context(|| format!("failed to write '{dest}'"))?;
+    Ok(present)
+}
+
+/// Sentinel name used for a LOCAL/BASE/REMOTE input whose side lacks the path
+/// (deleted or renamed away). Tools reading the file see zero bytes like
+/// before, but the name — and the per-side info line printed by resolve —
+/// no longer confuses "absent" with "genuinely empty".
+pub fn absent_sentinel_path(dest: &str) -> String {
+    format!("{dest}.DELETED")
+}
+
+/// Materialize the input file for a side that is absent at the given ref: an
+/// empty sentinel whose name signals deletion to the merge tool (and to the
+/// user). The sentinel path, not the original dest, must be used everywhere
+/// the tool input is passed or re-read, so tools that write their output to
+/// `$BASE` keep working for absent bases too.
+pub fn prepare_absent_side_file(dest: &str) -> Result<String> {
+    let sentinel = absent_sentinel_path(dest);
+    fs::write(&sentinel, b"").with_context(|| format!("failed to write sentinel '{sentinel}'"))?;
+    Ok(sentinel)
 }
 
 /// Stage a single path in the index (`git add -- <path>`).
@@ -474,7 +602,10 @@ pub fn select_conflicts_by_list(all_conflicts: &[String], csv: &str) -> Result<V
 
 #[cfg(test)]
 mod tests {
-    use super::{is_slice_branch_ref, list_all_slice_branches, list_slice_branches_for_integration};
+    use super::{
+        is_slice_branch_ref, list_all_slice_branches, list_slice_branches_for_integration,
+        prepare_absent_side_file, restore_ours, write_blob_to_path,
+    };
     use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -510,9 +641,98 @@ mod tests {
         let all = test_helpers::with_repo_cwd(&repo, list_all_slice_branches)?;
         assert!(all.iter().any(|b| b == slice));
 
-        let for_integration =
-            test_helpers::with_repo_cwd(&repo, || list_slice_branches_for_integration(integration))?;
+        let for_integration = test_helpers::with_repo_cwd(&repo, || {
+            list_slice_branches_for_integration(integration)
+        })?;
         assert!(for_integration.iter().any(|b| b == slice));
+        Ok(())
+    }
+
+    /// A path deleted on one side must NOT be handed to the merge tool as a
+    /// plain empty file: `write_blob_to_path` reports presence, and resolve
+    /// swaps the input for a `.DELETED` sentinel, keeping "absent" and
+    /// "zero-byte content" distinguishable.
+    #[test]
+    fn deleted_and_empty_paths_are_distinguishable() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        test_helpers::write_file(&repo, "empty.txt", "")?;
+        test_helpers::commit_all(&repo, "add empty.txt")?;
+
+        test_helpers::git(&repo, &["checkout", "-b", "deleted-side"])?;
+        test_helpers::git(&repo, &["rm", "-q", "base.txt"])?;
+        test_helpers::git(&repo, &["commit", "-m", "delete base.txt"])?;
+
+        let out_dir = test_helpers::unique_temp_repo_dir();
+        std::fs::create_dir_all(&out_dir)?;
+        let from_deleted = out_dir.join("blob-of-deleted");
+        let from_empty = out_dir.join("blob-of-empty");
+
+        let (deleted_present, empty_present) = test_helpers::with_repo_cwd(&repo, || {
+            let deleted_present =
+                write_blob_to_path("deleted-side", "base.txt", &from_deleted.to_string_lossy())?;
+            let empty_present =
+                write_blob_to_path("deleted-side", "empty.txt", &from_empty.to_string_lossy())?;
+            Ok((deleted_present, empty_present))
+        })?;
+
+        assert!(
+            !deleted_present,
+            "a path missing at the ref must be reported as absent"
+        );
+        assert!(
+            empty_present,
+            "a genuine zero-byte file must be reported as present"
+        );
+
+        let sentinel = test_helpers::with_repo_cwd(&repo, || {
+            prepare_absent_side_file(&from_deleted.to_string_lossy())
+        })?;
+        assert!(sentinel.ends_with(".DELETED"));
+        assert!(std::fs::metadata(&sentinel)?.len() == 0);
+        Ok(())
+    }
+
+    /// restore_ours must be total over unmerged index shapes: paths present
+    /// in HEAD are restored; paths absent in HEAD (deleted by us, added by
+    /// them, both-deleted, file-location suggestions) are removed from the
+    /// index instead of aborting with "path is unmerged".
+    #[test]
+    fn restore_ours_handles_paths_absent_in_head() -> TestResult<()> {
+        let repo = test_helpers::init_repo()?;
+        test_helpers::write_file(&repo, "src/a.txt", "a\n")?;
+        test_helpers::commit_all(&repo, "base")?;
+
+        test_helpers::git(&repo, &["checkout", "-b", "feature"])?;
+        test_helpers::git(&repo, &["mv", "src/a.txt", "renamed_feature.txt"])?;
+        test_helpers::git(&repo, &["commit", "-m", "feature renames a"])?;
+
+        test_helpers::git(&repo, &["checkout", "main"])?;
+        test_helpers::git(&repo, &["mv", "src/a.txt", "renamed_main.txt"])?;
+        test_helpers::git(&repo, &["commit", "-m", "main renames a"])?;
+
+        test_helpers::git(&repo, &["merge", "--no-ff", "--no-commit", "feature"]).ok();
+
+        test_helpers::with_repo_cwd(&repo, || {
+            // DD: old path, stage 1 only, absent in HEAD.
+            restore_ours("src/a.txt")?;
+            // UA: their new path, absent in HEAD.
+            restore_ours("renamed_feature.txt")?;
+            // AU: our new path, present in HEAD.
+            restore_ours("renamed_main.txt")?;
+            Ok(())
+        })?;
+
+        let unmerged = test_helpers::with_repo_cwd(&repo, super::conflicted_files)?;
+        assert!(
+            unmerged.is_empty(),
+            "restore_ours should leave no unmerged entries:\n{unmerged:?}"
+        );
+
+        // Ours-side state fully restored: our rename target present, theirs
+        // (and the shared old path) gone.
+        assert!(repo.join("renamed_main.txt").exists());
+        assert!(!repo.join("renamed_feature.txt").exists());
+        assert!(!repo.join("src/a.txt").exists());
         Ok(())
     }
 }
