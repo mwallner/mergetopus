@@ -459,6 +459,7 @@ mod tests {
             "Test",
             steps,
             move |_| {
+                std::thread::sleep(Duration::from_millis(1));
                 let n = polls_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(n > 20)
             },
@@ -543,6 +544,7 @@ mod tests {
             "Test",
             steps,
             move |_| {
+                std::thread::sleep(Duration::from_millis(1));
                 let n = polls_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(n > 20)
             },
