@@ -444,11 +444,12 @@ pub fn resolve_command(
     let mut tmp_dir = MergetopusTempDir::new()?;
 
     let mut skipped_paths: Vec<String> = Vec::new();
+    let mut to_stage: Vec<String> = Vec::new();
 
-    for path in &conflicted_paths {
-        // Derive a short safe name from the filename alone, suffixed with
-        // a hash of the full path to keep unique even if the same filename
-        // appears in different directories.
+    // Derive a short safe name from the filename alone, suffixed with
+    // a hash of the full path to keep unique even if the same filename
+    // appears in different directories.
+    let temp_names = |path: &str| -> (String, String, String) {
         let filename = path
             .rsplit_once(['/', '\\'])
             .map(|(_, name)| name)
@@ -467,26 +468,54 @@ pub fn resolve_command(
             .bytes()
             .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
         let safe_name = format!("{}_{:08x}", safe_file, hash);
+        (
+            tmp_dir
+                .path()
+                .join(format!("{safe_name}.LOCAL"))
+                .to_string_lossy()
+                .into_owned(),
+            tmp_dir
+                .path()
+                .join(format!("{safe_name}.BASE"))
+                .to_string_lossy()
+                .into_owned(),
+            tmp_dir
+                .path()
+                .join(format!("{safe_name}.REMOTE"))
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
 
-        let mut local_tmp = tmp_dir
-            .path()
-            .join(format!("{safe_name}.LOCAL"))
-            .to_string_lossy()
-            .into_owned();
-        let mut base_tmp = tmp_dir
-            .path()
-            .join(format!("{safe_name}.BASE"))
-            .to_string_lossy()
-            .into_owned();
-        let mut remote_tmp = tmp_dir
-            .path()
-            .join(format!("{safe_name}.REMOTE"))
-            .to_string_lossy()
-            .into_owned();
+    // Fetch every LOCAL/BASE/REMOTE side with ONE git cat-file --batch
+    // process instead of three `git show` subprocesses per conflicted path.
+    let mut blob_requests: Vec<(String, String, String)> = Vec::new();
+    let mut tool_inputs: Vec<(String, String, String, String)> = Vec::new();
+    for path in &conflicted_paths {
+        let (local_tmp, base_tmp, remote_tmp) = temp_names(path);
+        tool_inputs.push((
+            path.clone(),
+            local_tmp.clone(),
+            base_tmp.clone(),
+            remote_tmp.clone(),
+        ));
+        blob_requests.push((local_commit.clone(), path.clone(), local_tmp));
+        blob_requests.push((merge_base.clone(), path.clone(), base_tmp));
+        blob_requests.push((remote_commit.clone(), path.clone(), remote_tmp));
+    }
+    let blob_present = git_ops::write_blobs_batch(&blob_requests)?;
+    let side_present = |reference: &str, path: &str| -> bool {
+        blob_present
+            .get(&format!("{reference}:{path}"))
+            .copied()
+            .unwrap_or(false)
+    };
 
-        let local_present = git_ops::write_blob_to_path(&local_commit, path, &local_tmp)?;
-        let base_present = git_ops::write_blob_to_path(&merge_base, path, &base_tmp)?;
-        let remote_present = git_ops::write_blob_to_path(&remote_commit, path, &remote_tmp)?;
+    for (path, mut local_tmp, mut base_tmp, mut remote_tmp) in tool_inputs {
+        let local_present = side_present(&local_commit, &path);
+        let base_present = side_present(&merge_base, &path);
+        let remote_present = side_present(&remote_commit, &path);
+        let path = &path;
 
         // Replace inputs for sides that lack the path with ".DELETED"
         // sentinels so a deletion is not indistinguishable from a zero-byte
@@ -564,11 +593,12 @@ pub fn resolve_command(
 
         if should_stage_after_mergetool(path, status.success(), trust_exit_code, quiet, tui_title)?
         {
-            git_ops::stage_path(path)?;
+            to_stage.push(path.clone());
         } else {
             skipped_paths.push(path.clone());
         }
     }
+    git_ops::stage_paths_batch(&to_stage)?;
 
     let staged_count = conflicted_paths.len() - skipped_paths.len();
     let staged_paths: Vec<&String> = conflicted_paths

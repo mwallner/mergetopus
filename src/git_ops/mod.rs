@@ -275,6 +275,102 @@ pub fn write_stages_to_staged_paths(entries: &[(String, String, String)]) -> Res
     Ok(())
 }
 
+/// Fetch many `<ref>:<path>` blobs into destination files using ONE
+/// `git cat-file --batch` process, responding sequentially per spec so the
+/// pipes never deadlock. Returns presence keyed by (reference, path);
+/// absent paths leave their dest untouched (callers apply their own
+/// sentinel/empty-file semantics). Requests whose path contains a newline
+/// bypass the line-based protocol and use `write_blob_to_path` individually.
+/// The returned map is keyed by the spec string `<reference>:<path>`.
+pub fn write_blobs_batch(requests: &[(String, String, String)]) -> Result<BTreeMap<String, bool>> {
+    let mut present = BTreeMap::new();
+    let mut batchable: Vec<&(String, String, String)> = Vec::new();
+    for req in requests {
+        if req.1.contains('\n') {
+            let ok_present = write_blob_to_path(&req.0, &req.1, &req.2)?;
+            present.insert(format!("{}:{}", req.0, req.1), ok_present);
+        } else {
+            batchable.push(req);
+        }
+    }
+    if batchable.is_empty() {
+        return Ok(present);
+    }
+
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to spawn git cat-file --batch")?;
+    let result = (|| -> Result<()> {
+        let mut stdin = child.stdin.take().context("cat-file stdin")?;
+        let stdout = child.stdout.take().context("cat-file stdout")?;
+        let mut reader = std::io::BufReader::new(stdout);
+        for (reference, path, dest) in batchable.iter() {
+            writeln!(stdin, "{reference}:{path}")
+                .and_then(|()| stdin.flush())
+                .with_context(|| format!("failed to feed cat-file spec '{reference}:{path}'"))?;
+
+            let mut header = String::new();
+            let n = reader.read_line(&mut header).context("cat-file header")?;
+            if n == 0 {
+                bail!("git cat-file --batch terminated early");
+            }
+            let trimmed = header.trim_end_matches('\n');
+            let parts: Vec<&str> = trimmed.split(' ').collect();
+            let blob_size: Option<usize> = parts
+                .get(1)
+                .filter(|t| **t == "blob")
+                .and_then(|_| parts.get(2))
+                .and_then(|sz| sz.parse().ok());
+            let Some(size) = blob_size else {
+                if trimmed.ends_with(" missing") {
+                    present.insert(format!("{reference}:{path}"), false);
+                    continue;
+                }
+                bail!("unexpected cat-file response for '{reference}:{path}': {trimmed}");
+            };
+            let mut buf = vec![0u8; size];
+            std::io::Read::read_exact(&mut reader, &mut buf)
+                .context("failed reading cat-file blob bytes")?;
+            let mut newline = [0u8; 1];
+            std::io::Read::read_exact(&mut reader, &mut newline)
+                .context("failed reading cat-file terminator")?;
+            std::fs::write(dest, &buf).with_context(|| {
+                format!("failed to write blob of '{reference}:{path}' to '{dest}'")
+            })?;
+            present.insert(format!("{reference}:{path}"), true);
+        }
+        Ok(())
+    })();
+    drop(child.stdin.take());
+    let _ = child.kill();
+    let _ = child.wait();
+    result?;
+    Ok(present)
+}
+
+/// `git add` many paths in one invocation (stdin pathspec list where the
+/// git version supports it).
+pub fn stage_paths_batch(paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    if supports_pathspec_from_file() {
+        return run_git_stdin(
+            &["add", "--pathspec-from-file=-", "--pathspec-file-nul"],
+            &nul_lines(paths.iter().map(String::as_str)),
+        );
+    }
+    for chunk in pathspec_chunks(paths) {
+        let mut args: Vec<&str> = vec!["add", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        run_git(&args)?;
+    }
+    Ok(())
+}
+
 /// Write worktree copies for paths already staged in the index (stdin when
 /// git supports it).
 fn restore_worktree_from_index(paths: &[String]) -> Result<()> {
