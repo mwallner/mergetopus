@@ -88,14 +88,8 @@ pub fn slice_branch_names_from_refs<'a>(
         .filter_map(|l| {
             if l.starts_with(&prefix) {
                 Some(l.to_string())
-            } else if let Some(local) = local_branch_name_from_remote_ref(l) {
-                if local.starts_with(&prefix) {
-                    Some(local)
-                } else {
-                    None
-                }
             } else {
-                None
+                local_branch_name_from_remote_ref(l).filter(|local| local.starts_with(&prefix))
             }
         })
         .collect::<Vec<_>>();
