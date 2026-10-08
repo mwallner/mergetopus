@@ -855,23 +855,97 @@ fn file_location_blob(groups: &[ConflictGroup], path: &str) -> Option<StageBlob>
         })
 }
 
-/// Materialize one conflicted path on a checked-out slice branch.
-fn materialize_slice_path(path: &str, source_ref: &str, groups: &[ConflictGroup]) -> Result<()> {
-    if let Some(blob) = file_location_blob(groups, path) {
-        return git_ops::write_stage_to_staged_path(&blob.mode, &blob.oid, path);
-    }
+/// Precomputed per-run data shared by all slice creations, so huge conflict
+/// sets need one tree walk per chunk instead of git subprocesses per path.
+pub struct SliceInputs {
+    /// Blob entries of every slice-relevant path in the source ref.
+    src_entries: std::collections::BTreeMap<String, (String, String)>,
+    /// Blob entries in the slice base tree.
+    base_entries: std::collections::BTreeMap<String, (String, String)>,
+    /// Last commit touching each path on the source side (trailers).
+    provenance: std::collections::BTreeMap<String, git_ops::PathTouched>,
+    /// Linked worktrees exist; checkout must manage them per slice.
+    linked_worktrees: bool,
+}
 
-    if git_ops::path_exists_in_ref(source_ref, path)? {
-        git_ops::restore_from_ref(source_ref, path)?;
-    } else {
-        git_ops::rm_path(path)?;
+impl SliceInputs {
+    fn checkout_slice_branch(&self, branch: &str, at: &str) -> Result<()> {
+        if self.linked_worktrees {
+            git_ops::checkout_new_or_reset(branch, at)
+        } else {
+            git_ops::checkout_new_or_reset_light(branch, at)
+        }
+    }
+}
+
+/// Plan how to materialize `paths` on a branch checked out at `slice_base`:
+/// classify each into restore/rm/staged-blob and detect whether the slice
+/// would contain any change at all. `None` inputs fall back to per-path
+/// probing (small conflict sets, e.g. group decisions).
+struct SlicePlan {
+    changed: bool,
+    restores: Vec<String>,
+    deletes: Vec<String>,
+    locations: Vec<(String, String, String)>,
+}
+
+fn plan_slice_paths(
+    paths: &[String],
+    groups: &[ConflictGroup],
+    inputs: &SliceInputs,
+) -> Result<SlicePlan> {
+    let mut plan = SlicePlan {
+        changed: false,
+        restores: Vec::new(),
+        deletes: Vec::new(),
+        locations: Vec::new(),
+    };
+    for path in paths {
+        if let Some(blob) = file_location_blob(groups, path) {
+            plan.changed |= inputs
+                .base_entries
+                .get(path)
+                .is_none_or(|e| e.1 != blob.oid);
+            plan.locations
+                .push((path.clone(), blob.mode.clone(), blob.oid.clone()));
+            continue;
+        }
+        match inputs.src_entries.get(path) {
+            Some(entry) => {
+                if inputs.base_entries.get(path) != Some(entry) {
+                    plan.changed = true;
+                }
+                plan.restores.push(path.clone());
+            }
+            None => {
+                if inputs.base_entries.contains_key(path) {
+                    plan.changed = true;
+                    plan.deletes.push(path.clone());
+                }
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// Apply a slice plan on the currently checked-out slice branch.
+fn apply_slice_plan(plan: &SlicePlan, source_ref: &str) -> Result<()> {
+    for (path, mode, oid) in &plan.locations {
+        git_ops::write_stage_to_staged_path(mode, oid, path)?;
+    }
+    if !plan.restores.is_empty() {
+        git_ops::restore_paths_from_ref(source_ref, &plan.restores)?;
+    }
+    if !plan.deletes.is_empty() {
+        git_ops::rm_paths_batch(&plan.deletes)?;
     }
     Ok(())
 }
 
 /// Create one slice branch carrying `paths` (source-side content) and commit it
 /// with per-path provenance trailers. Used for explicit groups and for the
-/// combined unassigned slice.
+/// combined unassigned slice. With precomputed `inputs` (bulk mode) the
+/// materialization and change detection need no per-path subprocesses.
 fn create_group_slice_branch(
     integration_branch: &str,
     slice_base: &str,
@@ -881,18 +955,18 @@ fn create_group_slice_branch(
     paths: &[String],
     description: &str,
     groups: &[ConflictGroup],
+    inputs: &SliceInputs,
 ) -> Result<()> {
     let slice_branch = slice_branch_name(integration_branch, slice_number)?;
-    git_ops::checkout_new_or_reset(&slice_branch, slice_base)?;
 
-    for path in paths {
-        materialize_slice_path(path, source_ref, groups)?;
-    }
-
-    if !git_ops::staged_has_changes()? {
+    let plan = plan_slice_paths(paths, groups, inputs)?;
+    if !plan.changed {
         color::print_warning(&format!("Skipped {slice_branch}: no staged changes"), None);
         return Ok(());
     }
+
+    inputs.checkout_slice_branch(&slice_branch, slice_base)?;
+    apply_slice_plan(&plan, source_ref)?;
 
     let trailers = {
         let mut t = vec![
@@ -902,13 +976,26 @@ fn create_group_slice_branch(
         ];
 
         for path in paths {
-            let p = git_ops::path_provenance(source_ref, source_sha, path)?;
-            t.push(format!("Source-Path: {}", p.path));
+            let (path_commit, author_name, author_email) =
+                match inputs.provenance.get(path).map(|touch| {
+                    (
+                        Some(touch.commit.clone()),
+                        Some(touch.author_name.clone()),
+                        Some(touch.author_email.clone()),
+                    )
+                }) {
+                    Some(triple) => triple,
+                    None => {
+                        let p = git_ops::path_provenance(source_ref, source_sha, path)?;
+                        (p.path_commit, p.author_name, p.author_email)
+                    }
+                };
+            t.push(format!("Source-Path: {path}"));
             t.push(format!(
                 "Source-Path-Commit: {}",
-                p.path_commit.unwrap_or_else(|| "(none)".to_string())
+                path_commit.unwrap_or_else(|| "(none)".to_string())
             ));
-            if let (Some(name), Some(email)) = (p.author_name, p.author_email) {
+            if let (Some(name), Some(email)) = (author_name, author_email) {
                 t.push(format!("Co-authored-by: {name} <{email}>"));
             }
         }
@@ -947,6 +1034,24 @@ pub fn create_slice_branches(
     unassigned_policy: UnassignedPolicy,
     groups: &[ConflictGroup],
 ) -> Result<()> {
+    // Bulk precomputation: one bounded tree listing for source and base plus
+    // one streamed log walk for provenance, replacing ~4 git subprocesses per
+    // conflicted path in the old per-path loops.
+    let all_paths: Vec<String> = {
+        let mut set = std::collections::BTreeSet::new();
+        set.extend(all_conflicts.iter().cloned());
+        for g in explicit_slices {
+            set.extend(g.iter().cloned());
+        }
+        set.into_iter().collect()
+    };
+    let inputs = SliceInputs {
+        src_entries: git_ops::tree_entries(source_ref, &all_paths)?,
+        base_entries: git_ops::tree_entries(slice_base, &all_paths)?,
+        provenance: git_ops::paths_last_touched(source_sha, &all_paths)?,
+        linked_worktrees: git_ops::has_linked_worktrees()?,
+    };
+
     let mut slice_index = 1usize;
 
     for group in explicit_slices {
@@ -963,6 +1068,7 @@ pub fn create_slice_branches(
             group,
             "explicit",
             groups,
+            &inputs,
         )?;
         slice_index += 1;
     }
@@ -1013,6 +1119,7 @@ pub fn create_slice_branches(
             &paths,
             "unassigned",
             groups,
+            &inputs,
         )?;
         return Ok(());
     }
@@ -1028,6 +1135,7 @@ pub fn create_slice_branches(
             &g.paths,
             "default",
             groups,
+            &inputs,
         )?;
         slice_index += 1;
     }
@@ -1041,51 +1149,63 @@ pub fn create_slice_branches(
         let slice_number = slice_index;
         let slice_branch = slice_branch_name(integration_branch, slice_index)?;
         slice_index += 1;
-        git_ops::checkout_new_or_reset(&slice_branch, slice_base)?;
 
-        materialize_slice_path(&path, source_ref, groups)?;
-
-        if git_ops::staged_has_changes()? {
-            let provenance = git_ops::path_provenance(source_ref, source_sha, &path)?;
-
-            let trailers = {
-                let mut t = vec![
-                    format!("Source-Ref: {}", provenance.source_ref),
-                    format!("Source-Commit: {}", provenance.source_commit),
-                    format!("Source-Path: {}", provenance.path),
-                    format!(
-                        "Source-Path-Commit: {}",
-                        provenance
-                            .path_commit
-                            .clone()
-                            .unwrap_or_else(|| "(none)".to_string())
-                    ),
-                ];
-
-                if let (Some(name), Some(email)) =
-                    (&provenance.author_name, &provenance.author_email)
-                {
-                    t.push(format!("Co-authored-by: {name} <{email}>"));
-                }
-
-                t.join("\n")
-            };
-
-            let message = format!(
-                "Mergetopus - slice{slice_number} from {source_ref} (theirs)\n\nFiles:\n* {path}\n\n{trailers}"
-            );
-
-            git_ops::commit_slice(&message, &provenance)?;
-            color::print_success(
-                &format!("Created default single-file slice branch {slice_branch} for {path}"),
-                None,
-            );
-        } else {
+        let paths = vec![path.clone()];
+        let plan = plan_slice_paths(&paths, groups, &inputs)?;
+        if !plan.changed {
             color::print_warning(
                 &format!("Skipped {slice_branch} for {path}: no staged changes"),
                 None,
             );
+            continue;
         }
+
+        inputs.checkout_slice_branch(&slice_branch, slice_base)?;
+        apply_slice_plan(&plan, source_ref)?;
+
+        let provenance = match inputs.provenance.get(&path) {
+            Some(touch) => crate::models::PathProvenance {
+                source_ref: source_ref.to_string(),
+                source_commit: source_sha.to_string(),
+                path: path.clone(),
+                path_commit: Some(touch.commit.clone()),
+                author_name: Some(touch.author_name.clone()),
+                author_email: Some(touch.author_email.clone()),
+                author_date: Some(touch.author_date.clone()),
+            },
+            None => git_ops::path_provenance(source_ref, source_sha, &path)?,
+        };
+
+        let trailers = {
+            let mut t = vec![
+                format!("Source-Ref: {}", provenance.source_ref),
+                format!("Source-Commit: {}", provenance.source_commit),
+                format!("Source-Path: {}", provenance.path),
+                format!(
+                    "Source-Path-Commit: {}",
+                    provenance
+                        .path_commit
+                        .clone()
+                        .unwrap_or_else(|| "(none)".to_string())
+                ),
+            ];
+
+            if let (Some(name), Some(email)) = (&provenance.author_name, &provenance.author_email) {
+                t.push(format!("Co-authored-by: {name} <{email}>"));
+            }
+
+            t.join("\n")
+        };
+
+        let message = format!(
+            "Mergetopus - slice{slice_number} from {source_ref} (theirs)\n\nFiles:\n* {path}\n\n{trailers}"
+        );
+
+        git_ops::commit_slice(&message, &provenance)?;
+        color::print_success(
+            &format!("Created default single-file slice branch {slice_branch} for {path}"),
+            None,
+        );
     }
 
     Ok(())

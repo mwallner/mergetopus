@@ -250,9 +250,9 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
     let conflict_groups =
         planner::build_conflict_groups(&merge_output, &conflicted_files, &stage_map);
 
-    for path in &conflicted_files {
-        git_ops::restore_ours(path)?;
-    }
+    // Bulk variant: one restore (plus one rm batch) for all conflicts
+    // instead of a git subprocess per path.
+    git_ops::restore_ours_batch(&conflicted_files)?;
 
     let auto_merged_files = git_ops::staged_files()?;
     let auto_applied =

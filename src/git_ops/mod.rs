@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::process::Command;
 
 use crate::models::PathProvenance;
@@ -202,20 +202,97 @@ pub fn merge_tree_with_base(
     }))
 }
 
-/// Blob entry `mode,oid` of `path` in a tree, or None when the tree lacks it.
-fn tree_entry(tree: &str, path: &str) -> Result<Option<(String, String)>> {
-    let (ok, out, _) = run_git_allow_failure(&["ls-tree", "--", tree, path])?;
-    if !ok || out.trim().is_empty() {
-        return Ok(None);
+/// Stage many blobs in one index update and materialize them in one
+/// checkout. Both lists stream over stdin (`update-index --add -z
+/// --index-info` + `checkout-index -f -z --stdin`), so there is no
+/// command-line limit at all; mode and OID are carried verbatim, making
+/// this byte-identical to `write_stage_to_staged_path` per entry. Duplicate
+/// paths stage the last entry.
+pub fn write_stages_to_staged_paths(entries: &[(String, String, String)]) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
     }
-    let Some((meta, _name)) = out.split_once('\t') else {
-        return Ok(None);
-    };
-    let mut parts = meta.split_whitespace();
-    let (Some(mode), Some("blob"), Some(oid)) = (parts.next(), parts.next(), parts.next()) else {
-        return Ok(None);
-    };
-    Ok(Some((mode.to_string(), oid.to_string())))
+    // last occurrence of a path wins; iteration order preserved
+    let by_path: BTreeMap<&str, (&str, &str)> = entries
+        .iter()
+        .map(|(mode, oid, path)| (path.as_str(), (mode.as_str(), oid.as_str())))
+        .collect();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut ordered: Vec<&str> = entries
+        .iter()
+        .rev()
+        .map(|(_, _, path)| path.as_str())
+        .filter(|p| seen.insert(p))
+        .collect();
+    ordered.reverse();
+
+    if supports_pathspec_from_file() {
+        let mut payload = Vec::new();
+        for path in &ordered {
+            let (mode, oid) = by_path[path];
+            payload.extend_from_slice(mode.as_bytes());
+            payload.push(b' ');
+            payload.extend_from_slice(oid.as_bytes());
+            payload.push(b'\t');
+            payload.extend_from_slice(path.as_bytes());
+            payload.push(0);
+        }
+        run_git_stdin(&["update-index", "--add", "-z", "--index-info"], &payload)?;
+        return run_git_stdin(
+            &["checkout-index", "-f", "-z", "--stdin"],
+            &nul_lines(ordered.iter().copied()),
+        );
+    }
+
+    // Old git: batched --cacheinfo argv + pathspec checkout.
+    let mut chunk: Vec<&str> = Vec::new();
+    let mut chunk_bytes = 0usize;
+    let mut batches: Vec<Vec<&str>> = Vec::new();
+    for path in &ordered {
+        let est = path.len() * 2 + 80;
+        if !chunk.is_empty() && chunk_bytes + est > 20_000 {
+            batches.push(std::mem::take(&mut chunk));
+            chunk_bytes = 0;
+        }
+        chunk_bytes += est;
+        chunk.push(path);
+    }
+    if !chunk.is_empty() {
+        batches.push(chunk);
+    }
+    for batch in batches {
+        let mut args: Vec<String> = vec!["update-index".to_string(), "--add".to_string()];
+        for path in &batch {
+            let (mode, oid) = by_path[path];
+            args.push("--cacheinfo".to_string());
+            args.push(format!("{mode},{oid},{path}"));
+        }
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_git(&arg_refs)?;
+        let paths: Vec<String> = batch.iter().map(|p| (*p).to_string()).collect();
+        restore_worktree_from_index(&paths)?;
+    }
+    Ok(())
+}
+
+/// Write worktree copies for paths already staged in the index (stdin when
+/// git supports it).
+fn restore_worktree_from_index(paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    if supports_pathspec_from_file() {
+        return run_git_stdin(
+            &["checkout-index", "-f", "-z", "--stdin"],
+            &nul_lines(paths.iter().map(String::as_str)),
+        );
+    }
+    for chunk in pathspec_chunks(paths) {
+        let mut args: Vec<&str> = vec!["checkout-index", "-f", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        run_git(&args)?;
+    }
+    Ok(())
 }
 
 /// Re-evaluate the conflicted set against ONE concrete `chosen_base`.
@@ -245,16 +322,35 @@ pub fn deconflict_against_base(
     };
 
     let mut remaining = Vec::new();
+    let mut to_settle = Vec::new();
     for path in conflicted {
         if pinned.conflicts.contains(path.as_str()) {
             remaining.push(path.clone());
-            continue;
-        }
-        match tree_entry(&pinned.tree, path)? {
-            Some((mode, oid)) => write_stage_to_staged_path(&mode, &oid, path)?,
-            None => resolve_path_as_deleted(path)?,
+        } else {
+            to_settle.push(path.clone());
         }
     }
+    if to_settle.is_empty() {
+        return Ok(remaining);
+    }
+
+    let entries = tree_entries(&pinned.tree, &to_settle)?;
+    let present: Vec<(String, String, String)> = to_settle
+        .iter()
+        .filter_map(|p| {
+            entries
+                .get(p)
+                .map(|(m, o)| (m.clone(), o.clone(), p.clone()))
+        })
+        .collect();
+    let deleted: Vec<String> = to_settle
+        .iter()
+        .filter(|p| !entries.contains_key(p.as_str()))
+        .cloned()
+        .collect();
+
+    write_stages_to_staged_paths(&present)?;
+    resolve_paths_as_deleted_batch(&deleted)?;
     Ok(remaining)
 }
 
@@ -419,6 +515,355 @@ pub fn restore_from_ref(reference: &str, path: &str) -> Result<()> {
 
 pub fn rm_path(path: &str) -> Result<()> {
     run_git(&["rm", "--ignore-unmatch", "--", path]).map(|_| ())
+}
+
+// ── bulk path operations ───────────────────────────────────────────────────
+//
+// Huge repositories produce thousands of conflicted paths. One git
+// subprocess per path dominates the wall time, so slicing goes through the
+// helpers below. Where git accepts path lists on stdin they do
+// (`--pathspec-from-file=- --pathspec-file-nul`, `update-index --index-info`,
+// `checkout-index --stdin`), which removes any command-line length limit
+// entirely — argv chunking remains only where git has no stdin alternative
+// (`ls-tree` classification, `log` pathspecs), bounded so the whole argv
+// fits comfortably in the Windows command-line limit (~32 KiB).
+
+/// Run git with a payload on stdin; fail with the stderr on non-zero exit.
+fn run_git_stdin(args: &[&str], payload: &[u8]) -> Result<()> {
+    let mut child = Command::new("git")
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to execute git {}", args.join(" ")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(payload)
+            .with_context(|| format!("failed to feed paths to git {}", args.join(" ")))?;
+    }
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("failed to wait for git {}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git {} failed: {}", args.join(" "), stderr.trim());
+    }
+    Ok(())
+}
+
+/// NUL-terminated path lines.
+fn nul_lines<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for p in paths {
+        buf.extend_from_slice(p.as_bytes());
+        buf.push(0);
+    }
+    buf
+}
+
+static PATHSPEC_FROM_FILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// `--pathspec-from-file` exists since git 2.25 (Feb 2020).
+fn supports_pathspec_from_file() -> bool {
+    *PATHSPEC_FROM_FILE.get_or_init(|| {
+        let version = match run_git(&["--version"]) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let Some(rest) = version.trim().strip_prefix("git version ") else {
+            return false;
+        };
+        let mut nums = rest
+            .split('.')
+            .take(2)
+            .map(|part| part.parse::<u32>().unwrap_or(0));
+        match (nums.next(), nums.next()) {
+            (Some(major), Some(minor)) => (major, minor) >= (2, 25),
+            _ => false,
+        }
+    })
+}
+
+/// Split paths into chunks bounded by count and total byte length, safe for
+/// a single git pathspec argument list on every platform.
+pub fn pathspec_chunks(paths: &[String]) -> Vec<Vec<String>> {
+    const MAX_PATHS: usize = 400;
+    const MAX_BYTES: usize = 12_000;
+    let mut chunks: Vec<Vec<String>> = Vec::new();
+    let mut cur: Vec<String> = Vec::new();
+    let mut cur_len = 0usize;
+    for p in paths {
+        let l = p.len() + 1;
+        if !cur.is_empty() && (cur.len() >= MAX_PATHS || cur_len + l > MAX_BYTES) {
+            cur_len = 0;
+            chunks.push(std::mem::take(&mut cur));
+        }
+        cur_len += l;
+        cur.push(p.clone());
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
+/// Blob entries `(mode, oid)` of `paths` in `reference`; paths absent from
+/// the tree are missing from the result. One `ls-tree` per chunk.
+///
+/// Paths containing newlines or double quotes can appear in quoted form in
+/// the listing (git escapes them regardless of `core.quotePath`); those are
+/// verified individually so exotic names never get silently misclassified.
+pub fn tree_entries(
+    reference: &str,
+    paths: &[String],
+) -> Result<BTreeMap<String, (String, String)>> {
+    let mut found = BTreeMap::new();
+    let mut exotic = Vec::new();
+    let mut plain: Vec<String> = Vec::new();
+    for p in paths {
+        if p.contains('\n') || p.contains('"') {
+            exotic.push(p.clone());
+        } else {
+            plain.push(p.clone());
+        }
+    }
+
+    for chunk in pathspec_chunks(&plain) {
+        let mut args: Vec<&str> = vec![
+            "-c",
+            "core.quotePath=false",
+            "ls-tree",
+            "-r",
+            reference,
+            "--",
+        ];
+        args.extend(chunk.iter().map(String::as_str));
+        let entries_out = run_git(&args)?;
+        for line in entries_out.lines() {
+            // "<mode> <type> <oid>\t<path>"
+            let Some((meta, name)) = line.split_once('\t') else {
+                continue;
+            };
+            let mut parts = meta.split_whitespace();
+            let (Some(mode), Some("blob"), Some(oid)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            found.insert(name.to_string(), (mode.to_string(), oid.to_string()));
+        }
+    }
+
+    for p in &exotic {
+        if path_exists_in_ref(reference, p)? {
+            let oid = run_git(&["rev-parse", &format!("{reference}:{p}")])?;
+            let listing = run_git(&["ls-tree", reference, "--", p])?;
+            let mode = listing
+                .split_whitespace()
+                .next()
+                .unwrap_or("100644")
+                .to_string();
+            found.insert(p.clone(), (mode, oid.trim().to_string()));
+        }
+    }
+    Ok(found)
+}
+
+/// `git restore --source=<reference> --staged --worktree` for many paths.
+pub fn restore_paths_from_ref(reference: &str, paths: &[String]) -> Result<()> {
+    for chunk in pathspec_chunks(paths) {
+        let source_arg = format!("--source={reference}");
+        let mut args: Vec<&str> = vec![
+            "restore",
+            source_arg.as_str(),
+            "--staged",
+            "--worktree",
+            "--",
+        ];
+        args.extend(chunk.iter().map(String::as_str));
+        run_git(&args)?;
+    }
+    Ok(())
+}
+
+/// Remove many paths from index and worktree in bulk (`git rm` over stdin).
+pub fn rm_paths_batch(paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    if supports_pathspec_from_file() {
+        return run_git_stdin(
+            &[
+                "rm",
+                "-q",
+                "--ignore-unmatch",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ],
+            &nul_lines(paths.iter().map(String::as_str)),
+        );
+    }
+    for chunk in pathspec_chunks(paths) {
+        let mut args: Vec<&str> = vec!["rm", "-q", "--ignore-unmatch", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        run_git(&args)?;
+    }
+    Ok(())
+}
+
+/// Settle many conflicted paths as deletions (unmerged-index tolerant).
+pub fn resolve_paths_as_deleted_batch(paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    if supports_pathspec_from_file() {
+        run_git_stdin(
+            &[
+                "rm",
+                "-f",
+                "--cached",
+                "--ignore-unmatch",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ],
+            &nul_lines(paths.iter().map(String::as_str)),
+        )?;
+    } else {
+        for chunk in pathspec_chunks(paths) {
+            let mut args: Vec<&str> = vec!["rm", "-f", "--cached", "--ignore-unmatch", "--"];
+            args.extend(chunk.iter().map(String::as_str));
+            run_git(&args)?;
+        }
+    }
+    for p in paths {
+        let fs_path = crate::win32_path::to_fs_path(p);
+        let _ = std::fs::remove_file(&fs_path);
+    }
+    Ok(())
+}
+
+/// Batched `restore_ours`: classify HEAD-membership with bulk tree listings
+/// (identical predicate to the per-path version), then restore or delete in
+/// bulk. Note an ours-stage entry can exist at paths HEAD does not contain
+/// (dir-rename "file location" suggestions), which is why the stage map is
+/// not used for classification.
+pub fn restore_ours_batch(paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let present = tree_entries("HEAD", paths)?;
+    let mut ours: Vec<String> = Vec::new();
+    let mut deleted: Vec<String> = Vec::new();
+    for p in paths {
+        if present.contains_key(p) {
+            ours.push(p.clone());
+        } else {
+            deleted.push(p.clone());
+        }
+    }
+    if !ours.is_empty() {
+        restore_paths_from_ref("HEAD", &ours)?;
+    }
+    if !deleted.is_empty() {
+        resolve_paths_as_deleted_batch(&deleted)?;
+    }
+    Ok(())
+}
+
+/// The most recent commit touching each of `paths` on `source_sha`'s
+/// simplified history, collected with one streamed `git log` per chunk
+/// (killed early once every path is matched).
+pub struct PathTouched {
+    pub commit: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub author_date: String,
+}
+
+pub fn paths_last_touched(
+    source_sha: &str,
+    paths: &[String],
+) -> Result<BTreeMap<String, PathTouched>> {
+    let mut found: BTreeMap<String, PathTouched> = BTreeMap::new();
+    let wanted: BTreeSet<String> = paths.iter().cloned().collect();
+
+    for chunk in pathspec_chunks(paths) {
+        let mut cmd = Command::new("git");
+        cmd.args([
+            "-c",
+            "core.quotePath=false",
+            "log",
+            "--no-renames",
+            "--name-only",
+            "--format=%x01%H%x1f%an%x1f%ae%x1f%aI",
+            source_sha,
+            "--",
+        ])
+        .args(chunk.iter().map(String::as_str));
+        cmd.stdout(std::process::Stdio::piped());
+        let child = cmd.spawn().context("failed to spawn git log")?;
+        // Early completion (or a panic while streaming) must not leave a git
+        // process running nor leak its stdio pipe, so the guard kills and
+        // reaps the child on every scope exit.
+        let mut guard = ChildGuard::new(child);
+        let child = &mut guard.child;
+        if let Some(out) = child.stdout.take() {
+            let reader = std::io::BufReader::new(out);
+            let mut current: Option<PathTouched> = None;
+            for line in reader.lines().map_while(Result::ok) {
+                if let Some(rest) = line.strip_prefix('\u{1}') {
+                    let mut parts = rest.split('\u{1f}');
+                    current = Some(PathTouched {
+                        commit: parts.next().unwrap_or("").to_string(),
+                        author_name: parts.next().unwrap_or("").to_string(),
+                        author_email: parts.next().unwrap_or("").to_string(),
+                        author_date: parts.next().unwrap_or("").to_string(),
+                    });
+                    if found.len() == wanted.len() {
+                        break;
+                    }
+                    continue;
+                }
+                if line.is_empty() {
+                    continue;
+                }
+                if wanted.contains(&line) && !found.contains_key(&line) {
+                    let Some(t) = &current else { continue };
+                    found.insert(
+                        line.clone(),
+                        PathTouched {
+                            commit: t.commit.clone(),
+                            author_name: t.author_name.clone(),
+                            author_email: t.author_email.clone(),
+                            author_date: t.author_date.clone(),
+                        },
+                    );
+                    if found.len() == wanted.len() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Kill+reap a streaming child process on scope exit.
+struct ChildGuard {
+    child: std::process::Child,
+}
+
+impl ChildGuard {
+    fn new(child: std::process::Child) -> Self {
+        ChildGuard { child }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 pub fn path_provenance(source_ref: &str, source_sha: &str, path: &str) -> Result<PathProvenance> {
@@ -742,13 +1187,49 @@ pub fn select_conflicts_by_list(all_conflicts: &[String], csv: &str) -> Result<V
 mod tests {
     use super::{
         conflict_stage_map, deconflict_against_base, is_slice_branch_ref, list_all_slice_branches,
-        list_slice_branches_for_integration, prepare_absent_side_file, restore_ours,
-        write_blob_to_path, write_stage_to_staged_path,
+        list_slice_branches_for_integration, prepare_absent_side_file,
+        resolve_paths_as_deleted_batch, restore_ours, write_blob_to_path,
+        write_stage_to_staged_path,
     };
     use super::{conflicted_files, merge_base};
     use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn bulk_deletion_streams_more_paths_than_an_argv_chunk() -> TestResult<()> {
+        // 500 > pathspec_chunks' 400-path cap: the stdin path must handle
+        // the whole set without splitting at chunk boundaries losing entries.
+        let repo = test_helpers::init_repo()?;
+        let count = 500;
+        for i in 0..count {
+            test_helpers::write_file(&repo, &format!("pkg/f{i:03}.txt"), &format!("base{i}\n"))?;
+        }
+        test_helpers::commit_all(&repo, "base")?;
+
+        test_helpers::git(&repo, &["checkout", "-b", "feature"])?;
+        for i in 0..count {
+            test_helpers::write_file(&repo, &format!("pkg/f{i:03}.txt"), &format!("feat{i}\n"))?;
+        }
+        test_helpers::commit_all(&repo, "feature")?;
+        test_helpers::git(&repo, &["checkout", "main"])?;
+        for i in 0..count {
+            test_helpers::write_file(&repo, &format!("pkg/f{i:03}.txt"), &format!("main{i}\n"))?;
+        }
+        test_helpers::commit_all(&repo, "main")?;
+
+        test_helpers::git(&repo, &["merge", "--no-commit", "feature"]).ok();
+        let conflicts = test_helpers::with_repo_cwd(&repo, conflicted_files)?;
+        assert_eq!(conflicts.len(), count);
+
+        test_helpers::with_repo_cwd(&repo, || resolve_paths_as_deleted_batch(&conflicts))?;
+
+        let still = test_helpers::with_repo_cwd(&repo, conflicted_files)?;
+        assert!(still.is_empty(), "all {count} paths settled: {still:?}");
+        assert!(!repo.join("pkg/f000.txt").exists());
+        assert!(!repo.join("pkg/f499.txt").exists());
+        Ok(())
+    }
 
     #[test]
     fn write_stage_preserves_binary_bytes_and_exec_mode() -> TestResult<()> {

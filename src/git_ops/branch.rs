@@ -272,6 +272,19 @@ pub fn checkout_new_or_reset(branch: &str, at: &str) -> Result<()> {
     run_git(&["checkout", "-B", branch, at]).map(|_| ())
 }
 
+/// Whether the repo currently has linked worktrees. Bulk operations probe
+/// this once instead of paying a `git worktree list` per checkout.
+pub fn has_linked_worktrees() -> Result<bool> {
+    let entries = worktree::list_worktree_entries()?;
+    Ok(worktree::has_existing_linked_worktrees(&entries))
+}
+
+/// `checkout_new_or_reset` for repos WITHOUT linked worktrees: plain
+/// `git checkout -B`, skipping the per-call worktree probe.
+pub fn checkout_new_or_reset_light(branch: &str, at: &str) -> Result<()> {
+    run_git(&["checkout", "-B", branch, at]).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

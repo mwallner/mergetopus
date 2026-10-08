@@ -1608,3 +1608,65 @@ fn criss_cross_quiet_uses_default_merge_base_and_warns() -> TestResult<()> {
     );
     Ok(())
 }
+
+/// Bulk slice setup must be correct at scale: 150 conflicting files collapse
+/// into ONE shared unassigned slice via --unassigned single, with every file
+/// carrying the source-side content and trailers.
+#[test]
+fn bulk_unassigned_single_slice_at_scale() -> TestResult<()> {
+    let repo = test_helpers::init_repo()?;
+    let n = 150usize;
+    for i in 0..n {
+        test_helpers::write_file(&repo, &format!("dir/file{i:03}.txt"), &format!("base{i}\n"))?;
+    }
+    test_helpers::commit_all(&repo, "base")?;
+
+    test_helpers::git(&repo, &["checkout", "-b", "feature"])?;
+    for i in 0..n {
+        test_helpers::write_file(
+            &repo,
+            &format!("dir/file{i:03}.txt"),
+            &format!("feature{i}\n"),
+        )?;
+    }
+    test_helpers::commit_all(&repo, "feature edits all")?;
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    for i in 0..n {
+        test_helpers::write_file(&repo, &format!("dir/file{i:03}.txt"), &format!("main{i}\n"))?;
+    }
+    test_helpers::commit_all(&repo, "main edits all")?;
+
+    let out = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--unassigned", "single"])?;
+    assert!(
+        out.status.success(),
+        "bulk workflow failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("for {n} file(s)")),
+        "one slice should cover all {n} files:\n{stdout}"
+    );
+
+    let slice = "_mmm/main/feature/slice1";
+    assert!(!branch_exists(&repo, "_mmm/main/feature/slice2"));
+    for idx in [0usize, 7, 74, 149] {
+        let name = format!("dir/file{idx:03}.txt");
+        let content = test_helpers::git(&repo, &["show", &format!("{slice}:{name}")])?;
+        assert_eq!(content, format!("feature{idx}"), "slice content for {name}");
+    }
+
+    // Provenance trailers survived batching for a sample of paths.
+    let msg = test_helpers::git(&repo, &["log", "-1", "--format=%B", slice])?;
+    assert!(
+        msg.contains("Source-Path: dir/file000.txt")
+            && msg.contains("Source-Path: dir/file149.txt"),
+        "per-path trailers must list every slice file:\n{msg}"
+    );
+    assert!(
+        msg.contains("Co-authored-by:"),
+        "author trailers must survive bulk provenance:\n{msg}"
+    );
+    Ok(())
+}

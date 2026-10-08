@@ -123,9 +123,7 @@ pub fn here_command(
     let stage_map = git_ops::conflict_stage_map()?;
     let conflict_groups =
         planner::build_conflict_groups(&merge_output, &conflicted_now, &stage_map);
-    for path in &conflicted_now {
-        git_ops::restore_ours(path)?;
-    }
+    git_ops::restore_ours_batch(&conflicted_now)?;
 
     // Slices only for paths that still conflict against the chosen base.
     let still_conflicted: BTreeSet<&str> = conflicted_now.iter().map(String::as_str).collect();
