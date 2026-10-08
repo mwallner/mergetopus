@@ -148,9 +148,12 @@ pub fn resolve_path_as_deleted(path: &str) -> Result<()> {
 }
 
 /// Parse unmerged index entries (`git ls-files -u`) into
-/// `path -> (stage -> blob oid)`. Stage 1 = base, 2 = ours, 3 = theirs.
-pub fn conflict_stage_map()
--> Result<std::collections::BTreeMap<String, std::collections::BTreeMap<usize, String>>> {
+/// `path -> (stage -> blob)`. Stage 1 = base, 2 = ours, 3 = theirs.
+/// Each entry keeps its index mode so materialization can preserve the
+/// exec bit and symlink-ness.
+pub fn conflict_stage_map() -> Result<
+    std::collections::BTreeMap<String, std::collections::BTreeMap<usize, crate::models::StageBlob>>,
+> {
     let out = run_git(&["ls-files", "-u", "-z"])?;
     let mut map = std::collections::BTreeMap::new();
     for record in out.split('\0') {
@@ -162,7 +165,7 @@ pub fn conflict_stage_map()
             continue;
         };
         let mut meta_parts = meta.split_whitespace();
-        let (Some(_mode), Some(oid), Some(stage)) =
+        let (Some(mode), Some(oid), Some(stage)) =
             (meta_parts.next(), meta_parts.next(), meta_parts.next())
         else {
             continue;
@@ -175,27 +178,53 @@ pub fn conflict_stage_map()
         }
         map.entry(path.to_string())
             .or_insert_with(std::collections::BTreeMap::new)
-            .insert(stage, oid.to_string());
+            .insert(
+                stage,
+                crate::models::StageBlob {
+                    mode: mode.to_string(),
+                    oid: oid.to_string(),
+                },
+            );
     }
     Ok(map)
 }
 
-/// Write the blob identified by `oid` to `dest`, creating parent directories
-/// and staging the result. Used to materialize stage blobs that no longer
-/// exist in any branch tree (e.g. file-location conflict content).
-pub fn write_oid_to_staged_path(oid: &str, path: &str) -> Result<()> {
-    let (ok, stdout, stderr) = run_git_allow_failure(&["cat-file", "blob", oid])?;
-    if !ok {
-        bail!("git cat-file blob {oid} failed: {stderr}");
+/// Materialize an unmerged index stage at `path`: stage the exact blob with
+/// its original mode via `update-index --cacheinfo`, then write the worktree
+/// copy via `checkout-index`. Git itself writes the blob bytes, so binary
+/// content and trailing newlines survive intact; modes 100755 (exec) and
+/// 120000 (symlink) are preserved.
+pub fn write_stage_to_staged_path(mode: &str, oid: &str, path: &str) -> Result<()> {
+    if !oid.starts_with(|c: char| c.is_ascii_hexdigit()) || oid.len() < 4 {
+        bail!("invalid blob oid '{oid}' while materializing '{path}'");
     }
+
     let fs_path = crate::win32_path::to_fs_path(path);
     if let Some(parent) = std::path::Path::new(&fs_path).parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create parent directory for '{path}'"))?;
     }
-    std::fs::write(&fs_path, stdout.as_bytes())
-        .with_context(|| format!("failed to write '{path}' from blob {oid}"))?;
-    stage_path(path)
+
+    run_git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("{mode},{oid},{path}"),
+    ])
+    .with_context(|| format!("failed to stage blob {oid} for '{path}'"))?;
+
+    // Gitlinks (submodule pointers) have no blob to check out; staging is
+    // the whole job.
+    if mode == "160000" {
+        return Ok(());
+    }
+
+    // Write the worktree copy from the freshly staged index entry. A
+    // pre-existing file at the path is intentionally overwritten.
+    let _ = std::fs::remove_file(&fs_path);
+    run_git(&["checkout-index", "-f", "--", path])
+        .with_context(|| format!("failed to check out staged '{path}'"))?;
+    Ok(())
 }
 
 pub fn list_slice_branches_for_integration(integration_branch: &str) -> Result<Vec<String>> {
@@ -603,12 +632,111 @@ pub fn select_conflicts_by_list(all_conflicts: &[String], csv: &str) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::{
-        is_slice_branch_ref, list_all_slice_branches, list_slice_branches_for_integration,
-        prepare_absent_side_file, restore_ours, write_blob_to_path,
+        conflict_stage_map, is_slice_branch_ref, list_all_slice_branches,
+        list_slice_branches_for_integration, prepare_absent_side_file, restore_ours,
+        write_blob_to_path, write_stage_to_staged_path,
     };
     use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn write_stage_preserves_binary_bytes_and_exec_mode() -> TestResult<()> {
+        let repo = test_helpers::init_repo()?;
+        test_helpers::write_file(&repo, "seed.txt", "seed\n")?;
+        test_helpers::commit_all(&repo, "seed")?;
+
+        let payload: &[u8] = b"PK\x00\x01binary blob without trailing newline\x00\xff";
+        std::fs::write(repo.join("payload.bin"), payload)?;
+        let oid = test_helpers::git(&repo, &["hash-object", "-w", "payload.bin"])?;
+
+        test_helpers::with_repo_cwd(&repo, || {
+            write_stage_to_staged_path("100755", &oid, "out/exec.bin")
+        })?;
+
+        let written = std::fs::read(repo.join("out/exec.bin"))?;
+        assert_eq!(written, payload, "blob bytes must be written unchanged");
+
+        let index_line = test_helpers::git(&repo, &["ls-files", "-s", "out/exec.bin"])?;
+        assert!(
+            index_line.starts_with("100755 "),
+            "index mode must survive: {index_line}"
+        );
+        assert!(index_line.contains(oid.trim()));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(repo.join("out/exec.bin"))?
+                .permissions()
+                .mode();
+            assert_ne!(mode & 0o111, 0, "exec bit must be set on the worktree copy");
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_stage_creates_symlink_for_120000() -> TestResult<()> {
+        let repo = test_helpers::init_repo()?;
+        test_helpers::write_file(&repo, "seed.txt", "seed\n")?;
+        test_helpers::commit_all(&repo, "seed")?;
+
+        std::fs::write(repo.join("linksrc.txt"), b"seed.txt")?;
+        let oid = test_helpers::git(&repo, &["hash-object", "-w", "linksrc.txt"])?;
+
+        test_helpers::with_repo_cwd(&repo, || {
+            write_stage_to_staged_path("120000", &oid, "dir/link")
+        })?;
+
+        let link = std::fs::read_link(repo.join("dir/link"))?;
+        assert_eq!(link, std::path::Path::new("seed.txt"));
+        let index_line = test_helpers::git(&repo, &["ls-files", "-s", "dir/link"])?;
+        assert!(
+            index_line.starts_with("120000 "),
+            "symlink mode must be staged: {index_line}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn conflict_stage_map_preserves_modes() -> TestResult<()> {
+        let repo = test_helpers::init_repo()?;
+
+        // Build the trees directly (hash-object + cacheinfo) so the exec
+        // stage modes hold regardless of host filesystem permissions.
+        let put_exec = |content: &[u8], message: &str| -> TestResult<()> {
+            std::fs::write(repo.join(".tmpblob"), content)?;
+            let oid = test_helpers::git(&repo, &["hash-object", "-w", ".tmpblob"])?;
+            test_helpers::git(
+                &repo,
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("100755,{},run.sh", oid.trim()),
+                ],
+            )?;
+            test_helpers::git(&repo, &["commit", "-m", message])?;
+            // cacheinfo only touched the index; sync the worktree so a
+            // later merge isn't refused over stale local content.
+            test_helpers::git(&repo, &["checkout", "-f", "--", "run.sh"]).ok();
+            Ok(())
+        };
+
+        put_exec(b"one\n", "base with exec")?;
+        test_helpers::git(&repo, &["checkout", "-b", "feature"])?;
+        put_exec(b"feature\n", "feature edits")?;
+        test_helpers::git(&repo, &["checkout", "main"])?;
+        put_exec(b"main\n", "main edits")?;
+
+        test_helpers::git(&repo, &["merge", "--no-commit", "feature"]).ok();
+        let map = test_helpers::with_repo_cwd(&repo, conflict_stage_map)?;
+        let stages = map.get("run.sh").expect("conflicted entry for run.sh");
+        assert_eq!(stages.get(&2).expect("ours stage").mode, "100755");
+        assert_eq!(stages.get(&3).expect("theirs stage").mode, "100755");
+        Ok(())
+    }
 
     #[test]
     fn slice_ref_detection_accepts_local_and_remote() {

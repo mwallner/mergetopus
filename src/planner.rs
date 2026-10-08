@@ -2,7 +2,7 @@ use crate::color;
 use anyhow::{Result, bail};
 
 use crate::git_ops;
-use crate::models::{ConflictGroup, ConflictKind, GroupMode, UnassignedPolicy};
+use crate::models::{ConflictGroup, ConflictKind, GroupMode, StageBlob, UnassignedPolicy};
 use std::collections::BTreeMap;
 
 /// One `CONFLICT (...)` description line reported by git during a merge.
@@ -153,7 +153,7 @@ pub fn parse_conflict_lines(merge_output: &str) -> Vec<ParsedConflict> {
 pub fn build_conflict_groups(
     merge_output: &str,
     conflicted: &[String],
-    stage_map: &BTreeMap<String, BTreeMap<usize, String>>,
+    stage_map: &BTreeMap<String, BTreeMap<usize, StageBlob>>,
 ) -> Vec<ConflictGroup> {
     let parsed = parse_conflict_lines(merge_output);
     let conflicted_set: BTreeMap<&str, ()> = conflicted.iter().map(|p| (p.as_str(), ())).collect();
@@ -346,7 +346,7 @@ pub fn derive_group_roles(group: &ConflictGroup) -> GroupRoles {
     roles
 }
 
-fn oid_for(group: &ConflictGroup, path: &Option<String>, stage: usize) -> Option<String> {
+fn stage_for(group: &ConflictGroup, path: &Option<String>, stage: usize) -> Option<StageBlob> {
     path.as_ref()
         .and_then(|p| group.stage_blobs.get(p))
         .and_then(|s| s.get(&stage))
@@ -581,15 +581,15 @@ pub fn apply_group_action(group: &ConflictGroup, action: GroupAction) -> Result<
     fn write_side(
         settled: &mut Vec<String>,
         path: &Option<String>,
-        oid: &Option<String>,
+        blob: &Option<StageBlob>,
     ) -> Result<()> {
         let Some(path) = path else { return Ok(()) };
-        let Some(oid) = oid else {
+        let Some(blob) = blob else {
             return Err(anyhow::anyhow!(
                 "no staged blob for '{path}' to resolve group decision"
             ));
         };
-        git_ops::write_oid_to_staged_path(oid, path)?;
+        git_ops::write_stage_to_staged_path(&blob.mode, &blob.oid, path)?;
         if !settled.contains(path) {
             settled.push(path.clone());
         }
@@ -605,25 +605,28 @@ pub fn apply_group_action(group: &ConflictGroup, action: GroupAction) -> Result<
     }
 
     let roles = derive_group_roles(group);
-    let ours_oid = oid_for(group, &roles.ours, 2);
-    let theirs_oid = oid_for(group, &roles.theirs, 3);
-    let fallback_oid = || -> Option<String> {
-        ours_oid.clone().or_else(|| theirs_oid.clone()).or_else(|| {
-            sighted_member(group).and_then(|p| {
-                group
-                    .stage_blobs
-                    .get(&p)
-                    .and_then(|s| s.get(&2).or(s.get(&3)))
-                    .cloned()
+    let ours_blob = stage_for(group, &roles.ours, 2);
+    let theirs_blob = stage_for(group, &roles.theirs, 3);
+    let fallback_blob = || -> Option<StageBlob> {
+        ours_blob
+            .clone()
+            .or_else(|| theirs_blob.clone())
+            .or_else(|| {
+                sighted_member(group).and_then(|p| {
+                    group
+                        .stage_blobs
+                        .get(&p)
+                        .and_then(|s| s.get(&2).or(s.get(&3)))
+                        .cloned()
+                })
             })
-        })
     };
 
     let mut settled: Vec<String> = Vec::new();
 
     match action {
         GroupAction::KeepOurs => {
-            write_side(&mut settled, &roles.ours, &ours_oid)?;
+            write_side(&mut settled, &roles.ours, &ours_blob)?;
             if let Some(p) = &roles.theirs {
                 delete_side(&mut settled, p)?;
             }
@@ -632,7 +635,7 @@ pub fn apply_group_action(group: &ConflictGroup, action: GroupAction) -> Result<
             }
         }
         GroupAction::TakeTheirs => {
-            write_side(&mut settled, &roles.theirs, &theirs_oid)?;
+            write_side(&mut settled, &roles.theirs, &theirs_blob)?;
             if let Some(p) = &roles.ours {
                 delete_side(&mut settled, p)?;
             }
@@ -641,8 +644,8 @@ pub fn apply_group_action(group: &ConflictGroup, action: GroupAction) -> Result<
             }
         }
         GroupAction::KeepBothNames => {
-            write_side(&mut settled, &roles.ours, &ours_oid)?;
-            write_side(&mut settled, &roles.theirs, &theirs_oid)?;
+            write_side(&mut settled, &roles.ours, &ours_blob)?;
+            write_side(&mut settled, &roles.theirs, &theirs_blob)?;
             if let Some(p) = &roles.old {
                 delete_side(&mut settled, p)?;
             }
@@ -650,7 +653,7 @@ pub fn apply_group_action(group: &ConflictGroup, action: GroupAction) -> Result<
                 // File-location groups: offer the SAME content at both
                 // locations. Other kinds: unsighted members get dropped.
                 if group.kind == ConflictKind::FileLocation {
-                    write_side(&mut settled, &Some(extra.clone()), &fallback_oid())?;
+                    write_side(&mut settled, &Some(extra.clone()), &fallback_blob())?;
                 } else {
                     delete_side(&mut settled, extra)?;
                 }
@@ -670,8 +673,8 @@ pub fn apply_group_action(group: &ConflictGroup, action: GroupAction) -> Result<
                     .or_else(|| roles.theirs.clone())
                     .or_else(|| sighted_member(group))
             };
-            let content_oid = fallback_oid();
-            write_side(&mut settled, &survivor_path, &content_oid)?;
+            let content_blob = fallback_blob();
+            write_side(&mut settled, &survivor_path, &content_blob)?;
 
             let dropped = if action == GroupAction::KeepOriginal {
                 roles.ours.clone().or_else(|| roles.theirs.clone())
@@ -815,11 +818,11 @@ pub fn unassigned_paths<'a>(
         .collect()
 }
 
-/// The blob oid to materialize for `path` when it belongs to a
+/// The blob to materialize for `path` when it belongs to a
 /// file-location conflict group: content captured from the unmerged index
 /// stage, since the path exists neither on the source ref nor at the slice
 /// base. Returns None for ordinary groups, which use source-restore/rm.
-fn file_location_oid(groups: &[ConflictGroup], path: &str) -> Option<String> {
+fn file_location_blob(groups: &[ConflictGroup], path: &str) -> Option<StageBlob> {
     groups
         .iter()
         .find(|g| g.kind == ConflictKind::FileLocation && g.contains(path))
@@ -833,8 +836,8 @@ fn file_location_oid(groups: &[ConflictGroup], path: &str) -> Option<String> {
 
 /// Materialize one conflicted path on a checked-out slice branch.
 fn materialize_slice_path(path: &str, source_ref: &str, groups: &[ConflictGroup]) -> Result<()> {
-    if let Some(oid) = file_location_oid(groups, path) {
-        return git_ops::write_oid_to_staged_path(&oid, path);
+    if let Some(blob) = file_location_blob(groups, path) {
+        return git_ops::write_stage_to_staged_path(&blob.mode, &blob.oid, path);
     }
 
     if git_ops::path_exists_in_ref(source_ref, path)? {
@@ -1299,7 +1302,9 @@ mod tests {
         assert!(!UnassignedPolicy::Single.is_separate());
     }
 
-    fn stages(entries: &[(&str, &[(usize, &str)])]) -> BTreeMap<String, BTreeMap<usize, String>> {
+    fn stages(
+        entries: &[(&str, &[(usize, &str)])],
+    ) -> BTreeMap<String, BTreeMap<usize, StageBlob>> {
         entries
             .iter()
             .map(|(path, stages)| {
@@ -1307,7 +1312,15 @@ mod tests {
                     path.to_string(),
                     stages
                         .iter()
-                        .map(|(s, oid)| (*s, oid.to_string()))
+                        .map(|(s, oid)| {
+                            (
+                                *s,
+                                StageBlob {
+                                    mode: "100644".to_string(),
+                                    oid: oid.to_string(),
+                                },
+                            )
+                        })
                         .collect::<BTreeMap<_, _>>(),
                 )
             })

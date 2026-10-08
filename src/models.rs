@@ -20,6 +20,15 @@ pub enum ConflictKind {
     FileLocation,
 }
 
+/// An unmerged index stage entry: the blob OID plus its index mode
+/// (e.g. `100644`, `100755`, `120000`, `160000`). The mode is preserved so
+/// materialized stages keep the exec bit and symlink-ness of the original.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageBlob {
+    pub mode: String,
+    pub oid: String,
+}
+
 /// One logical conflict and every index path that participates in it.
 /// Rename-related kinds keep their correlated paths together so slicing and
 /// assignment treat the group as a unit.
@@ -27,9 +36,10 @@ pub enum ConflictKind {
 pub struct ConflictGroup {
     pub kind: ConflictKind,
     pub paths: Vec<String>,
-    /// Captured unmerged index stages (`path -> stage -> oid`) for this
+    /// Captured unmerged index stages (`path -> stage -> blob`) for this
     /// group, taken before "restore ours" wiped the conflict stages.
-    pub stage_blobs: std::collections::BTreeMap<String, std::collections::BTreeMap<usize, String>>,
+    pub stage_blobs:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<usize, StageBlob>>,
 }
 
 impl ConflictKind {

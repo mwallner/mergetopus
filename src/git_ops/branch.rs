@@ -206,8 +206,16 @@ pub fn delete_branch(branch: &str) -> Result<()> {
     let entries = worktree::list_worktree_entries()?;
     if worktree::has_existing_linked_worktrees(&entries) {
         if let Some(path) = worktree::find_worktree_for_branch(&entries, branch) {
-            run_git(&["worktree", "remove", "--force", &path.to_string_lossy()])
-                .with_context(|| format!("failed to remove worktree at '{}'", path.display()))?;
+            // No --force: git refuses to remove a worktree with uncommitted
+            // or untracked files, so another slice's in-progress work is
+            // never silently destroyed.
+            run_git(&["worktree", "remove", &path.to_string_lossy()]).with_context(|| {
+                format!(
+                    "worktree at '{}' still has uncommitted or untracked changes; \
+                     resolve or discard them there before deleting branch '{branch}'",
+                    path.display()
+                )
+            })?;
         }
     }
     run_git(&["branch", "-D", branch]).map(|_| ())
@@ -338,6 +346,26 @@ mod tests {
 
         let exists = test_helpers::git(&repo, &["show-ref", "--verify", "refs/heads/trash"]);
         assert!(exists.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn delete_branch_refuses_dirty_linked_worktree() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        test_helpers::git(&repo, &["branch", "slice"])?;
+        let wt = repo.join("wt-slice");
+        test_helpers::git(&repo, &["worktree", "add", &wt.to_string_lossy(), "slice"])?;
+        std::fs::write(wt.join("untracked.txt"), b"precious work")?;
+
+        let result = test_helpers::with_repo_cwd(&repo, || delete_branch("slice"));
+        assert!(result.is_err(), "dirty worktree must not be force-removed");
+
+        let exists = test_helpers::git(&repo, &["show-ref", "--verify", "refs/heads/slice"]);
+        assert!(exists.is_ok(), "branch must survive the refused delete");
+        assert!(
+            wt.join("untracked.txt").exists(),
+            "untracked work must survive"
+        );
         Ok(())
     }
 
