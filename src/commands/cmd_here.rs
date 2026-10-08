@@ -304,6 +304,10 @@ fn snapshot_resolved_paths(paths: &[String]) -> Result<BTreeMap<String, Option<V
 }
 
 fn apply_resolved_snapshots(snapshots: &BTreeMap<String, Option<Vec<u8>>>) -> Result<()> {
+    // Worktree restores are plain fs I/O; index updates go in bulk
+    // (one `git add` and one `git rm` total instead of one per path).
+    let mut restored: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
     for (path, content) in snapshots {
         match content {
             Some(bytes) => {
@@ -316,13 +320,15 @@ fn apply_resolved_snapshots(snapshots: &BTreeMap<String, Option<Vec<u8>>>) -> Re
                 }
                 std::fs::write(to_fs_path(path), bytes)
                     .with_context(|| format!("failed to restore resolved file '{path}'"))?;
-                git_ops::stage_path(path)?;
+                restored.push(path.clone());
             }
             None => {
-                git_ops::rm_path(path)?;
+                removed.push(path.clone());
             }
         }
     }
+    git_ops::stage_paths_batch(&restored)?;
+    git_ops::rm_paths_batch(&removed)?;
     Ok(())
 }
 
