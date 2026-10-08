@@ -67,6 +67,19 @@ pub fn merge_base(a: &str, b: &str) -> Result<String> {
     run_git(&["merge-base", a, b])
 }
 
+/// All best common ancestors of `a` and `b`. Criss-cross histories can have
+/// more than one; `merge_base` then reports only a single (arbitrary) pick
+/// while git's own merge builds a virtual base from all of them.
+pub fn merge_bases(a: &str, b: &str) -> Result<Vec<String>> {
+    let out = run_git(&["merge-base", "--all", a, b])?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +161,47 @@ mod tests {
         assert!(
             msg.contains("failed before entering conflict resolution"),
             "unexpected error: {msg}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merge_bases_single_and_criss_cross() -> TestResult<()> {
+        let repo = test_helpers::setup_single_conflict_repo()?;
+
+        let single = test_helpers::with_repo_cwd(&repo, || merge_bases("main", "feature"))?;
+        assert_eq!(
+            single.len(),
+            1,
+            "linear divergence has one base: {single:?}"
+        );
+
+        // Build a criss-cross: both tips merge the other's original commit.
+        let b1 = test_helpers::git(&repo, &["rev-parse", "main"])?;
+        let b2 = test_helpers::git(&repo, &["rev-parse", "feature"])?;
+        test_helpers::git(&repo, &["checkout", "main"])?;
+        test_helpers::git(&repo, &["merge", "--no-commit", b2.trim()]).ok();
+        test_helpers::write_file(&repo, "conflict.txt", "x resolved\n")?;
+        test_helpers::git(&repo, &["add", "conflict.txt"])?;
+        test_helpers::git(&repo, &["commit", "-m", "X"])?;
+        test_helpers::git(&repo, &["checkout", "feature"])?;
+        test_helpers::git(&repo, &["merge", "--no-commit", b1.trim()]).ok();
+        test_helpers::write_file(&repo, "conflict.txt", "y resolved\n")?;
+        test_helpers::git(&repo, &["add", "conflict.txt"])?;
+        test_helpers::git(&repo, &["commit", "-m", "Y"])?;
+
+        let x = test_helpers::git(&repo, &["rev-parse", "main"])?;
+        let y = test_helpers::git(&repo, &["rev-parse", "feature"])?;
+        let bases = test_helpers::with_repo_cwd(&repo, || merge_bases(x.trim(), y.trim()))?;
+        assert_eq!(
+            bases.len(),
+            2,
+            "criss-cross must list both bases: {bases:?}"
+        );
+        let default = test_helpers::with_repo_cwd(&repo, || merge_base(x.trim(), y.trim()))?;
+        assert!(
+            bases.contains(&default),
+            "the merge-base default must be one of --all"
         );
         Ok(())
     }

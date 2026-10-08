@@ -291,7 +291,7 @@ pub fn resolve_command(
         (local, slice_commit.clone())
     };
 
-    let merge_base = git_ops::merge_base(&local_commit, &remote_commit)?;
+    let merge_base = super::select_merge_base(&local_commit, &remote_commit, quiet, tui_title)?;
     let conflicted_paths = git_ops::conflicted_files()?;
 
     // Group-aware resolution: correlated paths (rename/rename, rename/delete,

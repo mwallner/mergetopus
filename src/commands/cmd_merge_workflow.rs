@@ -117,10 +117,15 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
 
     let actual_source_sha = git_ops::resolve_commit(&actual_source_ref)?;
     let actual_remembered_head = git_ops::head_sha()?;
-    let actual_merge_base = git_ops::merge_base(&actual_remembered_head, &actual_source_sha)
-        .with_context(|| {
-            "failed before entering conflict resolution: could not compute merge-base between current HEAD and source; verify source/history compatibility, then retry (for unrelated histories, merge manually with --allow-unrelated-histories first)"
-        })?;
+    let actual_merge_base = super::select_merge_base(
+        &actual_remembered_head,
+        &actual_source_sha,
+        args.quiet || args.yes,
+        tui_title,
+    )
+    .with_context(|| {
+        "failed before entering conflict resolution: could not compute merge-base between current HEAD and source; verify source/history compatibility, then retry (for unrelated histories, merge manually with --allow-unrelated-histories first)"
+    })?;
 
     if git_ops::branch_exists_anywhere(&actual_integration_branch)? {
         let actual_integration_branch =
@@ -291,6 +296,7 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
     let (mut explicit_slices, unassigned_policy) = match select_conflicts(
         args,
         &actual_source_ref,
+        &actual_merge_base,
         &conflicted_files,
         &conflict_groups,
         tui_title,
@@ -430,6 +436,7 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
 pub fn select_conflicts(
     args: &Args,
     source_ref: &str,
+    merge_base: &str,
     all_conflicts: &[String],
     groups: &[ConflictGroup],
     tui_title: &str,
@@ -451,7 +458,7 @@ pub fn select_conflicts(
                 match tui::select_conflicts(
                     all_conflicts,
                     groups,
-                    |path| git_ops::three_way_diff(path, source_ref),
+                    |path| git_ops::three_way_diff(path, merge_base, source_ref),
                     diff_tool.as_deref(),
                     |path| git_ops::launch_difftool(path, source_ref),
                     tui_title,

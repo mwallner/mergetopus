@@ -69,7 +69,12 @@ pub fn here_command(
     git_ops::merge_abort()?;
 
     let remembered_head = git_ops::head_sha()?;
-    let merge_base = git_ops::merge_base(&remembered_head, &source_sha)?;
+    let merge_base = super::select_merge_base(
+        &remembered_head,
+        &source_sha,
+        args.quiet || args.yes,
+        tui_title,
+    )?;
 
     let merge_output = if !args.quiet {
         let ib = integration_branch.clone();
@@ -153,6 +158,7 @@ pub fn here_command(
     let (mut explicit_slices, unassigned_policy) = match cmd_merge_workflow::select_conflicts(
         args,
         &source_ref,
+        &merge_base,
         &unresolved_before,
         &conflict_groups,
         tui_title,

@@ -1507,3 +1507,74 @@ fn resolve_tool_specific_trust_overrides_global() -> TestResult<()> {
 
     Ok(())
 }
+
+/// Criss-cross histories have multiple merge bases; git merges against a
+/// virtual base while Mergetopus anchors to one concrete base. In --quiet
+/// mode it must warn and use the 'git merge-base A B' default, and the slice
+/// branch must be created at exactly that default base.
+#[test]
+fn criss_cross_quiet_uses_default_merge_base_and_warns() -> TestResult<()> {
+    let repo = test_helpers::init_repo()?;
+    test_helpers::write_file(&repo, "f.txt", "0\n")?;
+    test_helpers::write_file(&repo, "u.txt", "a\n")?;
+    test_helpers::commit_all(&repo, "A")?;
+
+    test_helpers::git(&repo, &["checkout", "-b", "b1"])?;
+    test_helpers::write_file(&repo, "f.txt", "1\n")?;
+    test_helpers::commit_all(&repo, "B1 edits f")?;
+
+    test_helpers::git(&repo, &["checkout", "-b", "b2", "main"])?;
+    test_helpers::write_file(&repo, "f.txt", "2\n")?;
+    test_helpers::write_file(&repo, "u.txt", "9\n")?;
+    test_helpers::commit_all(&repo, "B2 edits f and u")?;
+
+    // X = b1 merge B2 (resolve f to 1)
+    let b1 = test_helpers::git(&repo, &["rev-parse", "b1"])?;
+    let b2 = test_helpers::git(&repo, &["rev-parse", "b2"])?;
+    test_helpers::git(&repo, &["checkout", "b1"])?;
+    test_helpers::git(&repo, &["merge", "--no-commit", b2.trim()]).ok();
+    test_helpers::write_file(&repo, "f.txt", "1\n")?;
+    test_helpers::git(&repo, &["add", "f.txt"])?;
+    test_helpers::git(&repo, &["commit", "-m", "X merges B2"])?;
+
+    // Y = b2 merge B1 (resolve f to 2)
+    test_helpers::git(&repo, &["checkout", "b2"])?;
+    test_helpers::git(&repo, &["merge", "--no-commit", b1.trim()]).ok();
+    test_helpers::write_file(&repo, "f.txt", "2\n")?;
+    test_helpers::git(&repo, &["add", "f.txt"])?;
+    test_helpers::git(&repo, &["commit", "-m", "Y merges B1"])?;
+
+    // Two distinct merge bases now exist between b1 (X) and b2 (Y).
+    let all_bases = test_helpers::git(&repo, &["merge-base", "--all", "b1", "b2"])?;
+    assert!(
+        all_bases.lines().count() == 2,
+        "expected a criss-cross with 2 merge bases, got:\n{all_bases}"
+    );
+    let default_base = test_helpers::git(&repo, &["merge-base", "b1", "b2"])?;
+
+    test_helpers::git(&repo, &["checkout", "b1"])?;
+    let out = test_helpers::mergetopus(&repo, &["b2", "--quiet"])?;
+    assert!(
+        out.status.success(),
+        "quiet criss-cross workflow failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("merge bases"),
+        "quiet mode must warn about multiple merge bases:\n{combined}"
+    );
+
+    let slice_parent = test_helpers::git(&repo, &["rev-parse", "_mmm/b1/b2/slice1^1"])?;
+    assert_eq!(
+        slice_parent.trim(),
+        default_base.trim(),
+        "slice branch must anchor at the default 'git merge-base' pick"
+    );
+    Ok(())
+}

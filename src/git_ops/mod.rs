@@ -417,14 +417,13 @@ pub fn consolidated_branch_name(integration_branch: &str) -> String {
     }
 }
 
-pub fn three_way_diff(path: &str, source_ref: &str) -> Result<String> {
-    let base = merge_base("HEAD", source_ref)?;
+pub fn three_way_diff(path: &str, base_ref: &str, source_ref: &str) -> Result<String> {
     let ours = show_file_at("HEAD", path)?;
-    let base_txt = show_file_at(&base, path)?;
+    let base_txt = show_file_at(base_ref, path)?;
     let theirs = show_file_at(source_ref, path)?;
 
     Ok(format!(
-        "=== OURS (HEAD) ===\n{ours}\n\n=== BASE ({base}) ===\n{base_txt}\n\n=== THEIRS ({source_ref}) ===\n{theirs}"
+        "=== OURS (HEAD) ===\n{ours}\n\n=== BASE ({base_ref}) ===\n{base_txt}\n\n=== THEIRS ({source_ref}) ===\n{theirs}"
     ))
 }
 

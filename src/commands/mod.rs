@@ -13,7 +13,69 @@ pub(crate) mod cmd_status;
 mod cmd_verify;
 
 use crate::cli::{Args, Commands, PrSubcommand};
+use mergetopus::color;
 use mergetopus::git_ops;
+
+/// Pick the concrete merge base Mergetopus anchors slicing, slice branches
+/// and 3-way inputs to.
+///
+/// With a single best common ancestor this is simply `git merge-base A B`.
+/// Criss-cross histories have multiple bases; git itself then merges against
+/// a *virtual* base built from all of them, but Mergetopus needs one concrete
+/// commit. The base `git merge-base A B` reports is offered as the default
+/// (matching what forge PR bases show); interactively the user can pick a
+/// different one, non-interactively a warning is printed and the default is
+/// used.
+pub(crate) fn select_merge_base(
+    a: &str,
+    b: &str,
+    non_interactive: bool,
+    tui_title: &str,
+) -> Result<String> {
+    let default = git_ops::merge_base(a, b)?;
+    let all = git_ops::merge_bases(a, b)?;
+    if all.len() <= 1 {
+        return Ok(default);
+    }
+
+    let describe = |sha: &str| -> String {
+        git_ops::run_git(&["log", "-1", "--format=%h %s", sha])
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| sha.chars().take(8).collect())
+    };
+
+    if non_interactive {
+        color::print_warning(
+            &format!(
+                "{} merge bases between the merge sides (criss-cross history); git used a virtual base built from all of them. Using '{}' — the 'git merge-base' default — for slicing and 3-way inputs; run interactively to pick a different base.",
+                all.len(),
+                describe(&default)
+            ),
+            None,
+        );
+        return Ok(default);
+    }
+
+    let mut ordered: Vec<String> = Vec::new();
+    let mut labels: Vec<String> = Vec::new();
+    ordered.push(default.clone());
+    labels.push(format!(
+        "{}  — default ('git merge-base A B')",
+        describe(&default)
+    ));
+    for sha in all.iter().filter(|s| **s != default) {
+        ordered.push(sha.clone());
+        labels.push(describe(sha));
+    }
+
+    let prompt = format!(
+        "The histories criss-cross: there are {} merge bases. git merged against a virtual base combining them; Mergetopus anchors slices and 3-way views to ONE concrete base. Which should it use?",
+        all.len()
+    );
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let picked = crate::tui::pick_option(&prompt, &refs, tui_title)?;
+    Ok(picked.map(|i| ordered[i].clone()).unwrap_or(default))
+}
 
 fn current_branch_and_tui_title_worktree() -> Result<(String, String)> {
     git_ops::ensure_git_worktree()?;
