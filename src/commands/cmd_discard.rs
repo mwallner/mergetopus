@@ -107,7 +107,9 @@ pub fn discard_command(
         }
     }
 
-    let has_remote_branches = branch_info.iter().any(|(_, _, remotes)| !remotes.is_empty());
+    let has_remote_branches = branch_info
+        .iter()
+        .any(|(_, _, remotes)| !remotes.is_empty());
 
     if has_remote_branches {
         let do_remote = if yes {

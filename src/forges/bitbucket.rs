@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, bail};
-use base64::{Engine, engine::general_purpose::STANDARD as base64_engine};
 use serde::Deserialize;
 
 use super::{Forge, ForgeId, PrParams, PrState, PrUpdate, PullRequest};
@@ -33,8 +32,9 @@ impl Bitbucket {
     }
 
     fn headers<B>(&self, req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
-        let auth = base64_engine.encode(format!(":{}", self.token));
-        req.header("Authorization", &format!("Basic {auth}"))
+        // Bitbucket Data Center personal access tokens authenticate as
+        // Bearer tokens; Basic auth would require a username/password pair.
+        req.header("Authorization", &format!("Bearer {}", self.token))
             .header("Accept", "application/json")
     }
 
@@ -152,14 +152,15 @@ impl Forge for Bitbucket {
         };
 
         let version = self.fetch_version(project, repo, number)?;
-        let new_version = version + 1;
 
         let url = self.api_url(&format!(
             "/projects/{project}/repos/{repo}/pull-requests/{number}"
         ));
 
+        // Bitbucket's optimistic lock: send the CURRENT version; the server
+        // rejects anything else with 409 and increments it itself on success.
         let mut body = serde_json::json!({
-            "version": new_version,
+            "version": version,
         });
         if let Some(title) = params.title {
             body["title"] = serde_json::json!(title);
@@ -179,8 +180,10 @@ impl Forge for Bitbucket {
         };
 
         let at = Self::ref_path(head);
+        // direction=OUTGOING: find PRs FROM this head, not PRs whose target
+        // happens to be this branch (the default includes incoming).
         let url = self.api_url(&format!(
-            "/projects/{project}/repos/{repo}/pull-requests?at={}&state=OPEN",
+            "/projects/{project}/repos/{repo}/pull-requests?at={}&direction=OUTGOING&state=OPEN",
             crate::forges::url_encode(&at)
         ));
 
@@ -197,14 +200,15 @@ impl Forge for Bitbucket {
         };
 
         let version = self.fetch_version(project, repo, number)?;
+        // Closing a PR requires the dedicated /decline endpoint; PUT only
+        // updates details and ignores a state field.
         let url = self.api_url(&format!(
-            "/projects/{project}/repos/{repo}/pull-requests/{number}"
+            "/projects/{project}/repos/{repo}/pull-requests/{number}/decline"
         ));
         let body = serde_json::json!({
-            "version": version + 1,
-            "state": "DECLINED",
+            "version": version,
         });
-        let resp: BitbucketPrResponse = self.api_put(&url, body)?;
+        let resp: BitbucketPrResponse = self.api_post(&url, body)?;
         let web_url = self.pr_web_url(project, repo, resp.id);
         Ok(convert_pr(resp, web_url))
     }
@@ -221,8 +225,17 @@ fn convert_pr(r: BitbucketPrResponse, web_url: String) -> PullRequest {
             _ => PrState::Open,
         },
         draft: false,
-        head: r.from_ref.id,
-        base: r.to_ref.id,
+        head: short_name(&r.from_ref.id),
+        base: short_name(&r.to_ref.id),
+    }
+}
+
+/// `refs/heads/feature` -> `feature`, matching the plain branch names other
+/// forge implementations report in `PullRequest::head`/`base`.
+fn short_name(ref_id: &str) -> String {
+    match ref_id.strip_prefix("refs/heads/") {
+        Some(rest) => rest.to_string(),
+        None => ref_id.to_string(),
     }
 }
 
@@ -231,7 +244,9 @@ struct BitbucketPrResponse {
     id: u64,
     version: i64,
     state: String,
+    #[serde(rename = "fromRef")]
     from_ref: BitbucketRef,
+    #[serde(rename = "toRef")]
     to_ref: BitbucketRef,
 }
 
@@ -310,5 +325,27 @@ mod tests {
             Bitbucket::ref_path("refs/heads/feature"),
             "refs/heads/feature"
         );
+    }
+
+    /// The wire format uses camelCase fromRef/toRef; deserialization of a
+    /// realistic response must not fail with missing-field errors.
+    #[test]
+    fn deserializes_camel_case_wire_response() {
+        let json = r#"{
+            "id": 7,
+            "version": 3,
+            "state": "OPEN",
+            "fromRef": {"id": "refs/heads/feature", "displayId": "feature"},
+            "toRef": {"id": "refs/heads/main", "displayId": "main"}
+        }"#;
+        let resp: BitbucketPrResponse = serde_json::from_str(json).expect("wire JSON parses");
+        let pr = convert_pr(
+            resp,
+            "https://bb.example.com/projects/PROJ/repos/repo/pull-requests/7".into(),
+        );
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.head, "feature", "refs/heads prefix must be stripped");
+        assert_eq!(pr.base, "main");
+        assert_eq!(pr.state, PrState::Open);
     }
 }

@@ -1003,7 +1003,6 @@ version = "0.6.0"
 dependencies = [
  "anstream",
  "anyhow",
- "base64",
  "clap",
  "crossterm",
  "owo-colors",

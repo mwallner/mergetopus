@@ -137,9 +137,11 @@ impl Forge for GitHub {
     }
 
     fn find_pr_by_head(&self, repo_path: &str, head: &str) -> Result<Option<PullRequest>> {
+        // Branch names may contain '&' or '#'; encode the whole owner:head
+        // value so it stays a single query parameter.
+        let head_spec = Self::head_filter_value(&self.owner, head);
         let url = self.api_url(&format!(
-            "/repos/{repo_path}/pulls?head={}:{}&state=open",
-            self.owner, head
+            "/repos/{repo_path}/pulls?head={head_spec}&state=open",
         ));
 
         let resp: Vec<GithubPrResponse> = self.api_get(&url)?;
@@ -185,6 +187,15 @@ struct GithubPrResponse {
 struct GithubBranchRef {
     #[serde(rename = "ref")]
     ref_field: String,
+}
+
+impl GitHub {
+    /// URL-encoded `owner:head` filter value for the pulls query. Branch
+    /// names are valid Git names that may contain `&`, `#`, `%`, spaces or
+    /// slashes — all of which must not break out of the query parameter.
+    fn head_filter_value(owner: &str, head: &str) -> String {
+        crate::forges::url_encode(&format!("{owner}:{head}"))
+    }
 }
 
 #[cfg(test)]
@@ -267,5 +278,16 @@ mod tests {
         };
         let pr = convert_pr(resp);
         assert!(pr.draft);
+    }
+
+    #[test]
+    fn head_filter_value_encodes_query_breakers() {
+        // ':' is percent-encoded as well; the API decodes it, and query
+        // breakers like '&' and '#' can no longer truncate the filter.
+        assert_eq!(
+            GitHub::head_filter_value("own", "feat&x#1"),
+            "own%3Afeat%26x%231"
+        );
+        assert_eq!(GitHub::head_filter_value("own", "a/b"), "own%3Aa%2Fb");
     }
 }

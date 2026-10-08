@@ -8,8 +8,16 @@ use super::gitlab::GitLab;
 use super::{Forge, ForgeId};
 
 const SAAS_GITLAB_HOSTS: &[&str] = &["gitlab.com", "gitlab.example.com"];
-const SAAS_BITBUCKET_HOSTS: &[&str] = &["bitbucket.org", "bitbucket.example.com"];
+// Data Center demo host; the implemented backend is Bitbucket Data Center's
+// /rest/api/latest API only.
+const SAAS_BITBUCKET_HOSTS: &[&str] = &["bitbucket.example.com"];
 const SAAS_FORGEJO_HOSTS: &[&str] = &["codeberg.org"];
+
+/// Bitbucket Cloud uses a different API and auth model than Data Center.
+fn is_bitbucket_cloud_host(host: &str) -> bool {
+    let name = host.split(':').next().unwrap_or(host);
+    name == "bitbucket.org" || name.ends_with(".bitbucket.org")
+}
 
 #[derive(Debug, Clone)]
 pub struct RemoteInfo {
@@ -109,6 +117,15 @@ pub fn detect_forge(remote_url: &str) -> Result<Box<dyn Forge>> {
     let info = parse_remote_url(remote_url)?;
     let host = info.host.as_str();
 
+    if is_bitbucket_cloud_host(host) {
+        bail!(
+            "{host} is Bitbucket Cloud, which mergetopus does not support; \
+             PR integration implements the Bitbucket Data Center REST API only \
+             (for Data Center instances, use their own hostname or set \
+             mergetopus.forge-type=bitbucket)"
+        );
+    }
+
     let forge_id = match host {
         "github.com" => ForgeId::GitHub,
         host if SAAS_GITLAB_HOSTS.contains(&host) => ForgeId::GitLab,
@@ -185,6 +202,15 @@ mod tests {
         assert_eq!(info.host, "bitbucket.example.com");
         assert_eq!(info.owner, "PROJ");
         assert_eq!(info.repo, "my-repo");
+    }
+
+    #[test]
+    fn bitbucket_cloud_hosts_are_rejected_not_dc() {
+        assert!(is_bitbucket_cloud_host("bitbucket.org"));
+        assert!(is_bitbucket_cloud_host("bitbucket.org:443"));
+        assert!(is_bitbucket_cloud_host("altssh.bitbucket.org"));
+        assert!(!is_bitbucket_cloud_host("bitbucket.example.com"));
+        assert!(!is_bitbucket_cloud_host("bitbucket.company.com:7999"));
     }
 
     #[test]

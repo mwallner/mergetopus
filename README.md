@@ -658,9 +658,14 @@ The forge is detected automatically from the remote URL:
 | `https://github.com/owner/repo.git`  | GitHub         |
 | `git@github.com:owner/repo.git`      | GitHub         |
 | `https://gitlab.com/owner/repo.git`  | GitLab         |
-| `https://bitbucket.org/owner/repo.git` | Bitbucket    |
+| `https://bitbucket.company.com/scm/PROJ/repo.git` | Bitbucket Data Center |
+| `ssh://git@bitbucket.company.com:7999/PROJ/repo.git` | Bitbucket Data Center |
 | `https://codeberg.org/owner/repo.git` | Forgejo       |
 | `git@codeberg.org:owner/repo.git`    | Forgejo        |
+
+> **Bitbucket Cloud (`bitbucket.org`) is not supported.** PR integration
+> implements the Bitbucket **Data Center** REST API (`/rest/api/latest`);
+> Cloud remotes are rejected with an explicit error.
 
 For **self-managed** instances (e.g. `gitlab.internal.example.com`,
 `bitbucket.company.com`, `git.forgejo.instance`), set the forge type explicitly:
@@ -679,7 +684,7 @@ falling back to an environment variable:
 | --------- | ---------------------------- | ----------------------------- |
 | GitHub    | `mergetopus.github-token`    | `GITHUB_TOKEN`                |
 | GitLab    | `mergetopus.gitlab-token`    | `GITLAB_TOKEN`                |
-| Bitbucket | `mergetopus.bitbucket-token` | `BITBUCKET_TOKEN`             |
+| Bitbucket | `mergetopus.bitbucket-token` | `BITBUCKET_TOKEN` (Data Center personal access token, sent as `Bearer`) |
 | Forgejo   | `mergetopus.forgejo-token`   | `FORGEJO_TOKEN` or `CODEBERG_TOKEN` |
 
 Example:

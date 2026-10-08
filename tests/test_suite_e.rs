@@ -559,7 +559,13 @@ fn status_reports_remote_only_merged_kokomeco_as_merged() -> TestResult<()> {
     add_remote(&repo, "origin", &bare)?;
     test_helpers::git(
         &repo,
-        &["push", "origin", kokomeco_branch(), integration_branch(), "main"],
+        &[
+            "push",
+            "origin",
+            kokomeco_branch(),
+            integration_branch(),
+            "main",
+        ],
     )?;
     test_helpers::git(&repo, &["branch", "-D", kokomeco_branch()])?;
 

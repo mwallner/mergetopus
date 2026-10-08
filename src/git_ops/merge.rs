@@ -50,12 +50,8 @@ pub fn merge_abort() -> Result<()> {
 /// was never captured. Returns an empty string when git is too old or the
 /// probe fails; callers then fall back to single-path grouping.
 pub fn merge_conflict_messages(commit_a: &str, commit_b: &str) -> Result<String> {
-    let (ok, stdout, _stderr) = run_git_allow_failure(&[
-        "merge-tree",
-        "--write-tree",
-        commit_a,
-        commit_b,
-    ])?;
+    let (ok, stdout, _stderr) =
+        run_git_allow_failure(&["merge-tree", "--write-tree", commit_a, commit_b])?;
     if !ok && stdout.is_empty() {
         return Ok(String::new());
     }
