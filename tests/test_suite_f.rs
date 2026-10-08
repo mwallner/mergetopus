@@ -19,6 +19,17 @@ fn slice_branch(n: usize) -> String {
     format!("_mmm/main/feature/slice{n}")
 }
 
+fn configured_copybase_cmd() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "type \"%BASE%\" > \"%MERGED%\""
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "cp \"$BASE\" \"$MERGED\""
+    }
+}
+
 fn assert_ok(result: &std::process::Output, ctx: &str) {
     assert!(
         result.status.success(),
@@ -345,7 +356,7 @@ fn resolve_content_conflicts_ignore_on_group() -> TestResult<()> {
         &[
             "config",
             "mergetool.copybase.cmd",
-            "cp \"$BASE\" \"$MERGED\"",
+            configured_copybase_cmd(),
         ],
     )?;
     test_helpers::git(&repo, &["config", "mergetool.trustExitCode", "true"])?;
