@@ -147,6 +147,117 @@ pub fn resolve_path_as_deleted(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Result of a contentless merge of two commits pinned to one explicit base.
+pub struct PinnedBaseMerge {
+    /// OID of the resulting tree.
+    pub tree: String,
+    /// Paths left unmerged by that single-base merge.
+    pub conflicts: BTreeSet<String>,
+}
+
+/// Run `git merge-tree --write-tree --merge-base=<base> <ours> <theirs>`:
+/// a full ort merge (rename detection included) against exactly one base,
+/// without touching index or worktree. Returns `None` when the git version
+/// lacks the support needed (unparsable output), so callers can fall back.
+pub fn merge_tree_with_base(
+    ours: &str,
+    theirs: &str,
+    base: &str,
+) -> Result<Option<PinnedBaseMerge>> {
+    let (ok, stdout, _stderr) = run_git_allow_failure(&[
+        "merge-tree",
+        "--write-tree",
+        &format!("--merge-base={base}"),
+        ours,
+        theirs,
+    ])?;
+    let _ = ok; // merge-tree exits 1 on conflicts; that is a valid answer
+    let mut lines = stdout.lines();
+    let Some(tree) = lines.next().map(str::trim) else {
+        return Ok(None);
+    };
+    if tree.is_empty() || tree.len() < 40 || !tree.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Old git: --merge-base unknown → usage error, no tree OID printed.
+        return Ok(None);
+    }
+
+    let mut conflicts = BTreeSet::new();
+    for line in lines {
+        // conflicted file info: "<mode> <oid> <stage>\t<path>"
+        let Some((meta, path)) = line.split_once('\t') else {
+            continue;
+        };
+        let unmerged = meta
+            .split_whitespace()
+            .nth(2)
+            .and_then(|s| s.parse::<u8>().ok())
+            .is_some_and(|stage| (1..=3).contains(&stage));
+        if unmerged {
+            conflicts.insert(path.to_string());
+        }
+    }
+    Ok(Some(PinnedBaseMerge {
+        tree: tree.to_string(),
+        conflicts,
+    }))
+}
+
+/// Blob entry `mode,oid` of `path` in a tree, or None when the tree lacks it.
+fn tree_entry(tree: &str, path: &str) -> Result<Option<(String, String)>> {
+    let (ok, out, _) = run_git_allow_failure(&["ls-tree", "--", tree, path])?;
+    if !ok || out.trim().is_empty() {
+        return Ok(None);
+    }
+    let Some((meta, _name)) = out.split_once('\t') else {
+        return Ok(None);
+    };
+    let mut parts = meta.split_whitespace();
+    let (Some(mode), Some("blob"), Some(oid)) = (parts.next(), parts.next(), parts.next()) else {
+        return Ok(None);
+    };
+    Ok(Some((mode.to_string(), oid.to_string())))
+}
+
+/// Re-evaluate the conflicted set against ONE concrete `chosen_base`.
+///
+/// With multiple merge bases (criss-cross) git's merge consults a *virtual*
+/// base built from all of them and can report conflicts that no single base
+/// would produce. The oracle is `git merge-tree --merge-base=<chosen_base>`:
+/// git's own conflict semantics (rename detection included, so correlated
+/// rename/rename or modify/delete conflicts survive) but pinned to the base
+/// Mergetopus anchors to. Paths the pinned merge resolves cleanly are
+/// materialized from its result tree exactly as that single-base merge would
+/// have left them; genuinely conflicting paths stay untouched.
+///
+/// Returns the remaining conflicts. Falls back to the unchanged input set
+/// when git is too old for the pinned merge-tree probe.
+pub fn deconflict_against_base(
+    conflicted: &[String],
+    chosen_base: &str,
+    ours_ref: &str,
+    theirs_ref: &str,
+) -> Result<Vec<String>> {
+    if conflicted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(pinned) = merge_tree_with_base(ours_ref, theirs_ref, chosen_base)? else {
+        return Ok(conflicted.to_vec());
+    };
+
+    let mut remaining = Vec::new();
+    for path in conflicted {
+        if pinned.conflicts.contains(path.as_str()) {
+            remaining.push(path.clone());
+            continue;
+        }
+        match tree_entry(&pinned.tree, path)? {
+            Some((mode, oid)) => write_stage_to_staged_path(&mode, &oid, path)?,
+            None => resolve_path_as_deleted(path)?,
+        }
+    }
+    Ok(remaining)
+}
+
 /// Parse unmerged index entries (`git ls-files -u`) into
 /// `path -> (stage -> blob)`. Stage 1 = base, 2 = ours, 3 = theirs.
 /// Each entry keeps its index mode so materialization can preserve the
@@ -630,10 +741,11 @@ pub fn select_conflicts_by_list(all_conflicts: &[String], csv: &str) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::{
-        conflict_stage_map, is_slice_branch_ref, list_all_slice_branches,
+        conflict_stage_map, deconflict_against_base, is_slice_branch_ref, list_all_slice_branches,
         list_slice_branches_for_integration, prepare_absent_side_file, restore_ours,
         write_blob_to_path, write_stage_to_staged_path,
     };
+    use super::{conflicted_files, merge_base};
     use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -693,6 +805,83 @@ mod tests {
         assert!(
             index_line.starts_with("120000 "),
             "symlink mode must be staged: {index_line}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deconflict_against_base_settles_virtual_base_artifacts() -> TestResult<()> {
+        let repo = test_helpers::init_repo()?;
+        test_helpers::write_file(&repo, "f.txt", "0\n")?;
+        test_helpers::commit_all(&repo, "A")?;
+        test_helpers::git(&repo, &["checkout", "-b", "b1"])?;
+        test_helpers::write_file(&repo, "f.txt", "1\n")?;
+        test_helpers::commit_all(&repo, "B1")?;
+        let b1 = test_helpers::git(&repo, &["rev-parse", "b1"])?;
+        test_helpers::git(&repo, &["checkout", "-b", "b2", "main"])?;
+        test_helpers::write_file(&repo, "f.txt", "2\n")?;
+        test_helpers::commit_all(&repo, "B2")?;
+        let b2 = test_helpers::git(&repo, &["rev-parse", "b2"])?;
+
+        // X merges B2 keeping f=1, Y merges B1 keeping f=2 → criss-cross.
+        test_helpers::git(&repo, &["checkout", "b1"])?;
+        test_helpers::git(&repo, &["merge", "--no-commit", b2.trim()]).ok();
+        test_helpers::write_file(&repo, "f.txt", "1\n")?;
+        test_helpers::git(&repo, &["add", "f.txt"])?;
+        test_helpers::git(&repo, &["commit", "-m", "X"])?;
+        let x = test_helpers::git(&repo, &["rev-parse", "b1"])?;
+        test_helpers::git(&repo, &["checkout", "b2"])?;
+        test_helpers::git(&repo, &["merge", "--no-commit", b1.trim()]).ok();
+        test_helpers::write_file(&repo, "f.txt", "2\n")?;
+        test_helpers::git(&repo, &["add", "f.txt"])?;
+        test_helpers::git(&repo, &["commit", "-m", "Y"])?;
+        let y = test_helpers::git(&repo, &["rev-parse", "b2"])?;
+
+        // Merging X and Y: git's virtual base conflicts f although any
+        // single base resolves it cleanly.
+        test_helpers::git(&repo, &["checkout", "b1"])?;
+        test_helpers::git(&repo, &["merge", "--no-ff", "--no-commit", y.trim()]).ok();
+        let raw = test_helpers::with_repo_cwd(&repo, conflicted_files)?;
+        assert!(
+            raw.contains(&"f.txt".to_string()),
+            "git must report f.txt: {raw:?}"
+        );
+
+        let default = test_helpers::with_repo_cwd(&repo, || merge_base(x.trim(), y.trim()))?;
+        let base_f = test_helpers::git(&repo, &["show", &format!("{}:f.txt", default.trim())])?;
+        let remaining = test_helpers::with_repo_cwd(&repo, || {
+            deconflict_against_base(&raw, default.trim(), x.trim(), y.trim())
+        })?;
+        assert!(
+            remaining.is_empty(),
+            "single-base conflict set: {remaining:?}"
+        );
+
+        // Expectation follows the chosen base: the side equal to it yields.
+        let expected = if base_f.trim() == "1" { "2" } else { "1" };
+        let content = std::fs::read_to_string(repo.join("f.txt"))?;
+        assert_eq!(content.trim(), expected);
+        let still = test_helpers::with_repo_cwd(&repo, conflicted_files)?;
+        assert!(still.is_empty(), "index settled: {still:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn deconflict_against_base_keeps_real_conflicts_on_single_base() -> TestResult<()> {
+        let repo = test_helpers::setup_single_conflict_repo()?;
+        test_helpers::git(&repo, &["merge", "--no-commit", "feature"]).ok();
+        let raw = test_helpers::with_repo_cwd(&repo, conflicted_files)?;
+        assert!(!raw.is_empty());
+
+        let head = test_helpers::git(&repo, &["rev-parse", "HEAD"])?;
+        let feature = test_helpers::git(&repo, &["rev-parse", "feature"])?;
+        let base = test_helpers::with_repo_cwd(&repo, || merge_base(head.trim(), feature.trim()))?;
+        let remaining = test_helpers::with_repo_cwd(&repo, || {
+            deconflict_against_base(&raw, base.trim(), head.trim(), feature.trim())
+        })?;
+        assert_eq!(
+            remaining, raw,
+            "a genuine two-sided conflict must survive deconfliction"
         );
         Ok(())
     }

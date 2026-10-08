@@ -105,13 +105,34 @@ pub fn here_command(
         git_ops::merge_no_commit(&source_sha)?
     };
 
-    let conflicted_now = git_ops::conflicted_files()?;
+    let raw_conflicts = git_ops::conflicted_files()?;
+    // Re-evaluate the conflicted set against the ONE chosen merge base; with
+    // multiple (criss-cross) bases git's virtual base can over-report, and
+    // those paths settle exactly as a single-base merge would resolve them.
+    let conflicted_now = git_ops::deconflict_against_base(
+        &raw_conflicts,
+        &merge_base,
+        &remembered_head,
+        &source_sha,
+    )?;
+    let merge_output = if conflicted_now.len() != raw_conflicts.len() {
+        planner::filter_conflict_lines(&merge_output, &conflicted_now)
+    } else {
+        merge_output
+    };
     let stage_map = git_ops::conflict_stage_map()?;
     let conflict_groups =
         planner::build_conflict_groups(&merge_output, &conflicted_now, &stage_map);
     for path in &conflicted_now {
         git_ops::restore_ours(path)?;
     }
+
+    // Slices only for paths that still conflict against the chosen base.
+    let still_conflicted: BTreeSet<&str> = conflicted_now.iter().map(String::as_str).collect();
+    let unresolved_before: Vec<String> = unresolved_before
+        .into_iter()
+        .filter(|p| still_conflicted.contains(p.as_str()))
+        .collect();
 
     apply_resolved_snapshots(&resolved_snapshots)?;
 

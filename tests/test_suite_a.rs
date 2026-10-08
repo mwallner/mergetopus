@@ -1570,11 +1570,41 @@ fn criss_cross_quiet_uses_default_merge_base_and_warns() -> TestResult<()> {
         "quiet mode must warn about multiple merge bases:\n{combined}"
     );
 
-    let slice_parent = test_helpers::git(&repo, &["rev-parse", "_mmm/b1/b2/slice1^1"])?;
+    // Against the single chosen base, f was modified by only ONE side
+    // (the other side equals the base), so the conflict is a virtual-base
+    // artifact: Mergetopus must settle it exactly as a single-base merge
+    // would and NOT create any slice for it.
+    let branches = test_helpers::git(&repo, &["branch", "--list", "_mmm/*"])?;
+    assert!(
+        branches.contains("integration"),
+        "integration branch should exist:\n{branches}"
+    );
+    assert!(
+        !branches.contains("slice"),
+        "no slice may be created for a path that auto-resolves against the chosen base:\n{branches}"
+    );
+
+    let integration = "_mmm/b1/b2/integration";
+    let f_ref = format!("{integration}:f.txt");
+    let f_content = test_helpers::git(&repo, &["show", &f_ref])?;
+    // ours X has f=1, theirs Y has f=2; base B1 has f=1, base B2 has f=2.
+    // The side matching the chosen base yields to the other side.
+    let expected_f = if default_base.trim() == b1.trim() {
+        "2"
+    } else {
+        "1"
+    };
     assert_eq!(
-        slice_parent.trim(),
-        default_base.trim(),
-        "slice branch must anchor at the default 'git merge-base' pick"
+        f_content.trim(),
+        expected_f,
+        "single-base resolution against {}",
+        default_base.trim()
+    );
+
+    // The settled path shows up as zero conflicts instead of one slice.
+    assert!(
+        combined.contains("Conflict count: 0"),
+        "virtual-base conflict must drop out of the conflict count:\n{combined}"
     );
     Ok(())
 }

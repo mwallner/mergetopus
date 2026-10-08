@@ -47,13 +47,34 @@ pub fn merge_abort() -> Result<()> {
 /// two commits without touching the index or worktree, via
 /// `git merge-tree --write-tree`. Used to recover conflict topology when
 /// resuming an already in-progress slice merge whose original merge output
-/// was never captured. Returns an empty string when git is too old or the
-/// probe fails; callers then fall back to single-path grouping.
-pub fn merge_conflict_messages(commit_a: &str, commit_b: &str) -> Result<String> {
-    let (ok, stdout, _stderr) =
-        run_git_allow_failure(&["merge-tree", "--write-tree", commit_a, commit_b])?;
-    if !ok && stdout.is_empty() {
-        return Ok(String::new());
+/// was never captured. When `chosen_base` is given, the merge is pinned to
+/// that single base (`--merge-base`, git >= 2.42) so the reconstruction
+/// agrees with Mergetopus's base decision instead of git's virtual base;
+/// falls back to git's own base selection on older versions. Returns an
+/// empty string when the probe fails; callers then fall back to single-path
+/// grouping.
+pub fn merge_conflict_messages(
+    commit_a: &str,
+    commit_b: &str,
+    chosen_base: Option<&str>,
+) -> Result<String> {
+    let run = |base_arg: Option<&String>| -> Result<(bool, String)> {
+        let mut args: Vec<&str> = vec!["merge-tree", "--write-tree"];
+        if let Some(b) = base_arg {
+            args.push(b);
+        }
+        args.push(commit_a);
+        args.push(commit_b);
+        let (ok, stdout, _stderr) = run_git_allow_failure(&args)?;
+        Ok((ok, stdout))
+    };
+
+    let pinned = chosen_base.map(|b| format!("--merge-base={b}"));
+    let (mut _ok, mut stdout) = run(pinned.as_ref())?;
+    if stdout.is_empty() && pinned.is_some() {
+        // Older git without --merge-base: retry with git's own base choice.
+        let (_, stdout2) = run(None)?;
+        stdout = stdout2;
     }
     let messages = stdout
         .lines()

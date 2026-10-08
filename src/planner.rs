@@ -147,6 +147,27 @@ pub fn parse_conflict_lines(merge_output: &str) -> Vec<ParsedConflict> {
     parsed
 }
 
+/// Drop `CONFLICT (...)` lines whose paths have all been settled (e.g. by
+/// re-evaluating the conflict set against a chosen merge base), so group
+/// building only sees conflicts that actually remain. Non-CONFLICT lines
+/// pass through untouched.
+pub fn filter_conflict_lines(merge_output: &str, remaining: &[String]) -> String {
+    let set: std::collections::BTreeSet<&str> = remaining.iter().map(String::as_str).collect();
+    merge_output
+        .lines()
+        .filter(|line| {
+            if !line.contains("CONFLICT") {
+                return true;
+            }
+            parse_conflict_lines(line)
+                .iter()
+                .any(|c| c.paths.iter().any(|p| set.contains(p.as_str())))
+        })
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Build logical conflict groups for all conflicted index paths. Paths named
 /// by a parsed rename/file-location line are joined into one group; every
 /// remaining conflicted path becomes its own single-path group.
@@ -1275,6 +1296,21 @@ mod tests {
         let leftovers = unassigned_paths(&conflicts, &explicit);
 
         assert_eq!(leftovers, vec!["z.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn filter_conflict_lines_drops_settled_conflicts() {
+        let out = "Auto-merging b.txt\nCONFLICT (rename/rename): src/a.txt renamed to m.txt in HEAD and to f.txt in feature.\nCONFLICT (content): Merge conflict in b.txt";
+        let remaining = vec!["b.txt".to_string()];
+        let filtered = filter_conflict_lines(out, &remaining);
+        assert!(
+            !filtered.contains("rename/rename"),
+            "settled rename group must be dropped:\n{filtered}"
+        );
+        assert!(
+            filtered.contains("content") && filtered.contains("Auto-merging b.txt"),
+            "lines for remaining paths and context must survive:\n{filtered}"
+        );
     }
 
     #[test]

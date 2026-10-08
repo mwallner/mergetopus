@@ -292,7 +292,16 @@ pub fn resolve_command(
     };
 
     let merge_base = super::select_merge_base(&local_commit, &remote_commit, quiet, tui_title)?;
-    let conflicted_paths = git_ops::conflicted_files()?;
+    let raw_conflicts = git_ops::conflicted_files()?;
+    // The merge itself consulted git's (possibly virtual) base selection;
+    // re-evaluate the conflict set against the single chosen base so paths
+    // that resolve cleanly relative to it never reach the conflict flow.
+    let conflicted_paths = git_ops::deconflict_against_base(
+        &raw_conflicts,
+        &merge_base,
+        &local_commit,
+        &remote_commit,
+    )?;
 
     // Group-aware resolution: correlated paths (rename/rename, rename/delete,
     // file location, modify/delete) get ONE decision across the whole group
@@ -302,8 +311,13 @@ pub fn resolve_command(
         // Resumed in-progress merge: the original CONFLICT lines are gone.
         // Reconstruct the topology from the two merge sides so group modes
         // keep handling rename/delete groups instead of treating every path
-        // as an ordinary content conflict.
-        merge_output = git_ops::merge_conflict_messages(&local_commit, &remote_commit)?;
+        // as an ordinary content conflict. Pinned to the chosen base so it
+        // agrees with the deconflicted set above.
+        merge_output =
+            git_ops::merge_conflict_messages(&local_commit, &remote_commit, Some(&merge_base))?;
+    }
+    if conflicted_paths.len() != raw_conflicts.len() {
+        merge_output = planner::filter_conflict_lines(&merge_output, &conflicted_paths);
     }
     let groups = planner::build_conflict_groups(&merge_output, &conflicted_paths, &stage_map);
     let mut settled: Vec<String> = Vec::new();

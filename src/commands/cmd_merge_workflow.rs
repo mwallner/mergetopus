@@ -227,7 +227,22 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         git_ops::merge_no_commit(&actual_source_ref)?
     };
 
-    let conflicted_files = git_ops::conflicted_files()?;
+    let raw_conflicts = git_ops::conflicted_files()?;
+    // git's merge consults a VIRTUAL base when the histories have multiple
+    // merge bases; Mergetopus anchors to one concrete base instead. Re-evaluate
+    // the conflict set against it so paths that a single-base merge would
+    // auto-resolve are settled here and never become slices.
+    let conflicted_files = git_ops::deconflict_against_base(
+        &raw_conflicts,
+        &actual_merge_base,
+        &actual_remembered_head,
+        &actual_source_sha,
+    )?;
+    let merge_output = if conflicted_files.len() != raw_conflicts.len() {
+        planner::filter_conflict_lines(&merge_output, &conflicted_files)
+    } else {
+        merge_output
+    };
 
     // Capture unmerged index stages BEFORE restore_ours resolves them away;
     // file-location conflicts need the staged blob to materialize slices.
@@ -441,6 +456,9 @@ pub fn select_conflicts(
     groups: &[ConflictGroup],
     tui_title: &str,
 ) -> Result<(Vec<Vec<String>>, UnassignedPolicy)> {
+    if all_conflicts.is_empty() {
+        return Ok((Vec::new(), args.unassigned));
+    }
     match args.select_paths.as_deref() {
         Some(csv) => {
             let paths = git_ops::select_conflicts_by_list(all_conflicts, csv)?;
