@@ -25,18 +25,27 @@ pub fn discard_command(
     let mut branches = git_ops::list_slice_branches_for_integration(&integration_branch)?;
     branches.insert(0, integration_branch.clone());
 
-    // Determine which branches exist locally and/or on remote tracking refs.
-    let mut branch_info: Vec<(String, bool, bool)> = Vec::new();
+    // Determine which branches exist locally and on which remotes (by
+    // parsing the actual tracking refs, so deletion targets the matching
+    // remote instead of a guessed first one).
+    let mut branch_info: Vec<(String, bool, Vec<String>)> = Vec::new();
     for branch in &branches {
         let local = git_ops::branch_exists(branch)?;
-        let remote_refs = git_ops::remote_refs_for_local_branch(branch)?;
-        let on_remote = !remote_refs.is_empty();
-        branch_info.push((branch.clone(), local, on_remote));
+        let mut remotes = Vec::new();
+        for tracked_ref in git_ops::remote_refs_for_local_branch(branch)? {
+            let Some((remote, rest)) = tracked_ref.split_once('/') else {
+                continue;
+            };
+            if rest == *branch {
+                remotes.push(remote.to_string());
+            }
+        }
+        branch_info.push((branch.clone(), local, remotes));
     }
 
     if branch_info
         .iter()
-        .all(|(_, local, on_remote)| !local && !on_remote)
+        .all(|(_, local, remotes)| !local && remotes.is_empty())
     {
         color::print_warning(
             &format!("No branches found for workflow '{integration_branch}'"),
@@ -47,13 +56,13 @@ pub fn discard_command(
 
     let display: Vec<String> = branch_info
         .iter()
-        .map(|(name, local, on_remote)| {
+        .map(|(name, local, remotes)| {
             let mut tags = Vec::new();
             if *local {
-                tags.push("local");
+                tags.push("local".to_string());
             }
-            if *on_remote {
-                tags.push("remote");
+            for remote in remotes {
+                tags.push(format!("remote:{remote}"));
             }
             format!("{name}  ({})", tags.join(", "))
         })
@@ -83,7 +92,7 @@ pub fn discard_command(
     let mut deleted_local = 0usize;
     let mut deleted_remote = 0usize;
 
-    for (name, local, _on_remote) in &branch_info {
+    for (name, local, _remotes) in &branch_info {
         if *local {
             if name == current_branch {
                 color::print_error(
@@ -98,10 +107,9 @@ pub fn discard_command(
         }
     }
 
-    let remote_names = git_ops::list_remote_names()?;
-    let has_remote_branches = branch_info.iter().any(|(_, _, on_remote)| *on_remote);
+    let has_remote_branches = branch_info.iter().any(|(_, _, remotes)| !remotes.is_empty());
 
-    if has_remote_branches && !remote_names.is_empty() {
+    if has_remote_branches {
         let do_remote = if yes {
             true
         } else if quiet {
@@ -112,17 +120,9 @@ pub fn discard_command(
         };
 
         if do_remote {
-            let remote = match remote_names.first() {
-                Some(r) => r.clone(),
-                None => {
-                    color::print_warning("  No remotes configured.", None);
-                    return Ok(());
-                }
-            };
-
-            for (name, _local, on_remote) in &branch_info {
-                if *on_remote {
-                    match git_ops::run_git(&["push", "--delete", &remote, name]) {
+            for (name, _local, remotes) in &branch_info {
+                for remote in remotes {
+                    match git_ops::run_git(&["push", remote, "--delete", name]) {
                         Ok(_) => {
                             color::print_success(
                                 &format!("Deleted remote ({remote}): {name}"),

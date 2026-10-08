@@ -270,6 +270,39 @@ fn resolve_quiet_theirs_applies_the_slice_rename() -> TestResult<()> {
     Ok(())
 }
 
+/// Resuming an in-progress slice merge must still settle rename groups:
+/// the original CONFLICT lines are unavailable, so resolve reconstructs the
+/// topology from the merge sides instead of treating every path as content.
+#[test]
+fn resolve_reconstructs_topology_when_resuming_merge() -> TestResult<()> {
+    let repo = test_helpers::init_repo()?;
+    setup_rename_rename_workflow(&repo)?;
+
+    test_helpers::git(&repo, &["checkout", integration_branch()])?;
+    test_helpers::git(&repo, &["merge", "--no-commit", &slice_branch(1)]).ok();
+    assert!(
+        test_helpers::git(&repo, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok(),
+        "expected an in-progress merge to resume"
+    );
+
+    let resolve =
+        test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice_branch(1), "--commit"])?;
+    assert_ok(&resolve, "resumed quiet resolve (default theirs)");
+    let stdout = String::from_utf8_lossy(&resolve.stdout);
+    assert!(
+        stdout.contains("Settled") && stdout.contains("rename/rename"),
+        "group must be settled via reconstructed topology, not a merge tool:\n{stdout}"
+    );
+
+    let integration = tree_paths(&repo, integration_branch())?;
+    assert!(integration.iter().any(|p| p == "renamed_feature.txt"));
+    assert!(
+        !integration.iter().any(|p| p == "src/a.txt"),
+        "old path must be gone:\n{integration:?}",
+    );
+    Ok(())
+}
+
 #[test]
 fn resolve_on_group_both_keeps_all_names() -> TestResult<()> {
     let repo = test_helpers::init_repo()?;

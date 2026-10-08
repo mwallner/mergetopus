@@ -89,7 +89,7 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     if let Some(Commands::Consolidate { source }) = &args.command {
-        let (current_branch, _) = current_branch_and_tui_title_worktree()?;
+        let (current_branch, _) = current_branch_and_tui_title_clean_context()?;
         return cmd_consolidate::consolidate_command(
             source.as_deref(),
             args.quiet,

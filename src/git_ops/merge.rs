@@ -43,6 +43,30 @@ pub fn merge_abort() -> Result<()> {
     run_git(&["merge", "--abort"]).map(|_| ())
 }
 
+/// Reconstruct the `CONFLICT (...)` description lines for a merge between
+/// two commits without touching the index or worktree, via
+/// `git merge-tree --write-tree`. Used to recover conflict topology when
+/// resuming an already in-progress slice merge whose original merge output
+/// was never captured. Returns an empty string when git is too old or the
+/// probe fails; callers then fall back to single-path grouping.
+pub fn merge_conflict_messages(commit_a: &str, commit_b: &str) -> Result<String> {
+    let (ok, stdout, _stderr) = run_git_allow_failure(&[
+        "merge-tree",
+        "--write-tree",
+        commit_a,
+        commit_b,
+    ])?;
+    if !ok && stdout.is_empty() {
+        return Ok(String::new());
+    }
+    let messages = stdout
+        .lines()
+        .filter(|l| l.starts_with("CONFLICT"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(messages)
+}
+
 pub fn merge_base(a: &str, b: &str) -> Result<String> {
     run_git(&["merge-base", a, b])
 }

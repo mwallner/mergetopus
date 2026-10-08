@@ -298,6 +298,13 @@ pub fn resolve_command(
     // file location, modify/delete) get ONE decision across the whole group
     // instead of a tool invocation per unrelated index path.
     let stage_map = git_ops::conflict_stage_map()?;
+    if merge_output.is_empty() && !conflicted_paths.is_empty() {
+        // Resumed in-progress merge: the original CONFLICT lines are gone.
+        // Reconstruct the topology from the two merge sides so group modes
+        // keep handling rename/delete groups instead of treating every path
+        // as an ordinary content conflict.
+        merge_output = git_ops::merge_conflict_messages(&local_commit, &remote_commit)?;
+    }
     let groups = planner::build_conflict_groups(&merge_output, &conflicted_paths, &stage_map);
     let mut settled: Vec<String> = Vec::new();
 
