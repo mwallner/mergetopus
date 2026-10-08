@@ -15,6 +15,16 @@ pub fn cleanup_command(
     tui_title: &str,
 ) -> Result<()> {
     let all_local = git_ops::list_local_branches()?;
+    // Preload the ref inventory once; the original loop spent 1-2
+    // subprocesses per branch (and per slice on Separate-policy runs).
+    let local_set: std::collections::BTreeSet<&str> =
+        all_local.iter().map(String::as_str).collect();
+    let remote_refs = git_ops::list_remote_refs()?;
+    let all_ref_names: Vec<&str> = all_local
+        .iter()
+        .map(String::as_str)
+        .chain(remote_refs.iter().map(String::as_str))
+        .collect();
 
     let mut branches_to_delete: Vec<String> = Vec::new();
 
@@ -24,15 +34,18 @@ pub fn cleanup_command(
         }
 
         let kokomeco = git_ops::consolidated_branch_name(branch);
-        if !git_ops::branch_exists_anywhere(&kokomeco)? {
+        let suffix = format!("/{kokomeco}");
+        let kokomeco_present = local_set.contains(kokomeco.as_str())
+            || remote_refs.iter().any(|r| r.ends_with(&suffix));
+        if !kokomeco_present {
             continue;
         }
 
         branches_to_delete.push(branch.clone());
 
-        let slices = git_ops::list_slice_branches_for_integration(branch)?;
+        let slices = git_ops::slice_branch_names_from_refs(all_ref_names.iter().copied(), branch);
         for slice in slices {
-            if git_ops::branch_exists(&slice)? {
+            if local_set.contains(slice.as_str()) {
                 branches_to_delete.push(slice);
             }
         }

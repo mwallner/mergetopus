@@ -27,13 +27,20 @@ pub fn discard_command(
 
     // Determine which branches exist locally and on which remotes (by
     // parsing the actual tracking refs, so deletion targets the matching
-    // remote instead of a guessed first one).
+    // remote instead of a guessed first one). Ref inventory is loaded
+    // once; per-branch probing costs 2 subprocesses each on large runs.
+    let locals: std::collections::BTreeSet<String> =
+        git_ops::list_local_branches()?.into_iter().collect();
+    let all_remote_refs = git_ops::list_remote_refs()?;
+    let remote_names = git_ops::list_remote_names()?;
     let mut branch_info: Vec<(String, bool, Vec<String>)> = Vec::new();
     for branch in &branches {
-        let local = git_ops::branch_exists(branch)?;
+        let local = locals.contains(branch);
         let mut remotes = Vec::new();
-        for tracked_ref in git_ops::remote_refs_for_local_branch(branch)? {
-            if let Some(remote) = git_ops::remote_for_tracking_ref(&tracked_ref, branch)?
+        let suffix = format!("/{branch}");
+        for tracked_ref in all_remote_refs.iter().filter(|r| r.ends_with(&suffix)) {
+            if let Some(remote) =
+                git_ops::remote_for_tracking_ref_with(&remote_names, tracked_ref, branch)
                 && !remotes.contains(&remote)
             {
                 remotes.push(remote);

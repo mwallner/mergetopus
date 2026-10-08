@@ -60,6 +60,69 @@ pub fn local_branch_name_from_remote_ref(reference: &str) -> Option<String> {
     Some(tail.to_string())
 }
 
+/// All remote-tracking short names (excluding `origin/HEAD`), sorted.
+pub fn list_remote_refs() -> Result<Vec<String>> {
+    let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/remotes"])?;
+    let mut refs = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    refs.sort();
+    Ok(refs)
+}
+
+/// Pure slice enumeration over preloaded ref names; mirrors
+/// `list_slice_branches_for_integration_in`'s mapping/prefix rules.
+pub fn slice_branch_names_from_refs<'a>(
+    names: impl Iterator<Item = &'a str>,
+    integration_branch: &str,
+) -> Vec<String> {
+    let Some(base) = integration_branch.strip_suffix("/integration") else {
+        return Vec::new();
+    };
+    let prefix = format!("{base}/slice");
+    let mut slices = names
+        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .filter_map(|l| {
+            if l.starts_with(&prefix) {
+                Some(l.to_string())
+            } else if let Some(local) = local_branch_name_from_remote_ref(l) {
+                if local.starts_with(&prefix) {
+                    Some(local)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    slices.sort();
+    slices.dedup();
+    slices
+}
+
+/// Pure remote lookup; see `remote_for_tracking_ref`.
+pub fn remote_for_tracking_ref_with(
+    remotes: &[String],
+    tracked_ref: &str,
+    branch: &str,
+) -> Option<String> {
+    let mut sorted: Vec<&String> = remotes.iter().collect();
+    sorted.sort_by_key(|r| std::cmp::Reverse(r.len()));
+    for remote in sorted {
+        if tracked_ref == format!("{remote}/{branch}") {
+            return Some(remote.clone());
+        }
+    }
+    tracked_ref
+        .split_once('/')
+        .filter(|(head, rest)| !head.is_empty() && *rest == branch)
+        .map(|(head, _)| head.to_string())
+}
+
 pub fn remote_refs_for_local_branch(local_branch: &str) -> Result<Vec<String>> {
     let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/remotes"])?;
     let suffix = format!("/{local_branch}");
@@ -207,17 +270,8 @@ pub fn list_remote_names() -> Result<Vec<String>> {
 /// that themselves contain slashes (e.g. `foo/bar`) resolve correctly;
 /// falls back to the first path segment for conventional layouts.
 pub fn remote_for_tracking_ref(tracked_ref: &str, branch: &str) -> Result<Option<String>> {
-    let mut remotes = list_remote_names()?;
-    remotes.sort_by_key(|r| std::cmp::Reverse(r.len()));
-    for remote in &remotes {
-        if tracked_ref == format!("{remote}/{branch}") {
-            return Ok(Some(remote.clone()));
-        }
-    }
-    Ok(tracked_ref
-        .split_once('/')
-        .filter(|(head, rest)| !head.is_empty() && *rest == branch)
-        .map(|(head, _)| head.to_string()))
+    let remotes = list_remote_names()?;
+    Ok(remote_for_tracking_ref_with(&remotes, tracked_ref, branch))
 }
 
 /// Linked-worktree snapshot for batch branch deletions: probing
