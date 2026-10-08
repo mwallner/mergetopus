@@ -532,3 +532,60 @@ fn discard_skips_current_branch() -> TestResult<()> {
 
     Ok(())
 }
+
+/// Remote-only kokomeco that is already contained in the target must be
+/// reported as merged by both the global overview and per-integration
+/// status (ancestry must be probed via resolved local/remote refs, not a
+/// nonexistent local branch name).
+#[test]
+fn status_reports_remote_only_merged_kokomeco_as_merged() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+    let out = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        out.status.success(),
+        "mergetopus setup failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Simulate a completed consolidation: kokomeco at the integration tip.
+    test_helpers::git(&repo, &["branch", kokomeco_branch(), integration_branch()])?;
+
+    // The target already contains that commit.
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    test_helpers::git(&repo, &["merge", "--no-edit", kokomeco_branch()])?;
+
+    // Publish to a bare remote, then remove the local kokomeco branch.
+    let bare = create_bare_remote("origin")?;
+    add_remote(&repo, "origin", &bare)?;
+    test_helpers::git(
+        &repo,
+        &["push", "origin", kokomeco_branch(), integration_branch(), "main"],
+    )?;
+    test_helpers::git(&repo, &["branch", "-D", kokomeco_branch()])?;
+
+    let global = test_helpers::mergetopus(&repo, &["--quiet", "status"])?;
+    assert!(
+        global.status.success(),
+        "global status failed:\n{}",
+        String::from_utf8_lossy(&global.stderr)
+    );
+    let g = String::from_utf8_lossy(&global.stdout);
+    assert!(
+        g.contains("Merged") && !g.contains("Unmerged") && !g.contains("Present?"),
+        "remote-only merged kokomeco must show Merged:\n{g}"
+    );
+
+    let detail = test_helpers::mergetopus(&repo, &["--quiet", "status", "feature"])?;
+    assert!(
+        detail.status.success(),
+        "detail status failed:\n{}",
+        String::from_utf8_lossy(&detail.stderr)
+    );
+    let d = String::from_utf8_lossy(&detail.stdout);
+    assert!(
+        d.contains("Merged into target:   Yes"),
+        "per-integration status must see the remote-only kokomeco as merged:\n{d}"
+    );
+
+    Ok(())
+}

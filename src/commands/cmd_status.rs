@@ -166,8 +166,16 @@ fn build_status_unit(integration_branch: &str) -> Result<StatusUnit> {
     let kokomeco_present = git_ops::branch_exists_anywhere(&kokomeco)?;
     let kokomeco_merged = if kokomeco_present && target != "(unknown)" {
         // Check whether the kokomeco branch has been merged into its target branch.
-        // is_ancestor may fail if the target ref is missing — treat that as "unable to determine".
-        git_ops::is_ancestor(&kokomeco, &target).ok()
+        // Resolve both names to available local/remote refs first: a remote-only
+        // kokomeco (or target) would otherwise probe a nonexistent local name
+        // and read as "not merged". is_ancestor may still fail if a ref is
+        // missing — treat that as "unable to determine".
+        let kokomeco_ref = git_ops::best_ref_for_local_branch(&kokomeco)?;
+        let target_ref = git_ops::best_ref_for_local_branch(&target)?;
+        match (kokomeco_ref, target_ref) {
+            (Some(k), Some(t)) => git_ops::is_ancestor(&k, &t).ok(),
+            _ => None,
+        }
     } else {
         None
     };
@@ -359,8 +367,12 @@ fn print_integration_status(
         let merge_target = expected_target.as_deref().unwrap_or(current_branch);
         let kokomeco_ref =
             git_ops::best_ref_for_local_branch(&kokomeco)?.unwrap_or_else(|| kokomeco.clone());
+        let target_ref = git_ops::best_ref_for_local_branch(merge_target)?
+            .unwrap_or_else(|| merge_target.to_string());
 
-        let merged_into_target = git_ops::is_ancestor(&kokomeco, merge_target).ok();
+        // Probe the resolved refs so a remote-only kokomeco that is already
+        // contained in the target is correctly reported as merged.
+        let merged_into_target = git_ops::is_ancestor(&kokomeco_ref, &target_ref).ok();
 
         println!("Mergetopus status");
         println!("  Integration branch:  {integration_branch}");
