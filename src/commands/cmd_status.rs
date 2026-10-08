@@ -128,9 +128,10 @@ fn discover_global_mmm_units() -> Result<GlobalDiscovery> {
         }
     }
 
+    let snap = RefSnapshot::load()?;
     let mut units = Vec::new();
     for integration in integration_names {
-        units.push(build_status_unit(&integration)?);
+        units.push(build_status_unit(&integration, &snap)?);
     }
     units.sort_by(|a, b| a.integration.cmp(&b.integration));
 
@@ -152,25 +153,155 @@ fn canonicalize_branch_ref(reference: &str, remote_names: &[String]) -> String {
     reference.to_string()
 }
 
-fn build_status_unit(integration_branch: &str) -> Result<StatusUnit> {
+/// One snapshot of all branch refs (local + remote-tracking) with tip OIDs.
+/// The per-integration-branch status computations used to re-probe
+/// for-each-ref/show-ref several times each; with hundreds of slice
+/// branches one shared load suffices.
+pub struct RefSnapshot {
+    locals: std::collections::BTreeSet<String>,
+    remote_shorts: std::collections::BTreeSet<String>,
+    tips: std::collections::BTreeMap<String, String>,
+}
+
+impl RefSnapshot {
+    fn load() -> Result<Self> {
+        let out = git_ops::run_git(&[
+            "for-each-ref",
+            "--format=%(refname)%09%(refname:short)%09%(objectname)",
+            "refs/heads",
+            "refs/remotes",
+        ])?;
+        let mut locals = std::collections::BTreeSet::new();
+        let mut remote_shorts = std::collections::BTreeSet::new();
+        // (name candidates in refspec order) for tip preference below
+        let mut tip_candidates: std::collections::BTreeMap<String, Vec<(bool, String, String)>> =
+            std::collections::BTreeMap::new();
+
+        for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let mut cols = line.split('\t');
+            let (Some(full), Some(short), Some(oid)) = (cols.next(), cols.next(), cols.next())
+            else {
+                continue;
+            };
+            if full.starts_with("refs/heads/") {
+                locals.insert(short.to_string());
+                tip_candidates.entry(short.to_string()).or_default().push((
+                    true,
+                    String::new(),
+                    oid.to_string(),
+                ));
+            } else if full.starts_with("refs/remotes/") {
+                if short == "origin/HEAD" {
+                    continue;
+                }
+                remote_shorts.insert(short.to_string());
+                if let Some(local) = git_ops::local_branch_name_from_remote_ref(short) {
+                    tip_candidates.entry(local).or_default().push((
+                        false,
+                        short.to_string(),
+                        oid.to_string(),
+                    ));
+                }
+            }
+        }
+
+        // best_ref_for_local_branch preference: local > an "origin/..."
+        // remote > first (sorted) remote-tracking ref.
+        let mut tips = std::collections::BTreeMap::new();
+        for (name, mut cands) in tip_candidates {
+            cands.sort_by(|a, b| {
+                b.0.cmp(&a.0)
+                    .then_with(|| b.1.starts_with("origin/").cmp(&a.1.starts_with("origin/")))
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            if let Some((_, _, oid)) = cands.first() {
+                tips.insert(name, oid.clone());
+            }
+        }
+
+        Ok(RefSnapshot {
+            locals,
+            remote_shorts,
+            tips,
+        })
+    }
+
+    /// Mirrors `git_ops::best_ref_for_local_branch` without a subprocess.
+    fn best_ref(&self, name: &str) -> Option<String> {
+        if self.locals.contains(name) {
+            return Some(name.to_string());
+        }
+        let suffix = format!("/{name}");
+        let mut refs: Vec<&String> = self
+            .remote_shorts
+            .iter()
+            .filter(|r| r.ends_with(&suffix))
+            .collect();
+        refs.sort();
+        refs.iter()
+            .find(|r| r.starts_with("origin/"))
+            .or_else(|| refs.first())
+            .map(|r| (*r).clone())
+    }
+
+    /// Mirrors `git_ops::branch_exists_anywhere` without a subprocess.
+    fn exists_anywhere(&self, name: &str) -> bool {
+        self.locals.contains(name) || {
+            let suffix = format!("/{name}");
+            self.remote_shorts.iter().any(|r| r.ends_with(&suffix))
+        }
+    }
+
+    /// Mirrors `git_ops::list_slice_branches_for_integration` without a
+    /// subprocess.
+    fn slices_for(&self, integration_branch: &str) -> Vec<String> {
+        let Some(base) = integration_branch.strip_suffix("/integration") else {
+            return Vec::new();
+        };
+        let prefix = format!("{base}/slice");
+        let mut names: Vec<String> = Vec::new();
+        for local in &self.locals {
+            if local.starts_with(&prefix) {
+                names.push(local.clone());
+            }
+        }
+        for short in &self.remote_shorts {
+            if let Some(local) = git_ops::local_branch_name_from_remote_ref(short)
+                && local.starts_with(&prefix)
+            {
+                names.push(local);
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn tip_oid(&self, name: &str) -> Option<&str> {
+        self.tips.get(name).map(String::as_str)
+    }
+}
+
+fn build_status_unit(integration_branch: &str, snap: &RefSnapshot) -> Result<StatusUnit> {
     let (target, source) = planner::parse_integration_branch(integration_branch)
         .unwrap_or_else(|| ("(unknown)".to_string(), "(unknown)".to_string()));
-    let integration_ref = git_ops::best_ref_for_local_branch(integration_branch)?
+    let integration_ref = snap
+        .best_ref(integration_branch)
         .unwrap_or_else(|| integration_branch.to_string());
-    let slices = git_ops::list_slice_branches_for_integration(integration_branch)?;
+    let slices = snap.slices_for(integration_branch);
     let status = git_ops::slice_merge_status(&integration_ref, &slices)?;
     let resolved = status.values().filter(|v| **v).count();
     let pending = status.values().filter(|v| !**v).count();
     let kokomeco = git_ops::consolidated_branch_name(integration_branch);
-    let kokomeco_present = git_ops::branch_exists_anywhere(&kokomeco)?;
+    let kokomeco_present = snap.exists_anywhere(&kokomeco);
     let kokomeco_merged = if kokomeco_present && target != "(unknown)" {
         // Check whether the kokomeco branch has been merged into its target branch.
         // Resolve both names to available local/remote refs first: a remote-only
         // kokomeco (or target) would otherwise probe a nonexistent local name
         // and read as "not merged". is_ancestor may still fail if a ref is
         // missing — treat that as "unable to determine".
-        let kokomeco_ref = git_ops::best_ref_for_local_branch(&kokomeco)?;
-        let target_ref = git_ops::best_ref_for_local_branch(&target)?;
+        let kokomeco_ref = snap.best_ref(&kokomeco);
+        let target_ref = snap.best_ref(&target);
         match (kokomeco_ref, target_ref) {
             (Some(k), Some(t)) => git_ops::is_ancestor(&k, &t).ok(),
             _ => None,
@@ -308,7 +439,9 @@ fn print_integration_status(
     current_branch: &str,
     tui_title: &str,
 ) -> Result<()> {
-    let integration_ref = git_ops::best_ref_for_local_branch(integration_branch)?
+    let snap = RefSnapshot::load()?;
+    let integration_ref = snap
+        .best_ref(integration_branch)
         .unwrap_or_else(|| integration_branch.to_string());
 
     // If a kokomeco consolidated branch already exists for this integration
@@ -413,7 +546,7 @@ fn print_integration_status(
     let source_ref =
         parse_partial_merge_source_ref(&initial_message).unwrap_or_else(|| "(unknown)".to_string());
 
-    let slices = git_ops::list_slice_branches_for_integration(&integration_branch)?;
+    let slices = snap.slices_for(integration_branch);
     let status = git_ops::slice_merge_status(&integration_ref, &slices)?;
 
     let merged = status.values().filter(|v| **v).count();
@@ -437,16 +570,34 @@ fn print_integration_status(
 
     if pending > 0 {
         println!("\nPending slice details:");
+        // Batch tip messages for all pending slices in one cat-file walk
+        // instead of a `git log -1` subprocess per slice.
+        let mut pending_slices: Vec<(&String, String, Option<String>)> = Vec::new();
         for slice in &slices {
             let is_merged = status.get(slice).copied().unwrap_or(false);
             if is_merged {
                 continue;
             }
-
-            let slice_ref =
-                git_ops::best_ref_for_local_branch(slice)?.unwrap_or_else(|| slice.to_string());
-
-            let tip_msg = git_ops::branch_tip_commit_message(&slice_ref)?;
+            let slice_ref = snap.best_ref(slice).unwrap_or_else(|| slice.to_string());
+            let oid = snap.tip_oid(slice).map(str::to_string);
+            pending_slices.push((slice, slice_ref, oid));
+        }
+        let oids: Vec<String> = {
+            let mut v: Vec<String> = pending_slices
+                .iter()
+                .filter_map(|(_, _, oid)| oid.clone())
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let messages = git_ops::commit_messages_batch(&oids)?;
+        for (slice, slice_ref, oid) in &pending_slices {
+            let slice = slice.as_str();
+            let tip_msg = match oid {
+                Some(o) => messages.get(o).cloned().unwrap_or_default(),
+                None => git_ops::branch_tip_commit_message(slice_ref)?,
+            };
             let mut paths = extract_slice_paths(&tip_msg);
             let resolve_tip = tip_msg
                 .lines()
@@ -454,7 +605,7 @@ fn print_integration_status(
                 .unwrap_or("")
                 .contains("Mergetopus resolve:");
             if paths.is_empty() && resolve_tip {
-                let parent = git_ops::parent_sha(&slice_ref)?;
+                let parent = git_ops::parent_sha(slice_ref)?;
                 let parent_msg = git_ops::commit_message(&parent)?;
                 paths = extract_slice_paths(&parent_msg);
             }

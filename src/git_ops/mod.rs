@@ -351,6 +351,66 @@ pub fn write_blobs_batch(requests: &[(String, String, String)]) -> Result<BTreeM
     Ok(present)
 }
 
+/// Full commit messages for many OIDs from ONE `git cat-file --batch`
+/// process, keyed by oid. Commit message = object bytes after the header.
+pub fn commit_messages_batch(oids: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    if oids.is_empty() {
+        return Ok(out);
+    }
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to spawn git cat-file --batch")?;
+    let result = (|| -> Result<()> {
+        let mut stdin = child.stdin.take().context("cat-file stdin")?;
+        let stdout = child.stdout.take().context("cat-file stdout")?;
+        let mut reader = std::io::BufReader::new(stdout);
+        for oid in oids {
+            writeln!(stdin, "{oid}")
+                .and_then(|()| stdin.flush())
+                .with_context(|| format!("failed to feed cat-file commit spec '{oid}'"))?;
+            let mut header = String::new();
+            let n = reader.read_line(&mut header).context("cat-file header")?;
+            if n == 0 {
+                bail!("git cat-file --batch terminated early");
+            }
+            let trimmed = header.trim_end_matches('\n');
+            let parts: Vec<&str> = trimmed.split(' ').collect();
+            if trimmed.ends_with(" missing") {
+                out.insert(oid.clone(), String::new());
+                continue;
+            }
+            if !(parts.len() == 3 && parts[1] == "commit") {
+                bail!("unexpected cat-file response for '{oid}': {trimmed}");
+            }
+            let size: usize = parts[2]
+                .parse()
+                .with_context(|| format!("bad cat-file size header: {trimmed}"))?;
+            let mut buf = vec![0u8; size];
+            std::io::Read::read_exact(&mut reader, &mut buf)
+                .context("failed reading cat-file commit bytes")?;
+            let mut newline = [0u8; 1];
+            std::io::Read::read_exact(&mut reader, &mut newline)
+                .context("failed reading cat-file terminator")?;
+            let object = String::from_utf8_lossy(&buf).into_owned();
+            let message = match object.split_once("\n\n") {
+                Some((_headers, msg)) => msg,
+                None => "",
+            };
+            out.insert(oid.clone(), message.to_string());
+        }
+        Ok(())
+    })();
+    drop(child.stdin.take());
+    let _ = child.kill();
+    let _ = child.wait();
+    result?;
+    Ok(out)
+}
+
 /// `git add` many paths in one invocation (stdin pathspec list where the
 /// git version supports it).
 pub fn stage_paths_batch(paths: &[String]) -> Result<()> {
