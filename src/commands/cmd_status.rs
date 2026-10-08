@@ -1,6 +1,5 @@
 use anyhow::{Result, bail};
 use mergetopus::color;
-use std::collections::BTreeMap;
 
 use crate::helpers;
 use crate::tui;
@@ -159,7 +158,7 @@ fn build_status_unit(integration_branch: &str) -> Result<StatusUnit> {
     let integration_ref = git_ops::best_ref_for_local_branch(integration_branch)?
         .unwrap_or_else(|| integration_branch.to_string());
     let slices = git_ops::list_slice_branches_for_integration(integration_branch)?;
-    let status = slice_merge_status(&integration_ref, &slices)?;
+    let status = git_ops::slice_merge_status(&integration_ref, &slices)?;
     let resolved = status.values().filter(|v| **v).count();
     let pending = status.values().filter(|v| !**v).count();
     let kokomeco = git_ops::consolidated_branch_name(integration_branch);
@@ -302,21 +301,6 @@ fn integration_from_kokomeco_branch(branch: &str) -> Option<String> {
     None
 }
 
-fn slice_merge_status(
-    integration_ref: &str,
-    slice_branches: &[String],
-) -> Result<BTreeMap<String, bool>> {
-    let mut result = BTreeMap::new();
-    for slice in slice_branches {
-        let probe_ref = git_ops::best_ref_for_local_branch(slice)?.unwrap_or_else(|| slice.clone());
-        result.insert(
-            slice.clone(),
-            git_ops::is_ancestor(&probe_ref, integration_ref)?,
-        );
-    }
-    Ok(result)
-}
-
 fn print_integration_status(
     integration_branch: &str,
     show_prs: bool,
@@ -430,7 +414,7 @@ fn print_integration_status(
         parse_partial_merge_source_ref(&initial_message).unwrap_or_else(|| "(unknown)".to_string());
 
     let slices = git_ops::list_slice_branches_for_integration(&integration_branch)?;
-    let status = slice_merge_status(&integration_ref, &slices)?;
+    let status = git_ops::slice_merge_status(&integration_ref, &slices)?;
 
     let merged = status.values().filter(|v| **v).count();
     let pending = status.values().filter(|v| !**v).count();

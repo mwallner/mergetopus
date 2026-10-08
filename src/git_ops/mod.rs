@@ -484,14 +484,64 @@ pub fn is_ancestor(older: &str, newer: &str) -> Result<bool> {
     Ok(ok)
 }
 
+/// Names reachable from `merged_into`, split by where they live: local
+/// branch tips and remote-tracking tips (mapped to local names). One
+/// `git branch --merged` pair replaces a `merge-base --is-ancestor` probe
+/// per branch on repos with hundreds of slice branches. Unresolvable
+/// `merged_into` yields empty sets (everything "not merged"), matching the
+/// per-probe fallback behavior instead of erroring.
+pub fn merged_branch_sets(merged_into: &str) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    let mut locals = BTreeSet::new();
+    let mut remotes = BTreeSet::new();
+    let (ok, out, _) = run_git_allow_failure(&[
+        "branch",
+        "--merged",
+        merged_into,
+        "--format=%(refname:short)",
+    ])?;
+    if ok {
+        for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            locals.insert(line.to_string());
+        }
+    }
+    let (ok, out, _) = run_git_allow_failure(&[
+        "branch",
+        "-r",
+        "--merged",
+        merged_into,
+        "--format=%(refname:short)",
+    ])?;
+    if ok {
+        for line in out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        {
+            if let Some(local) = local_branch_name_from_remote_ref(line) {
+                remotes.insert(local);
+            }
+        }
+    }
+    Ok((locals, remotes))
+}
+
 pub fn slice_merge_status(
     integration_branch: &str,
     slice_branches: &[String],
 ) -> Result<BTreeMap<String, bool>> {
+    let (merged_local, merged_remote) = merged_branch_sets(integration_branch)?;
+    let all_local = list_local_branches()?;
     let mut result = BTreeMap::new();
     for slice in slice_branches {
-        let probe_ref = best_ref_for_local_branch(slice)?.unwrap_or_else(|| slice.clone());
-        result.insert(slice.clone(), is_ancestor(&probe_ref, integration_branch)?);
+        // Mirror `best_ref_for_local_branch`'s preference: a local branch is
+        // judged by its local tip even when a remote-tracking ref exists.
+        let exists_local = all_local.iter().any(|b| b == slice);
+        let merged = if exists_local {
+            merged_local.contains(slice.as_str())
+        } else {
+            merged_remote.contains(slice.as_str())
+        };
+        result.insert(slice.clone(), merged);
     }
     Ok(result)
 }
