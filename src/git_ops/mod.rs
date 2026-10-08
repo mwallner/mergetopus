@@ -157,7 +157,6 @@ pub fn conflict_stage_map() -> Result<
     let out = run_git(&["ls-files", "-u", "-z"])?;
     let mut map = std::collections::BTreeMap::new();
     for record in out.split('\0') {
-        let record = record.trim();
         if record.is_empty() {
             continue;
         }

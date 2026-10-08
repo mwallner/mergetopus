@@ -2,7 +2,6 @@ use crate::tui;
 use anyhow::{Result, bail};
 use mergetopus::color;
 use mergetopus::forges;
-use mergetopus::forges::detect::{detect_forge, parse_remote_url};
 
 use mergetopus::git_ops;
 use mergetopus::planner;
@@ -95,39 +94,13 @@ pub fn cleanup_command(
 }
 
 fn close_prs_for_branches(branches: &[String]) -> Result<()> {
-    let remotes = git_ops::list_remote_names()?;
-    let remote = match remotes.first() {
-        Some(r) => r.clone(),
-        None => {
-            color::print_warning("  No remotes configured; skipping PR close.", None);
-            return Ok(());
-        }
-    };
-
-    let remote_url = match git_ops::get_remote_url(&remote) {
-        Ok(url) => url,
+    let (forge, repo_path) = match super::cmd_discard::resolve_forge_and_repo() {
+        Ok(pair) => pair,
         Err(e) => {
-            color::print_warning(&format!("  Could not read remote URL: {e}"), None);
+            color::print_warning(&format!("  (skipping PR close: {e})"), None);
             return Ok(());
         }
     };
-
-    let forge = match detect_forge(&remote_url) {
-        Ok(f) => f,
-        Err(e) => {
-            color::print_warning(&format!("  (skipping PR close: {e})",), None);
-            return Ok(());
-        }
-    };
-
-    let info = match parse_remote_url(&remote_url) {
-        Ok(i) => i,
-        Err(e) => {
-            color::print_warning(&format!("  Could not parse remote URL: {e}"), None);
-            return Ok(());
-        }
-    };
-    let repo_path = format!("{}/{}", info.owner, info.repo);
 
     color::print_emphasis("\nClosing pull/merge requests:", None);
     for branch in branches {

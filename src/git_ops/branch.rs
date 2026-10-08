@@ -202,17 +202,36 @@ pub fn list_remote_names() -> Result<Vec<String>> {
         .collect())
 }
 
+/// Resolve which configured remote owns a remote-tracking ref for `branch`.
+/// Matches the full `<remote>/<branch>` shape longest-first so remote names
+/// that themselves contain slashes (e.g. `foo/bar`) resolve correctly;
+/// falls back to the first path segment for conventional layouts.
+pub fn remote_for_tracking_ref(tracked_ref: &str, branch: &str) -> Result<Option<String>> {
+    let mut remotes = list_remote_names()?;
+    remotes.sort_by_key(|r| std::cmp::Reverse(r.len()));
+    for remote in &remotes {
+        if tracked_ref == format!("{remote}/{branch}") {
+            return Ok(Some(remote.clone()));
+        }
+    }
+    Ok(tracked_ref
+        .split_once('/')
+        .filter(|(head, rest)| !head.is_empty() && *rest == branch)
+        .map(|(head, _)| head.to_string()))
+}
+
 pub fn delete_branch(branch: &str) -> Result<()> {
     let entries = worktree::list_worktree_entries()?;
     if worktree::has_existing_linked_worktrees(&entries) {
         if let Some(path) = worktree::find_worktree_for_branch(&entries, branch) {
             // No --force: git refuses to remove a worktree with uncommitted
-            // or untracked files, so another slice's in-progress work is
-            // never silently destroyed.
+            // or untracked files (or one that is locked), so another slice's
+            // in-progress work is never silently destroyed.
             run_git(&["worktree", "remove", &path.to_string_lossy()]).with_context(|| {
                 format!(
-                    "worktree at '{}' still has uncommitted or untracked changes; \
-                     resolve or discard them there before deleting branch '{branch}'",
+                    "failed to remove worktree at '{}'; it may hold uncommitted or \
+                     untracked changes, or be locked — resolve or discard the work \
+                     there (or 'git worktree unlock') before deleting branch '{branch}'",
                     path.display()
                 )
             })?;
@@ -346,6 +365,30 @@ mod tests {
 
         let exists = test_helpers::git(&repo, &["show-ref", "--verify", "refs/heads/trash"]);
         assert!(exists.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn remote_for_tracking_ref_resolves_remotes_with_slashes() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        let bare = test_helpers::unique_temp_repo_dir();
+        std::fs::create_dir_all(&bare)?;
+        test_helpers::git(&bare, &["init", "--bare"])?;
+        test_helpers::git(&repo, &["remote", "add", "foo/bar", bare.to_str().unwrap()])?;
+        test_helpers::git(&repo, &["push", "-q", "foo/bar", "main"])?;
+        test_helpers::git(&repo, &["fetch", "-q", "foo/bar"])?;
+
+        // "foo/bar/main" belongs to the remote "foo/bar", not "foo".
+        let resolved =
+            test_helpers::with_repo_cwd(&repo, || remote_for_tracking_ref("foo/bar/main", "main"))?;
+        assert_eq!(resolved.as_deref(), Some("foo/bar"));
+
+        // A conventional prefix is still offered even when it is not in the
+        // configured remotes (custom refspec layouts); the push itself will
+        // report if that remote does not exist.
+        let resolved =
+            test_helpers::with_repo_cwd(&repo, || remote_for_tracking_ref("origin/main", "main"))?;
+        assert_eq!(resolved.as_deref(), Some("origin"));
         Ok(())
     }
 

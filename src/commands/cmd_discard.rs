@@ -33,11 +33,10 @@ pub fn discard_command(
         let local = git_ops::branch_exists(branch)?;
         let mut remotes = Vec::new();
         for tracked_ref in git_ops::remote_refs_for_local_branch(branch)? {
-            let Some((remote, rest)) = tracked_ref.split_once('/') else {
-                continue;
-            };
-            if rest == *branch {
-                remotes.push(remote.to_string());
+            if let Some(remote) = git_ops::remote_for_tracking_ref(&tracked_ref, branch)?
+                && !remotes.contains(&remote)
+            {
+                remotes.push(remote);
             }
         }
         branch_info.push((branch.clone(), local, remotes));
@@ -253,16 +252,42 @@ fn prompt_close_prs(branches: &[String], yes: bool, quiet: bool, tui_title: &str
     Ok(())
 }
 
-fn resolve_forge_and_repo() -> Result<(Box<dyn forges::Forge>, String)> {
-    let remotes = git_ops::list_remote_names()?;
-    let remote = remotes
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("no remotes configured"))?;
-    let remote_url = git_ops::get_remote_url(remote)?;
-    let forge = detect_forge(&remote_url)?;
-    let info = parse_remote_url(&remote_url)?;
-    let repo_path = format!("{}/{}", info.owner, info.repo);
-    Ok((forge, repo_path))
+/// Resolve a forge client and `owner/repo` path from the configured remotes.
+/// Prefers `origin`, then tries every other remote until one yields a
+/// parsable URL and a supported forge; never blindly picks the
+/// alphabetically first remote.
+pub(crate) fn resolve_forge_and_repo() -> Result<(Box<dyn forges::Forge>, String)> {
+    let mut remotes = git_ops::list_remote_names()?;
+    remotes.sort_by_key(|r| if r == "origin" { 0 } else { 1 });
+    if remotes.is_empty() {
+        bail!("no remotes configured");
+    }
+
+    let mut last_err = anyhow::anyhow!("no configured remote yielded a usable forge");
+    for remote in remotes {
+        let remote_url = match git_ops::get_remote_url(&remote) {
+            Ok(u) => u,
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        };
+        let info = match parse_remote_url(&remote_url) {
+            Ok(i) => i,
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        };
+        match detect_forge(&remote_url) {
+            Ok(forge) => {
+                let repo_path = format!("{}/{}", info.owner, info.repo);
+                return Ok((forge, repo_path));
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
 }
 
 fn close_prs_for_branches(branches: &[String]) -> Result<()> {
