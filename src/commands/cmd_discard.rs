@@ -91,6 +91,8 @@ pub fn discard_command(
     let mut deleted_local = 0usize;
     let mut deleted_remote = 0usize;
 
+    // One linked-worktree probe for the whole deletion batch.
+    let worktree_state = git_ops::WorktreeState::load()?;
     for (name, local, _remotes) in &branch_info {
         if *local {
             if name == current_branch {
@@ -100,7 +102,7 @@ pub fn discard_command(
                 );
                 continue;
             }
-            git_ops::delete_branch(name)?;
+            git_ops::delete_branch_with(&worktree_state, name)?;
             color::print_success(&format!("Deleted local: {name}"), None);
             deleted_local += 1;
         }

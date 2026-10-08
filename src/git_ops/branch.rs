@@ -220,9 +220,33 @@ pub fn remote_for_tracking_ref(tracked_ref: &str, branch: &str) -> Result<Option
         .map(|(head, _)| head.to_string()))
 }
 
+/// Linked-worktree snapshot for batch branch deletions: probing
+/// `git worktree list` per deleted branch is one subprocess each.
+pub struct WorktreeState {
+    entries: Vec<worktree::WorktreeEntry>,
+    has_linked: bool,
+}
+
+impl WorktreeState {
+    pub fn load() -> Result<Self> {
+        let entries = worktree::list_worktree_entries()?;
+        let has_linked = worktree::has_existing_linked_worktrees(&entries);
+        Ok(WorktreeState {
+            entries,
+            has_linked,
+        })
+    }
+}
+
 pub fn delete_branch(branch: &str) -> Result<()> {
-    let entries = worktree::list_worktree_entries()?;
-    if worktree::has_existing_linked_worktrees(&entries) {
+    let state = WorktreeState::load()?;
+    delete_branch_with(&state, branch)
+}
+
+/// `delete_branch` against a preloaded [`WorktreeState`].
+pub fn delete_branch_with(state: &WorktreeState, branch: &str) -> Result<()> {
+    let entries = &state.entries;
+    if state.has_linked {
         if let Some(path) = worktree::find_worktree_for_branch(&entries, branch) {
             // No --force: git refuses to remove a worktree with uncommitted
             // or untracked files (or one that is locked), so another slice's

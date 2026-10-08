@@ -76,6 +76,8 @@ pub fn cleanup_command(
     }
 
     let mut deleted = 0usize;
+    // One linked-worktree probe for the whole deletion batch.
+    let worktree_state = git_ops::WorktreeState::load()?;
     for branch in &branches_to_delete {
         if branch == current_branch {
             color::print_error(
@@ -84,7 +86,7 @@ pub fn cleanup_command(
             );
             continue;
         }
-        git_ops::delete_branch(branch)?;
+        git_ops::delete_branch_with(&worktree_state, branch)?;
         color::print_success(&format!("Deleted: {branch}"), None);
         deleted += 1;
     }
