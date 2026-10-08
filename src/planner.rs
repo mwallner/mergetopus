@@ -1717,7 +1717,10 @@ mod tests {
         assert!(repo.join("renamed_feature.txt").exists());
         assert!(!repo.join("renamed_main.txt").exists());
         assert!(!repo.join("src/a.txt").exists());
-        let content = std::fs::read_to_string(repo.join("renamed_feature.txt"))?;
+        // Assert the staged blob, not the worktree copy: on hosts with
+        // core.autocrlf=true the checkout smudge turns LF into CRLF while
+        // the index holds the exact blob.
+        let content = test_helpers::git(&repo, &["show", ":renamed_feature.txt"])?;
         assert!(content.starts_with("l1\n"), "content: {content}");
         Ok(())
     }
@@ -1741,7 +1744,7 @@ mod tests {
         assert!(still.is_empty(), "leftover: {still:?}");
         assert!(repo.join("renamed_main.txt").exists());
         assert!(!repo.join("renamed_feature.txt").exists());
-        let content = std::fs::read_to_string(repo.join("renamed_main.txt"))?;
+        let content = test_helpers::git(&repo, &["show", ":renamed_main.txt"])?;
         assert!(content.starts_with("l1\n"), "content: {content}");
         Ok(())
     }
