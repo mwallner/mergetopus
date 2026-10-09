@@ -1,11 +1,12 @@
 use anyhow::{Result, bail};
-use std::collections::BTreeMap;
-use crate::color;
+use mergetopus::color;
 
-use crate::git_ops;
 use crate::helpers;
-use crate::planner;
 use crate::tui;
+use mergetopus::forges;
+use mergetopus::forges::detect::{detect_forge, parse_remote_url};
+use mergetopus::git_ops;
+use mergetopus::planner;
 
 use helpers::extract_slice_paths;
 
@@ -13,13 +14,20 @@ use helpers::extract_slice_paths;
 /// including slice merge state and suggested next commands.
 pub fn status_command(
     source_arg: Option<&str>,
+    show_prs: bool,
     quiet: bool,
     current_branch: &str,
     tui_title: &str,
 ) -> Result<()> {
     if let Some(source) = source_arg {
         let integration_branch = resolve_status_integration_branch(source, current_branch)?;
-        return print_integration_status(&integration_branch, quiet, current_branch, tui_title);
+        return print_integration_status(
+            &integration_branch,
+            show_prs,
+            quiet,
+            current_branch,
+            tui_title,
+        );
     }
 
     let discovered = discover_global_mmm_units()?;
@@ -34,10 +42,13 @@ pub fn status_command(
         return Ok(());
     }
 
-    color::print_emphasis(&format!(
-        "In-progress MMM merges detected: {}",
-        discovered.units.len()
-    ), None);
+    color::print_emphasis(
+        &format!(
+            "In-progress MMM merges detected: {}",
+            discovered.units.len()
+        ),
+        None,
+    );
     println!();
     print_global_overview(&discovered.units);
     if !discovered.orphaned_refs.is_empty() {
@@ -46,7 +57,13 @@ pub fn status_command(
 
     if let Some(current_unit) = select_current_branch_unit(&discovered.units, current_branch) {
         color::print_emphasis("\nCurrent branch details:", None);
-        print_integration_status(&current_unit.integration, true, current_branch, tui_title)?;
+        print_integration_status(
+            &current_unit.integration,
+            show_prs,
+            quiet,
+            current_branch,
+            tui_title,
+        )?;
     }
 
     Ok(())
@@ -60,6 +77,8 @@ struct StatusUnit {
     pending: usize,
     resolved: usize,
     kokomeco_present: bool,
+    /// None = kokomeco absent, Some(true) = merged into target, Some(false) = not yet merged.
+    kokomeco_merged: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -91,11 +110,12 @@ fn discover_global_mmm_units() -> Result<GlobalDiscovery> {
             continue;
         }
 
-        let expected_integration = if let Some(integration) = planner::integration_from_slice_branch(reference) {
-            Some(integration)
-        } else {
-            integration_from_kokomeco_branch(reference)
-        };
+        let expected_integration =
+            if let Some(integration) = planner::integration_from_slice_branch(reference) {
+                Some(integration)
+            } else {
+                integration_from_kokomeco_branch(reference)
+            };
 
         match expected_integration {
             Some(integration) if !integration_names.contains(&integration) => {
@@ -108,9 +128,10 @@ fn discover_global_mmm_units() -> Result<GlobalDiscovery> {
         }
     }
 
+    let snap = RefSnapshot::load()?;
     let mut units = Vec::new();
     for integration in integration_names {
-        units.push(build_status_unit(&integration)?);
+        units.push(build_status_unit(&integration, &snap)?);
     }
     units.sort_by(|a, b| a.integration.cmp(&b.integration));
 
@@ -132,17 +153,162 @@ fn canonicalize_branch_ref(reference: &str, remote_names: &[String]) -> String {
     reference.to_string()
 }
 
-fn build_status_unit(integration_branch: &str) -> Result<StatusUnit> {
+/// One snapshot of all branch refs (local + remote-tracking) with tip OIDs.
+/// The per-integration-branch status computations used to re-probe
+/// for-each-ref/show-ref several times each; with hundreds of slice
+/// branches one shared load suffices.
+pub struct RefSnapshot {
+    locals: std::collections::BTreeSet<String>,
+    remote_shorts: std::collections::BTreeSet<String>,
+    tips: std::collections::BTreeMap<String, String>,
+}
+
+impl RefSnapshot {
+    fn load() -> Result<Self> {
+        let out = git_ops::run_git(&[
+            "for-each-ref",
+            "--format=%(refname)%09%(refname:short)%09%(objectname)",
+            "refs/heads",
+            "refs/remotes",
+        ])?;
+        let mut locals = std::collections::BTreeSet::new();
+        let mut remote_shorts = std::collections::BTreeSet::new();
+        // (name candidates in refspec order) for tip preference below
+        let mut tip_candidates: std::collections::BTreeMap<String, Vec<(bool, String, String)>> =
+            std::collections::BTreeMap::new();
+
+        for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let mut cols = line.split('\t');
+            let (Some(full), Some(short), Some(oid)) = (cols.next(), cols.next(), cols.next())
+            else {
+                continue;
+            };
+            if full.starts_with("refs/heads/") {
+                locals.insert(short.to_string());
+                tip_candidates.entry(short.to_string()).or_default().push((
+                    true,
+                    String::new(),
+                    oid.to_string(),
+                ));
+            } else if full.starts_with("refs/remotes/") {
+                if short == "origin/HEAD" {
+                    continue;
+                }
+                remote_shorts.insert(short.to_string());
+                if let Some(local) = git_ops::local_branch_name_from_remote_ref(short) {
+                    tip_candidates.entry(local).or_default().push((
+                        false,
+                        short.to_string(),
+                        oid.to_string(),
+                    ));
+                }
+            }
+        }
+
+        // best_ref_for_local_branch preference: local > an "origin/..."
+        // remote > first (sorted) remote-tracking ref.
+        let mut tips = std::collections::BTreeMap::new();
+        for (name, mut cands) in tip_candidates {
+            cands.sort_by(|a, b| {
+                b.0.cmp(&a.0)
+                    .then_with(|| b.1.starts_with("origin/").cmp(&a.1.starts_with("origin/")))
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            if let Some((_, _, oid)) = cands.first() {
+                tips.insert(name, oid.clone());
+            }
+        }
+
+        Ok(RefSnapshot {
+            locals,
+            remote_shorts,
+            tips,
+        })
+    }
+
+    /// Mirrors `git_ops::best_ref_for_local_branch` without a subprocess.
+    fn best_ref(&self, name: &str) -> Option<String> {
+        if self.locals.contains(name) {
+            return Some(name.to_string());
+        }
+        let suffix = format!("/{name}");
+        let mut refs: Vec<&String> = self
+            .remote_shorts
+            .iter()
+            .filter(|r| r.ends_with(&suffix))
+            .collect();
+        refs.sort();
+        refs.iter()
+            .find(|r| r.starts_with("origin/"))
+            .or_else(|| refs.first())
+            .map(|r| (*r).clone())
+    }
+
+    /// Mirrors `git_ops::branch_exists_anywhere` without a subprocess.
+    fn exists_anywhere(&self, name: &str) -> bool {
+        self.locals.contains(name) || {
+            let suffix = format!("/{name}");
+            self.remote_shorts.iter().any(|r| r.ends_with(&suffix))
+        }
+    }
+
+    /// Mirrors `git_ops::list_slice_branches_for_integration` without a
+    /// subprocess.
+    fn slices_for(&self, integration_branch: &str) -> Vec<String> {
+        let Some(base) = integration_branch.strip_suffix("/integration") else {
+            return Vec::new();
+        };
+        let prefix = format!("{base}/slice");
+        let mut names: Vec<String> = Vec::new();
+        for local in &self.locals {
+            if local.starts_with(&prefix) {
+                names.push(local.clone());
+            }
+        }
+        for short in &self.remote_shorts {
+            if let Some(local) = git_ops::local_branch_name_from_remote_ref(short)
+                && local.starts_with(&prefix)
+            {
+                names.push(local);
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn tip_oid(&self, name: &str) -> Option<&str> {
+        self.tips.get(name).map(String::as_str)
+    }
+}
+
+fn build_status_unit(integration_branch: &str, snap: &RefSnapshot) -> Result<StatusUnit> {
     let (target, source) = planner::parse_integration_branch(integration_branch)
         .unwrap_or_else(|| ("(unknown)".to_string(), "(unknown)".to_string()));
-    let integration_ref =
-        git_ops::best_ref_for_local_branch(integration_branch)?.unwrap_or_else(|| integration_branch.to_string());
-    let slices = git_ops::list_slice_branches_for_integration(integration_branch)?;
-    let status = slice_merge_status(&integration_ref, &slices)?;
+    let integration_ref = snap
+        .best_ref(integration_branch)
+        .unwrap_or_else(|| integration_branch.to_string());
+    let slices = snap.slices_for(integration_branch);
+    let status = git_ops::slice_merge_status(&integration_ref, &slices)?;
     let resolved = status.values().filter(|v| **v).count();
     let pending = status.values().filter(|v| !**v).count();
     let kokomeco = git_ops::consolidated_branch_name(integration_branch);
-    let kokomeco_present = git_ops::branch_exists_anywhere(&kokomeco)?;
+    let kokomeco_present = snap.exists_anywhere(&kokomeco);
+    let kokomeco_merged = if kokomeco_present && target != "(unknown)" {
+        // Check whether the kokomeco branch has been merged into its target branch.
+        // Resolve both names to available local/remote refs first: a remote-only
+        // kokomeco (or target) would otherwise probe a nonexistent local name
+        // and read as "not merged". is_ancestor may still fail if a ref is
+        // missing — treat that as "unable to determine".
+        let kokomeco_ref = snap.best_ref(&kokomeco);
+        let target_ref = snap.best_ref(&target);
+        match (kokomeco_ref, target_ref) {
+            (Some(k), Some(t)) => git_ops::is_ancestor(&k, &t).ok(),
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     Ok(StatusUnit {
         integration: integration_branch.to_string(),
@@ -151,6 +317,7 @@ fn build_status_unit(integration_branch: &str) -> Result<StatusUnit> {
         pending,
         resolved,
         kokomeco_present,
+        kokomeco_merged,
     })
 }
 
@@ -158,27 +325,34 @@ fn print_global_overview(units: &[StatusUnit]) {
     let mut integration_w = "Integration".len();
     let mut target_w = "Target".len();
     let mut source_w = "Source".len();
+    let mut kokomeco_w = "Kokomeco".len();
 
     for unit in units {
         integration_w = integration_w.max(unit.integration.len());
         target_w = target_w.max(unit.target.len());
         source_w = source_w.max(unit.source.len());
+        let kok_label = kokomeco_status_label(unit.kokomeco_present, unit.kokomeco_merged);
+        kokomeco_w = kokomeco_w.max(kok_label.len());
     }
 
     color::print_emphasis("Global MMM overview", None);
-    color::print_info(&format!(
-        "{:<integration_w$}  {:<target_w$}  {:<source_w$}  {:<8}  {:>7}  {:>8}  {:<8}",
-        "Integration",
-        "Target",
-        "Source",
-        "State",
-        "Pending",
-        "Resolved",
-        "Kokomeco",
-        integration_w = integration_w,
-        target_w = target_w,
-        source_w = source_w,
-    ), None);
+    color::print_info(
+        &format!(
+            "{:<integration_w$}  {:<target_w$}  {:<source_w$}  {:<8}  {:>7}  {:>8}  {:<kokomeco_w$}",
+            "Integration",
+            "Target",
+            "Source",
+            "State",
+            "Pending",
+            "Resolved",
+            "Kokomeco",
+            integration_w = integration_w,
+            target_w = target_w,
+            source_w = source_w,
+            kokomeco_w = kokomeco_w,
+        ),
+        None,
+    );
 
     for unit in units {
         let state = if unit.kokomeco_present {
@@ -186,24 +360,33 @@ fn print_global_overview(units: &[StatusUnit]) {
         } else {
             "Active"
         };
-        let kokomeco = if unit.kokomeco_present {
-            "Present"
-        } else {
-            "Missing"
-        };
-        color::print_info(&format!(
-            "{:<integration_w$}  {:<target_w$}  {:<source_w$}  {:<8}  {:>7}  {:>8}  {:<8}",
-            unit.integration,
-            unit.target,
-            unit.source,
-            state,
-            unit.pending,
-            unit.resolved,
-            kokomeco,
-            integration_w = integration_w,
-            target_w = target_w,
-            source_w = source_w,
-        ), None);
+        let kok_label = kokomeco_status_label(unit.kokomeco_present, unit.kokomeco_merged);
+        color::print_info(
+            &format!(
+                "{:<integration_w$}  {:<target_w$}  {:<source_w$}  {:<8}  {:>7}  {:>8}  {:<kokomeco_w$}",
+                unit.integration,
+                unit.target,
+                unit.source,
+                state,
+                unit.pending,
+                unit.resolved,
+                kok_label,
+                integration_w = integration_w,
+                target_w = target_w,
+                source_w = source_w,
+                kokomeco_w = kokomeco_w,
+            ),
+            None,
+        );
+    }
+}
+
+pub(crate) fn kokomeco_status_label(present: bool, merged: Option<bool>) -> &'static str {
+    match (present, merged) {
+        (true, Some(true)) => "Merged",
+        (true, Some(false)) => "Unmerged",
+        (true, None) => "Present?",
+        (false, _) => "Missing",
     }
 }
 
@@ -214,7 +397,10 @@ fn print_orphaned_refs(orphaned_refs: &[String]) {
     }
 }
 
-fn select_current_branch_unit<'a>(units: &'a [StatusUnit], current_branch: &str) -> Option<&'a StatusUnit> {
+fn select_current_branch_unit<'a>(
+    units: &'a [StatusUnit],
+    current_branch: &str,
+) -> Option<&'a StatusUnit> {
     let mut matches = units
         .iter()
         .filter(|u| u.target == current_branch)
@@ -246,26 +432,17 @@ fn integration_from_kokomeco_branch(branch: &str) -> Option<String> {
     None
 }
 
-fn slice_merge_status(
-    integration_ref: &str,
-    slice_branches: &[String],
-) -> Result<BTreeMap<String, bool>> {
-    let mut result = BTreeMap::new();
-    for slice in slice_branches {
-        let probe_ref = git_ops::best_ref_for_local_branch(slice)?.unwrap_or_else(|| slice.clone());
-        result.insert(slice.clone(), git_ops::is_ancestor(&probe_ref, integration_ref)?);
-    }
-    Ok(result)
-}
-
 fn print_integration_status(
     integration_branch: &str,
+    show_prs: bool,
     quiet: bool,
     current_branch: &str,
     tui_title: &str,
 ) -> Result<()> {
-    let integration_ref =
-        git_ops::best_ref_for_local_branch(integration_branch)?.unwrap_or_else(|| integration_branch.to_string());
+    let snap = RefSnapshot::load()?;
+    let integration_ref = snap
+        .best_ref(integration_branch)
+        .unwrap_or_else(|| integration_branch.to_string());
 
     // If a kokomeco consolidated branch already exists for this integration
     // branch, show the merge suggestion instead of the raw integration status.
@@ -280,12 +457,17 @@ fn print_integration_status(
             .is_some_and(|target| target != current_branch);
 
         if target_mismatch {
-            let target = expected_target.as_ref().unwrap();
+            let target = expected_target
+                .as_ref()
+                .expect("target_mismatch is only true when expected_target is Some");
             if quiet {
-                color::print_error(&format!(
-                    "Warning: current branch '{}' does not match the integration target '{}'.",
-                    current_branch, target
-                ), None);
+                color::print_error(
+                    &format!(
+                        "Warning: current branch '{}' does not match the integration target '{}'.",
+                        current_branch, target
+                    ),
+                    None,
+                );
             } else {
                 let prompt = format!(
                     "Current branch '{}' does not match the integration target '{}'.\n\n\
@@ -300,12 +482,23 @@ fn print_integration_status(
         }
 
         let merge_target = expected_target.as_deref().unwrap_or(current_branch);
-        let kokomeco_ref = git_ops::best_ref_for_local_branch(&kokomeco)?
-            .unwrap_or_else(|| kokomeco.clone());
+        let kokomeco_ref =
+            git_ops::best_ref_for_local_branch(&kokomeco)?.unwrap_or_else(|| kokomeco.clone());
+        let target_ref = git_ops::best_ref_for_local_branch(merge_target)?
+            .unwrap_or_else(|| merge_target.to_string());
+
+        // Probe the resolved refs so a remote-only kokomeco that is already
+        // contained in the target is correctly reported as merged.
+        let merged_into_target = git_ops::is_ancestor(&kokomeco_ref, &target_ref).ok();
 
         println!("Mergetopus status");
         println!("  Integration branch:  {integration_branch}");
         println!("  Consolidated branch: {kokomeco}");
+        if let Some(true) = merged_into_target {
+            println!("  Merged into target:   Yes ('{merge_target}' contains the kokomeco commit)");
+        } else {
+            println!("  Merged into target:   No");
+        }
         println!();
         if target_mismatch {
             println!(
@@ -314,19 +507,31 @@ fn print_integration_status(
             );
             println!();
         }
-        println!(
-            "All slices are resolved. The kokomeco branch is ready to merge into '{merge_target}'."
-        );
-        println!();
-        println!("Suggested next command:");
-        if target_mismatch {
-            println!("  git checkout {merge_target} && git merge {kokomeco_ref}");
+        if merged_into_target == Some(true) {
+            println!("The kokomeco branch has already been merged into '{merge_target}'.");
+            println!();
+            println!("Suggested next command:");
+            println!("  mergetopus cleanup");
         } else {
-            println!("  git merge {kokomeco_ref}");
+            println!(
+                "All slices are resolved. The kokomeco branch is ready to merge into '{merge_target}'."
+            );
+            println!();
+            println!("Suggested next command:");
+            if target_mismatch {
+                println!("  git checkout {merge_target} && git merge {kokomeco_ref}");
+            } else {
+                println!("  git merge {kokomeco_ref}");
+            }
+            println!();
+            println!("To clean up slice and integration branches afterward:");
+            println!("  mergetopus cleanup");
         }
-        println!();
-        println!("To clean up slice and integration branches afterward:");
-        println!("  mergetopus cleanup");
+
+        if show_prs {
+            print_branch_prs(integration_branch)?;
+        }
+
         return Ok(());
     }
 
@@ -341,8 +546,8 @@ fn print_integration_status(
     let source_ref =
         parse_partial_merge_source_ref(&initial_message).unwrap_or_else(|| "(unknown)".to_string());
 
-    let slices = git_ops::list_slice_branches_for_integration(&integration_branch)?;
-    let status = slice_merge_status(&integration_ref, &slices)?;
+    let slices = snap.slices_for(integration_branch);
+    let status = git_ops::slice_merge_status(&integration_ref, &slices)?;
 
     let merged = status.values().filter(|v| **v).count();
     let pending = status.values().filter(|v| !**v).count();
@@ -355,18 +560,44 @@ fn print_integration_status(
     println!("  Merged slices: {merged}");
     println!("  Pending slices: {pending}");
 
+    let auto_applied = helpers::extract_auto_applied(&initial_message);
+    if !auto_applied.is_empty() {
+        println!("  Auto-applied source decisions (no conflict):");
+        for entry in &auto_applied {
+            println!("    * {entry}");
+        }
+    }
+
     if pending > 0 {
         println!("\nPending slice details:");
+        // Batch tip messages for all pending slices in one cat-file walk
+        // instead of a `git log -1` subprocess per slice.
+        let mut pending_slices: Vec<(&String, String, Option<String>)> = Vec::new();
         for slice in &slices {
             let is_merged = status.get(slice).copied().unwrap_or(false);
             if is_merged {
                 continue;
             }
-
-            let slice_ref =
-                git_ops::best_ref_for_local_branch(slice)?.unwrap_or_else(|| slice.to_string());
-
-            let tip_msg = git_ops::branch_tip_commit_message(&slice_ref)?;
+            let slice_ref = snap.best_ref(slice).unwrap_or_else(|| slice.to_string());
+            let oid = snap.tip_oid(slice).map(str::to_string);
+            pending_slices.push((slice, slice_ref, oid));
+        }
+        let oids: Vec<String> = {
+            let mut v: Vec<String> = pending_slices
+                .iter()
+                .filter_map(|(_, _, oid)| oid.clone())
+                .collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let messages = git_ops::commit_messages_batch(&oids)?;
+        for (slice, slice_ref, oid) in &pending_slices {
+            let slice = slice.as_str();
+            let tip_msg = match oid {
+                Some(o) => messages.get(o).cloned().unwrap_or_default(),
+                None => git_ops::branch_tip_commit_message(slice_ref)?,
+            };
             let mut paths = extract_slice_paths(&tip_msg);
             let resolve_tip = tip_msg
                 .lines()
@@ -374,7 +605,7 @@ fn print_integration_status(
                 .unwrap_or("")
                 .contains("Mergetopus resolve:");
             if paths.is_empty() && resolve_tip {
-                let parent = git_ops::parent_sha(&slice_ref)?;
+                let parent = git_ops::parent_sha(slice_ref)?;
                 let parent_msg = git_ops::commit_message(&parent)?;
                 paths = extract_slice_paths(&parent_msg);
             }
@@ -394,6 +625,10 @@ fn print_integration_status(
                 println!("    detected paths: {}", paths.join(", "));
             }
         }
+    }
+
+    if show_prs && !slices.is_empty() {
+        print_branch_prs(integration_branch)?;
     }
 
     println!("\nSuggested next command(s):");
@@ -454,6 +689,57 @@ fn resolve_status_integration_branch(source: &str, current_branch: &str) -> Resu
     Ok(target)
 }
 
+/// Fetch and display PR URLs for an integration branch and its slices.
+fn print_branch_prs(integration_branch: &str) -> Result<()> {
+    let remotes = git_ops::list_remote_names()?;
+    let remote = remotes
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no remotes configured"))?;
+    let remote_url = git_ops::get_remote_url(remote)?;
+
+    let forge = match detect_forge(&remote_url) {
+        Ok(f) => f,
+        Err(e) => {
+            color::print_warning(&format!("  (skipping PR lookup: {})", e), None);
+            return Ok(());
+        }
+    };
+
+    let info = parse_remote_url(&remote_url)?;
+    let repo_path = format!("{}/{}", info.owner, info.repo);
+
+    let slices = git_ops::list_slice_branches_for_integration(integration_branch)?;
+    let kokomeco = git_ops::consolidated_branch_name(integration_branch);
+    let mut branches = vec![integration_branch.to_string()];
+    branches.extend(slices);
+    if git_ops::branch_exists_anywhere(&kokomeco)? {
+        branches.push(kokomeco);
+    }
+
+    println!("\nPull/merge requests:");
+    for branch in &branches {
+        match forge.find_pr_by_head(&repo_path, branch) {
+            Ok(Some(pr)) => {
+                let state = match pr.state {
+                    forges::PrState::Open => "open",
+                    forges::PrState::Closed => "closed",
+                    forges::PrState::Merged => "merged",
+                };
+                println!("  {branch}: #{pr} ({state})", pr = pr.number);
+                println!("           {url}", url = pr.html_url);
+            }
+            Ok(None) => {
+                println!("  {branch}: (no PR)");
+            }
+            Err(e) => {
+                println!("  {branch}: (error: {e})");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,7 +764,32 @@ mod tests {
             integration_from_kokomeco_branch("_mmm/main/feature/kokomeco"),
             Some("_mmm/main/feature/integration".to_string())
         );
-        assert_eq!(integration_from_kokomeco_branch("_mmm/main/feature/slice1"), None);
+        assert_eq!(
+            integration_from_kokomeco_branch("_mmm/main/feature/slice1"),
+            None
+        );
+    }
+
+    #[test]
+    fn kokomeco_status_label_missing() {
+        assert_eq!(kokomeco_status_label(false, None), "Missing");
+        assert_eq!(kokomeco_status_label(false, Some(true)), "Missing");
+        assert_eq!(kokomeco_status_label(false, Some(false)), "Missing");
+    }
+
+    #[test]
+    fn kokomeco_status_label_merged() {
+        assert_eq!(kokomeco_status_label(true, Some(true)), "Merged");
+    }
+
+    #[test]
+    fn kokomeco_status_label_unmerged() {
+        assert_eq!(kokomeco_status_label(true, Some(false)), "Unmerged");
+    }
+
+    #[test]
+    fn kokomeco_status_label_unknown() {
+        assert_eq!(kokomeco_status_label(true, None), "Present?");
     }
 
     #[test]

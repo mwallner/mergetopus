@@ -29,6 +29,30 @@ pub fn extract_slice_paths(message: &str) -> Vec<String> {
         .collect()
 }
 
+/// Extract the `auto-applied:` section entries from a partial-merge commit
+/// message: source-side deletions/renames git applied without a conflict.
+pub fn extract_auto_applied(message: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut in_section = false;
+    for line in message.lines() {
+        let trimmed = line.trim_end();
+        if !in_section {
+            in_section = trimmed == "auto-applied:";
+            continue;
+        }
+        match trimmed.strip_prefix("* ") {
+            Some(entry) => {
+                let entry = entry.trim();
+                if !entry.is_empty() && entry != "(none)" {
+                    entries.push(entry.to_string());
+                }
+            }
+            None => break,
+        }
+    }
+    entries
+}
+
 /// Parse a command string into program and arguments, handling quoted tokens
 /// and backslash-escaped quotes.
 ///

@@ -73,13 +73,15 @@ fn release_b_status_uses_initial_partial_merge_metadata_after_resolve_commit() -
     test_helpers::git(&repo, &["config", "merge.tool", "copybase"])?;
     test_helpers::git(
         &repo,
-        &["config", "mergetool.copybase.cmd", configured_copybase_cmd()],
+        &[
+            "config",
+            "mergetool.copybase.cmd",
+            configured_copybase_cmd(),
+        ],
     )?;
 
-    let resolve = test_helpers::mergetopus(
-        &repo,
-        &["--quiet", "resolve", "--commit", slice_branch()],
-    )?;
+    let resolve =
+        test_helpers::mergetopus(&repo, &["--quiet", "resolve", "--commit", slice_branch()])?;
     assert!(
         resolve.status.success(),
         "resolve --commit failed:\nstdout:\n{}\nstderr:\n{}",
@@ -243,7 +245,9 @@ fn release_b_status_zero_results_is_success() -> TestResult<()> {
 
     let stdout = String::from_utf8_lossy(&status.stdout);
     assert!(
-        stdout.contains("No in-progress Mergetopus merges found in '_mmm/' across local and configured remotes."),
+        stdout.contains(
+            "No in-progress Mergetopus merges found in '_mmm/' across local and configured remotes."
+        ),
         "expected no-results message in output:\n{stdout}"
     );
 
@@ -291,10 +295,8 @@ fn release_b_resolve_works_with_remote_only_slice() -> TestResult<()> {
         ],
     )?;
 
-    let resolve = test_helpers::mergetopus(
-        &repo,
-        &["--quiet", "resolve", "--commit", slice_branch()],
-    )?;
+    let resolve =
+        test_helpers::mergetopus(&repo, &["--quiet", "resolve", "--commit", slice_branch()])?;
     assert!(
         resolve.status.success(),
         "resolve failed with remote-only slice:\nstdout:\n{}\nstderr:\n{}",

@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
-use crate::color::ColorMode;
+use mergetopus::color::ColorMode;
+use mergetopus::models::UnassignedPolicy;
 
 const CLI_LONG_ABOUT: &str = "\
 Mergetopus turns a regular git merge into an integration branch plus optional per-conflict slice branches.
@@ -9,6 +10,7 @@ Workflow:
   2) Merge SOURCE into it with --no-commit
   3) Keep auto-merged files in integration
   4) Optionally group selected conflicted paths into one explicit slice branch via --select-paths
+  5) Turn every remaining conflicted path into slice branches (--unassigned separate|single)
 
   If SOURCE is omitted, an interactive branch picker is shown (unless --quiet is set).
 ";
@@ -18,11 +20,16 @@ Examples:
   mergetopus origin/main
   mergetopus --source resolve
   mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs'
+  mergetopus release/1.4 --select-paths 'src/a.rs,src/b.rs' --unassigned single
   mergetopus hotfix --yes
   mergetopus origin/main --quiet
   mergetopus resolve --commit _mmm/main/feature/slice1
   mergetopus status feature/refactor-auth
   mergetopus verify _mmm/main/feature/integration
+  mergetopus discard feature/refactor-auth
+  mergetopus discard --close-prs
+  mergetopus consolidate feature/refactor-auth
+  mergetopus consolidate   # when on an integration branch
   mergetopus HERE
 ";
 
@@ -41,8 +48,18 @@ Example: --source resolve";
 const SELECT_PATHS_LONG_HELP: &str = "\
 Comma-separated list of conflicted file paths to include in a single explicit slice group.
 
-Any conflicted file not listed here is handled as a default one-file slice branch.
-Example: --select-paths 'src/lib.rs,src/main.rs,README.md'";
+Any conflicted file not listed here is left unassigned; --unassigned decides whether
+those files each get their own slice branch or share one. Example: --select-paths 'src/lib.rs,src/main.rs,README.md'";
+
+const UNASSIGNED_LONG_HELP: &str = "\
+How to handle conflicted files that are not assigned to an explicit slice.
+
+Modes:
+- separate (default): one slice branch per unassigned file
+- single: all unassigned files share one slice branch
+
+Only matters when at least one conflicted file is left unassigned. The interactive conflict
+selector asks about them on apply, so this value only applies with --select-paths or --quiet.";
 
 const QUIET_LONG_HELP: &str = "\
 Run in non-interactive mode suitable for CI/CD.
@@ -50,7 +67,8 @@ Run in non-interactive mode suitable for CI/CD.
 Behavior changes:
 - SOURCE must be provided explicitly (no source picker)
 - Kokomeco prompts are skipped unless --yes is provided
-- Conflict grouping comes only from --select-paths (no interactive conflict selector)";
+- Conflict grouping comes only from --select-paths (no interactive conflict selector)
+- Unassigned conflicted files follow --unassigned instead of being asked about";
 
 const YES_LONG_HELP: &str = "\
 Assume 'yes' for non-destructive confirmation prompts.
@@ -89,6 +107,15 @@ pub struct Args {
         long_help = SELECT_PATHS_LONG_HELP
     )]
     pub select_paths: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "MODE",
+        default_value_t = UnassignedPolicy::Separate,
+        help = "Slice handling for unassigned conflicted files: separate (default) or single",
+        long_help = UNASSIGNED_LONG_HELP
+    )]
+    pub unassigned: UnassignedPolicy,
 
     #[arg(
         long,
@@ -151,6 +178,13 @@ pub enum Commands {
         /// Commit staged resolution changes at the end.
         #[arg(long, default_value_t = false)]
         commit: bool,
+
+        /// How to settle rename/delete conflict groups without asking:
+        /// theirs (apply the slice's decision, default with --quiet),
+        /// ours, both (keep all content), delete, or tool (per-file merge tool).
+        /// Interactive runs show a decision menu per group instead unless set.
+        #[arg(long, value_name = "MODE")]
+        on_group: Option<mergetopus::models::GroupMode>,
     },
 
     /// Show integration branch and slice progress status.
@@ -160,6 +194,10 @@ pub enum Commands {
     Status {
         #[arg(value_name = "SOURCE")]
         source: Option<String>,
+
+        /// Fetch and display pull/merge request URLs for MMM branches.
+        #[arg(long, default_value_t = false)]
+        pr: bool,
     },
 
     /// Cleanup slice and integration branches once a kokomeco branch exists.
@@ -168,7 +206,31 @@ pub enum Commands {
     /// which a consolidated kokomeco branch already exists, lists them in an
     /// interactive confirmation TUI, and deletes them on confirmation.
     /// The kokomeco branch itself is retained.
-    Cleanup,
+    Cleanup {
+        /// Close associated pull/merge requests before deleting branches.
+        #[arg(long, default_value_t = false)]
+        close_prs: bool,
+    },
+
+    /// Discard a Mergetopus workflow by deleting all associated branches.
+    ///
+    /// Lists all branches belonging to a workflow (integration + slice branches),
+    /// shows them in an interactive confirmation TUI, deletes local branches,
+    /// and optionally deletes remote tracking branches and closes associated PRs.
+    ///
+    /// WORKFLOW may be either a merge source ref (e.g. feature/foo) for the
+    /// active/inferred integration branch, or a full integration branch name
+    /// (e.g. _mmm/main/feature_foo/integration). If omitted, an interactive
+    /// picker shows all integration branches.
+    Discard {
+        /// Source branch or integration branch name to discard.
+        #[arg(value_name = "WORKFLOW")]
+        integration: Option<String>,
+
+        /// Close associated pull/merge requests before deleting branches.
+        #[arg(long, default_value_t = false)]
+        close_prs: bool,
+    },
 
     /// Verify integration completeness after kokomeco creation.
     ///
@@ -221,5 +283,68 @@ pub enum Commands {
             help = "Remote to push to (required in --quiet mode when multiple remotes exist)"
         )]
         remote: Option<String>,
+
+        /// Also create pull requests for the pushed branches.
+        #[arg(long, default_value_t = false)]
+        pr: bool,
+    },
+
+    /// Create a consolidated kokomeco merge commit branch.
+    ///
+    /// Merges the source branch into the remembered target head to produce a
+    /// proper two-parent merge commit whose tree matches the integration branch.
+    /// Requires all slice branches to be resolved and merged into integration first.
+    ///
+    /// When run from an integration branch, the source is inferred automatically.
+    /// When run from a target branch, SOURCE must be provided.
+    Consolidate {
+        /// Source branch for the merge context (required when not on an integration branch).
+        #[arg(value_name = "SOURCE")]
+        source: Option<String>,
+    },
+
+    /// Manage pull/merge requests for MMM branches on remote forges.
+    ///
+    /// Creates, syncs, or lists pull/merge requests for the integration and
+    /// slice branches of a Mergetopus merge plan.
+    ///
+    /// Requires authentication via git config or environment variable
+    /// (see mergetopus.github-token, GITHUB_TOKEN, etc.).
+    Pr {
+        #[command(subcommand)]
+        action: PrSubcommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PrSubcommand {
+    /// Create pull requests for all MMM branches (draft PRs).
+    ///
+    /// Creates draft pull requests for the integration branch and each slice
+    /// branch. If a PR already exists for a branch, it is reused.
+    Create {
+        /// Source branch or integration branch name.
+        #[arg(value_name = "SOURCE")]
+        source: Option<String>,
+    },
+
+    /// Sync existing pull request titles and descriptions.
+    ///
+    /// Updates the title and body of existing PRs to match current state.
+    /// Does not create new PRs.
+    Sync {
+        /// Source branch or integration branch name.
+        #[arg(value_name = "SOURCE")]
+        source: Option<String>,
+    },
+
+    /// List pull request URLs for all MMM branches.
+    ///
+    /// Queries the remote forge for PRs matching the integration and slice
+    /// branches and displays their URLs and states.
+    List {
+        /// Source branch or integration branch name.
+        #[arg(value_name = "SOURCE")]
+        source: Option<String>,
     },
 }

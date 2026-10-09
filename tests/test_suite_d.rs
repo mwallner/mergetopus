@@ -106,7 +106,11 @@ fn setup_gravity_falls_lts_repo() -> TestResult<std::path::PathBuf> {
     let repo = test_helpers::init_repo()?;
 
     // === Initial base files on main ===
-    test_helpers::write_file(&repo, "config.toml", "max_connections = 100\ntimeout = 30\n")?;
+    test_helpers::write_file(
+        &repo,
+        "config.toml",
+        "max_connections = 100\ntimeout = 30\n",
+    )?;
     test_helpers::write_file(
         &repo,
         "engine.rs",
@@ -439,12 +443,7 @@ fn lts_cascade_merge_preserves_authorship_in_kokomeco() -> TestResult<()> {
 
     let out = test_helpers::mergetopus(
         &repo,
-        &[
-            "LTS_v32",
-            "--quiet",
-            "--select-paths",
-            "engine.rs,utils.rs",
-        ],
+        &["LTS_v32", "--quiet", "--select-paths", "engine.rs,utils.rs"],
     )?;
     assert!(
         out.status.success(),

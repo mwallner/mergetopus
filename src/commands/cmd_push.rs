@@ -1,10 +1,12 @@
-use crate::color;
 use anyhow::{Result, bail};
+use mergetopus::color;
+use mergetopus::forges;
+use mergetopus::forges::detect::{detect_forge, parse_remote_url};
 
-use crate::git_ops;
-use crate::planner;
 use crate::tui;
 use crate::tui_progress;
+use mergetopus::git_ops;
+use mergetopus::planner;
 
 /// Push an initialized merge plan (integration + slices + kokomeco) to a remote.
 ///
@@ -13,8 +15,10 @@ use crate::tui_progress;
 /// 2. Determine which remote to push to (explicit arg, auto if 1 remote, TUI if >1).
 /// 3. Verify source and target branches exist on the remote.
 /// 4. Push integration + slices + kokomeco (if present) with --force-with-lease.
+/// 5. Optionally create PRs for the pushed branches (--pr flag).
 pub fn push_command(
     remote_arg: Option<&str>,
+    create_prs: bool,
     quiet: bool,
     current_branch: &str,
     tui_title: &str,
@@ -58,7 +62,7 @@ pub fn push_command(
 
     let mut to_push: Vec<String> = Vec::new();
     to_push.push(integration_branch.clone());
-    to_push.extend(slices);
+    to_push.extend(slices.clone());
     if kokomeco_exists {
         to_push.push(kokomeco);
     }
@@ -89,6 +93,139 @@ pub fn push_command(
         &format!("\nPushed {} branch(es) to '{remote}'.", to_push.len()),
         None,
     );
+
+    // --- Step 6: Create PRs (if --pr flag set) ---
+    if create_prs {
+        create_prs_for_plan(
+            &remote,
+            &integration_branch,
+            &slices,
+            &safe_target,
+            &safe_source,
+            quiet,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn create_prs_for_plan(
+    remote: &str,
+    integration_branch: &str,
+    slices: &[String],
+    target: &str,
+    source: &str,
+    quiet: bool,
+) -> Result<()> {
+    let remote_url = git_ops::get_remote_url(remote)?;
+    let forge = detect_forge(&remote_url)?;
+    let info = parse_remote_url(&remote_url)?;
+    let repo_path = format!("{}/{}", info.owner, info.repo);
+
+    let all_branches: Vec<&str> = std::iter::once(integration_branch)
+        .chain(slices.iter().map(|s| s.as_str()))
+        .collect();
+
+    for branch in &all_branches {
+        let base = if *branch == integration_branch {
+            target
+        } else {
+            integration_branch
+        };
+
+        let (title, body) = if *branch == integration_branch {
+            (
+                format!("[MMM] Integration: {source} \u{2192} {target}"),
+                format!(
+                    "Mergetopus integration branch merging **{source}** into **{target}**.\n\nAll slice branches must be resolved before this PR can be merged."
+                ),
+            )
+        } else {
+            (
+                format!("[MMM] Slice: {branch}"),
+                format!(
+                    "Mergetopus slice branch for merging **{source}** into **{target}**.\n\nBranch: `{branch}`"
+                ),
+            )
+        };
+
+        create_single_pr(
+            forge.as_ref(),
+            &repo_path,
+            &info.owner,
+            &info.repo,
+            branch,
+            &base,
+            &title,
+            &body,
+            quiet,
+        )?;
+    }
+
+    // If a kokomeco branch exists, create a PR targeting the base branch directly.
+    let kokomeco = git_ops::consolidated_branch_name(integration_branch);
+    if git_ops::branch_exists(&kokomeco)? {
+        let title = format!("[MMM] Consolidated: {source} \u{2192} {target}");
+        let body = format!(
+            "Mergetopus consolidated merge branch for **{source}** into **{target}**.\n\n\
+             This branch contains the resolved integration tree as a proper merge commit.\n\n\
+             Branch: `{kokomeco}`"
+        );
+        create_single_pr(
+            forge.as_ref(),
+            &repo_path,
+            &info.owner,
+            &info.repo,
+            &kokomeco,
+            target,
+            &title,
+            &body,
+            quiet,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn create_single_pr(
+    forge: &dyn forges::Forge,
+    repo_path: &str,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+    quiet: bool,
+) -> Result<()> {
+    let existing = forge.find_pr_by_head(repo_path, branch)?;
+
+    if let Some(pr) = existing {
+        if !quiet {
+            color::print_info(
+                &format!(
+                    "PR already exists for {branch}: #{} ({})",
+                    pr.number, pr.html_url
+                ),
+                None,
+            );
+        }
+    } else {
+        forge.create_pr(mergetopus::forges::PrParams {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            head: branch.to_string(),
+            base: base.to_string(),
+            draft: true,
+            labels: vec![],
+        })?;
+        if !quiet {
+            color::print_success(&format!("Created PR for {branch}"), None);
+        }
+    }
+
     Ok(())
 }
 

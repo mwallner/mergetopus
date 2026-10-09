@@ -1,6 +1,51 @@
 use crate::git_ops::{run_git, run_git_allow_failure};
 use anyhow::Result;
 
+/// Source-side deletions (`D`) and renames (`R...`) between the merge base and
+/// the source, excluding paths that ended up conflicted. These are the merge
+/// decisions git applies silently — reporting them makes an audit possible
+/// (e.g. a file both sides deleted never surfaces as a conflict).
+pub fn auto_applied_entries(
+    merge_base: &str,
+    source_sha: &str,
+    conflicted: &[String],
+) -> Result<Vec<(String, String)>> {
+    let (ok, out, _) =
+        run_git_allow_failure(&["diff", "--name-status", "-M", merge_base, source_sha])?;
+    if !ok {
+        return Ok(Vec::new());
+    }
+
+    let conflicted_set = conflicted
+        .iter()
+        .map(|p| p.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut entries = Vec::new();
+    for line in out.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 2 {
+            continue;
+        }
+        let (kind, detail) = if fields[0].starts_with('D') {
+            ("D", fields[1].to_string())
+        } else if fields[0].starts_with('R') {
+            let second = *fields.get(2).unwrap_or(&fields[1]);
+            ("R", format!("{} -> {second}", fields[1]))
+        } else {
+            continue;
+        };
+
+        if fields[1..].iter().any(|p| conflicted_set.contains(*p)) {
+            continue;
+        }
+        entries.push((kind.to_string(), detail));
+    }
+
+    entries.sort();
+    Ok(entries)
+}
+
 pub fn conflicted_files() -> Result<Vec<String>> {
     let out = run_git(&["diff", "--name-only", "--diff-filter=U"])?;
     Ok(out

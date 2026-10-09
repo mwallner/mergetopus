@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::color;
-use crate::git_ops;
 use crate::helpers;
-use crate::planner;
 use crate::tui;
 use crate::tui_progress;
+use mergetopus::color;
+use mergetopus::git_ops;
+use mergetopus::planner;
+use mergetopus::win32_path::to_fs_path;
 
 /// RAII guard that creates a temporary directory on construction and deletes
 /// it (including all contents) when the guard is dropped, covering all exit
@@ -39,7 +40,10 @@ impl MergetopusTempDir {
         };
         std::fs::create_dir_all(&path)
             .context("failed to create temporary directory for merge tool files")?;
-        Ok(MergetopusTempDir { path, cleaned: false })
+        Ok(MergetopusTempDir {
+            path,
+            cleaned: false,
+        })
     }
 
     fn path(&self) -> &Path {
@@ -73,7 +77,7 @@ impl Drop for MergetopusTempDir {
 
 /// Check whether a file still contains git conflict markers.
 fn has_conflict_markers(path: &str) -> bool {
-    let Ok(content) = std::fs::read_to_string(path) else {
+    let Ok(content) = std::fs::read_to_string(to_fs_path(path)) else {
         return false;
     };
     let mut has_ours = false;
@@ -119,10 +123,13 @@ fn should_stage_after_mergetool(
         Some(true) => {
             // Explicit trust: rely solely on exit code.
             if !exit_success {
-                color::print_error(&format!(
-                    "warning: merge tool exited with non-zero status for '{path}'; \
+                color::print_error(
+                    &format!(
+                        "warning: merge tool exited with non-zero status for '{path}'; \
                      skipping staging (trustExitCode is enabled)"
-                ), None);
+                    ),
+                    None,
+                );
                 return Ok(false);
             }
             Ok(true)
@@ -148,7 +155,10 @@ fn should_stage_after_mergetool(
             };
 
             if quiet {
-                color::print_error(&format!("warning: {reason} for '{path}'; skipping staging in --quiet mode"), None);
+                color::print_error(
+                    &format!("warning: {reason} for '{path}'; skipping staging in --quiet mode"),
+                    None,
+                );
                 return Ok(false);
             }
 
@@ -168,13 +178,19 @@ fn should_stage_after_mergetool(
 /// - derives the integration branch from the slice name
 /// - reuses an existing in-progress merge when MERGE_HEAD already matches slice
 /// - otherwise checks out the integration branch and runs `git merge --no-commit`
-/// - launches `mergetool.<tool>.cmd` per conflicted path with LOCAL/BASE/REMOTE
-///   temp files and MERGED pointing at the working-tree file
+/// - in interactive mode, rename/rename / rename/delete / file-location /
+///   modify/delete conflict groups offer one decision for the whole group
+///   (take/keep either side, keep both names, accept rename/deletion); the
+///   chosen outcome is staged directly
+/// - launches `mergetool.<tool>.cmd` per remaining conflicted path with
+///   LOCAL/BASE/REMOTE temp files (`*.DELETED` sentinels for absent sides)
+///   and MERGED pointing at the working-tree file
 /// - stages each processed path and, with `do_commit`, commits the merge result
 pub fn resolve_command(
     branch_arg: Option<&str>,
     do_commit: bool,
     quiet: bool,
+    on_group: Option<mergetopus::models::GroupMode>,
     tui_title: &str,
 ) -> Result<()> {
     git_ops::ensure_longpaths_support()?;
@@ -215,6 +231,10 @@ pub fn resolve_command(
     let merge_in_progress = git_ops::merge_in_progress()?;
     let current_branch = git_ops::current_branch()?;
 
+    // Capture the slice merge's `CONFLICT (...)` lines for group-aware
+    // resolution; empty when an in-progress merge is reused.
+    let mut merge_output = String::new();
+
     let (local_commit, remote_commit) = if merge_in_progress {
         if current_branch != integration_branch {
             bail!(
@@ -239,6 +259,8 @@ pub fn resolve_command(
         if !quiet {
             let ib = integration_branch.clone();
             let sb = slice_branch.clone();
+            let out = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let out_step = out.clone();
             tui_progress::run_progress(
                 tui_title,
                 vec![
@@ -251,21 +273,153 @@ pub fn resolve_command(
                     },
                     tui_progress::ProgressStep {
                         label: format!("Merging slice branch: {slice_branch}"),
-                        action: Box::new(move || git_ops::merge_no_commit(&sb)),
+                        action: Box::new(move || {
+                            let output = git_ops::merge_no_commit(&sb)?;
+                            *out_step.lock().unwrap() = output;
+                            Ok(())
+                        }),
                     },
                 ],
             )?;
+            merge_output = out.lock().unwrap().clone();
         } else {
             git_ops::ensure_git_context()?;
             git_ops::checkout(&integration_branch)?;
-            git_ops::merge_no_commit(&slice_branch)?;
+            merge_output = git_ops::merge_no_commit(&slice_branch)?;
         }
         let local = git_ops::head_sha()?;
         (local, slice_commit.clone())
     };
 
-    let merge_base = git_ops::merge_base(&local_commit, &remote_commit)?;
-    let conflicted_paths = git_ops::conflicted_files()?;
+    let merge_base = super::select_merge_base(&local_commit, &remote_commit, quiet, tui_title)?;
+    let raw_conflicts = git_ops::conflicted_files()?;
+    // The merge itself consulted git's (possibly virtual) base selection;
+    // re-evaluate the conflict set against the single chosen base so paths
+    // that resolve cleanly relative to it never reach the conflict flow.
+    let conflicted_paths = git_ops::deconflict_against_base(
+        &raw_conflicts,
+        &merge_base,
+        &local_commit,
+        &remote_commit,
+    )?;
+
+    // Group-aware resolution: correlated paths (rename/rename, rename/delete,
+    // file location, modify/delete) get ONE decision across the whole group
+    // instead of a tool invocation per unrelated index path.
+    let stage_map = git_ops::conflict_stage_map()?;
+    if merge_output.is_empty() && !conflicted_paths.is_empty() {
+        // Resumed in-progress merge: the original CONFLICT lines are gone.
+        // Reconstruct the topology from the two merge sides so group modes
+        // keep handling rename/delete groups instead of treating every path
+        // as an ordinary content conflict. Pinned to the chosen base so it
+        // agrees with the deconflicted set above.
+        merge_output =
+            git_ops::merge_conflict_messages(&local_commit, &remote_commit, Some(&merge_base))?;
+    }
+    if conflicted_paths.len() != raw_conflicts.len() {
+        merge_output = planner::filter_conflict_lines(&merge_output, &conflicted_paths);
+    }
+    let groups = planner::build_conflict_groups(&merge_output, &conflicted_paths, &stage_map);
+    let mut settled: Vec<String> = Vec::new();
+
+    // Non-interactive group settling: explicit --on-group wins; --quiet
+    // defaults to 'theirs' (apply the slice's resolved decision); otherwise
+    // fall through to the per-group menu below.
+    let auto_mode = match on_group {
+        Some(mode) => Some(mode),
+        None if quiet => Some(mergetopus::models::GroupMode::Theirs),
+        None => None,
+    };
+    if let Some(mode) = auto_mode {
+        for group in &groups {
+            let Some(action) = planner::decide_group_action(group, mode) else {
+                continue;
+            };
+            let done = planner::apply_group_action(group, action).with_context(|| {
+                format!("applying group decision for {}", group.display_label())
+            })?;
+            color::print_success(
+                &format!("Settled {} via --on-group={mode}.", group.display_label()),
+                None,
+            );
+            settled.extend(done);
+        }
+    } else {
+        for group in groups
+            .iter()
+            .filter(|g| !g.is_single() || g.kind == mergetopus::models::ConflictKind::ModifyDelete)
+        {
+            let actions = planner::group_actions(group);
+            if actions.len() <= 1 {
+                continue;
+            }
+            let labels: Vec<&str> = actions.iter().map(|(_, label)| label.as_str()).collect();
+            let prompt = format!(
+                "Conflict group to resolve:\n\n  {}\n\nHow should this be resolved?",
+                planner::describe_group(group)
+            );
+            let Some(choice) = tui::pick_option(&prompt, &labels, tui_title)? else {
+                color::print_info("Keeping merge-tool resolution for this group.", None);
+                continue;
+            };
+            let action = actions[choice].0;
+            if action == planner::GroupAction::Manual {
+                continue;
+            }
+            let done = planner::apply_group_action(group, action).with_context(|| {
+                format!("applying group decision for {}", group.display_label())
+            })?;
+            color::print_success(
+                &format!(
+                    "Resolved {} via '{}'.",
+                    group.display_label(),
+                    actions[choice].1
+                ),
+                None,
+            );
+            settled.extend(done);
+        }
+    }
+
+    let conflicted_paths: Vec<String> = conflicted_paths
+        .into_iter()
+        .filter(|p| !settled.contains(p))
+        .collect();
+
+    if conflicted_paths.is_empty() {
+        color::print_info(
+            &format!(
+                "No conflicted files remain for merge '{}' into '{}'.",
+                slice_branch, integration_branch
+            ),
+            None,
+        );
+
+        if do_commit {
+            if git_ops::staged_has_changes()? || git_ops::merge_in_progress()? {
+                let msg =
+                    format!("Mergetopus resolve: '{slice_branch}' into '{integration_branch}'");
+                git_ops::commit_strict(&msg)?;
+                color::print_success(
+                    &format!("  Merge commit created on '{integration_branch}'."),
+                    None,
+                );
+            } else {
+                color::print_info("  No staged changes to commit.", None);
+            }
+        } else {
+            color::print_info(
+                &format!("  Merge result is staged on '{integration_branch}' but not committed."),
+                None,
+            );
+            color::print_info(
+                "  Review and commit when ready, or re-run with --commit.",
+                None,
+            );
+        }
+
+        return Ok(());
+    }
 
     let tool_name = match git_ops::get_git_config("merge.tool")? {
         Some(t) => t,
@@ -287,38 +441,17 @@ pub fn resolve_command(
         || tool_cmd.contains("${MERGED}")
         || tool_cmd.contains("%MERGED%");
 
-    if conflicted_paths.is_empty() {
-        color::print_info(&format!(
-            "No conflicted files remain for merge '{}' into '{}'.",
-            slice_branch, integration_branch
-        ), None);
-
-        if do_commit {
-            if git_ops::staged_has_changes()? || git_ops::merge_in_progress()? {
-                let msg =
-                    format!("Mergetopus resolve: '{slice_branch}' into '{integration_branch}'");
-                git_ops::commit_strict(&msg)?;
-                color::print_success(&format!("  Merge commit created on '{integration_branch}'."), None);
-            } else {
-                color::print_info("  No staged changes to commit.", None);
-            }
-        } else {
-            color::print_info(&format!("  Merge result is staged on '{integration_branch}' but not committed."), None);
-            color::print_info("  Review and commit when ready, or re-run with --commit.", None);
-        }
-
-        return Ok(());
-    }
-
     let mut tmp_dir = MergetopusTempDir::new()?;
 
     let mut skipped_paths: Vec<String> = Vec::new();
+    let mut to_stage: Vec<String> = Vec::new();
 
-    for path in &conflicted_paths {
-        // Derive a short safe name from the filename alone, suffixed with
-        // a hash of the full path to keep unique even if the same filename
-        // appears in different directories.
-        let filename = path.rsplit_once(['/', '\\'])
+    // Derive a short safe name from the filename alone, suffixed with
+    // a hash of the full path to keep unique even if the same filename
+    // appears in different directories.
+    let temp_names = |path: &str| -> (String, String, String) {
+        let filename = path
+            .rsplit_once(['/', '\\'])
             .map(|(_, name)| name)
             .unwrap_or(path);
         let safe_file: String = filename
@@ -331,36 +464,89 @@ pub fn resolve_command(
                 }
             })
             .collect();
-        let hash = path.bytes().fold(0u32, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u32)
-        });
+        let hash = path
+            .bytes()
+            .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
         let safe_name = format!("{}_{:08x}", safe_file, hash);
+        (
+            tmp_dir
+                .path()
+                .join(format!("{safe_name}.LOCAL"))
+                .to_string_lossy()
+                .into_owned(),
+            tmp_dir
+                .path()
+                .join(format!("{safe_name}.BASE"))
+                .to_string_lossy()
+                .into_owned(),
+            tmp_dir
+                .path()
+                .join(format!("{safe_name}.REMOTE"))
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
 
-        let local_tmp = tmp_dir
-            .path()
-            .join(format!("{safe_name}.LOCAL"))
-            .to_string_lossy()
-            .into_owned();
-        let base_tmp = tmp_dir
-            .path()
-            .join(format!("{safe_name}.BASE"))
-            .to_string_lossy()
-            .into_owned();
-        let remote_tmp = tmp_dir
-            .path()
-            .join(format!("{safe_name}.REMOTE"))
-            .to_string_lossy()
-            .into_owned();
+    // Fetch every LOCAL/BASE/REMOTE side with ONE git cat-file --batch
+    // process instead of three `git show` subprocesses per conflicted path.
+    let mut blob_requests: Vec<(String, String, String)> = Vec::new();
+    let mut tool_inputs: Vec<(String, String, String, String)> = Vec::new();
+    for path in &conflicted_paths {
+        let (local_tmp, base_tmp, remote_tmp) = temp_names(path);
+        tool_inputs.push((
+            path.clone(),
+            local_tmp.clone(),
+            base_tmp.clone(),
+            remote_tmp.clone(),
+        ));
+        blob_requests.push((local_commit.clone(), path.clone(), local_tmp));
+        blob_requests.push((merge_base.clone(), path.clone(), base_tmp));
+        blob_requests.push((remote_commit.clone(), path.clone(), remote_tmp));
+    }
+    let blob_present = git_ops::write_blobs_batch(&blob_requests)?;
+    let side_present = |reference: &str, path: &str| -> bool {
+        blob_present
+            .get(&format!("{reference}:{path}"))
+            .copied()
+            .unwrap_or(false)
+    };
 
-        git_ops::write_blob_to_path(&local_commit, path, &local_tmp)?;
-        git_ops::write_blob_to_path(&merge_base, path, &base_tmp)?;
-        git_ops::write_blob_to_path(&remote_commit, path, &remote_tmp)?;
+    for (path, mut local_tmp, mut base_tmp, mut remote_tmp) in tool_inputs {
+        let local_present = side_present(&local_commit, &path);
+        let base_present = side_present(&merge_base, &path);
+        let remote_present = side_present(&remote_commit, &path);
+        let path = &path;
 
-        let merged_before = std::fs::read(path).ok();
+        // Replace inputs for sides that lack the path with ".DELETED"
+        // sentinels so a deletion is not indistinguishable from a zero-byte
+        // file, mirroring git mergetool's signaling.
+        if !local_present {
+            std::fs::remove_file(&local_tmp).ok();
+            local_tmp = git_ops::prepare_absent_side_file(&local_tmp)?;
+        }
+        if !base_present {
+            std::fs::remove_file(&base_tmp).ok();
+            base_tmp = git_ops::prepare_absent_side_file(&base_tmp)?;
+        }
+        if !remote_present {
+            std::fs::remove_file(&remote_tmp).ok();
+            remote_tmp = git_ops::prepare_absent_side_file(&remote_tmp)?;
+        }
+
+        let merged_before = std::fs::read(to_fs_path(path)).ok();
         let base_before = std::fs::read(&base_tmp)
             .with_context(|| format!("failed to read temporary BASE file for '{path}'"))?;
 
-        color::print_info(&format!("Resolving '{path}' with '{tool_name}'..."), None);
+        let side_state = |present: bool| if present { "present" } else { "deleted" };
+        color::print_info(
+            &format!(
+                "Resolving '{path}' with '{tool_name}'... (LOCAL: {}, BASE: {}, REMOTE: {})",
+                side_state(local_present),
+                side_state(base_present),
+                side_state(remote_present)
+            ),
+            None,
+        );
 
         // Substitute variables in the command to handle both Unix-style ($VAR, ${VAR})
         // and Windows-style (%VAR%) variable references consistently across platforms.
@@ -388,25 +574,31 @@ pub fn resolve_command(
         };
 
         if !cmd_uses_merged {
-            let merged_after = std::fs::read(path).ok();
+            let merged_after = std::fs::read(to_fs_path(path)).ok();
             if merged_after == merged_before {
                 let base_after = std::fs::read(&base_tmp)
                     .with_context(|| format!("failed to read temporary BASE file for '{path}'"))?;
                 if base_after != base_before {
-                    std::fs::write(path, &base_after)
+                    std::fs::write(to_fs_path(path), &base_after)
                         .with_context(|| format!("failed to write resolved content to '{path}'"))?;
-                    color::print_info(&format!("Applied '{tool_name}' output from BASE temp file back to '{path}'."), None);
+                    color::print_info(
+                        &format!(
+                            "Applied '{tool_name}' output from BASE temp file back to '{path}'."
+                        ),
+                        None,
+                    );
                 }
             }
         }
 
         if should_stage_after_mergetool(path, status.success(), trust_exit_code, quiet, tui_title)?
         {
-            git_ops::stage_path(path)?;
+            to_stage.push(path.clone());
         } else {
             skipped_paths.push(path.clone());
         }
     }
+    git_ops::stage_paths_batch(&to_stage)?;
 
     let staged_count = conflicted_paths.len() - skipped_paths.len();
     let staged_paths: Vec<&String> = conflicted_paths
@@ -419,25 +611,34 @@ pub fn resolve_command(
         .collect::<Vec<_>>()
         .join(", ");
 
-    color::print_success(&format!(
-        "Resolve complete for merge '{}' into '{}'",
-        slice_branch, integration_branch
-    ), None);
-    color::print_info(&format!(
-        "  Staged {} file(s): {}",
-        staged_count,
-        if paths_list.is_empty() {
-            "(none)".to_string()
-        } else {
-            paths_list.clone()
-        }
-    ), None);
+    color::print_success(
+        &format!(
+            "Resolve complete for merge '{}' into '{}'",
+            slice_branch, integration_branch
+        ),
+        None,
+    );
+    color::print_info(
+        &format!(
+            "  Staged {} file(s): {}",
+            staged_count,
+            if paths_list.is_empty() {
+                "(none)".to_string()
+            } else {
+                paths_list.clone()
+            }
+        ),
+        None,
+    );
     if !skipped_paths.is_empty() {
-        color::print_warning(&format!(
-            "  Skipped {} file(s): {}",
-            skipped_paths.len(),
-            skipped_paths.join(", ")
-        ), None);
+        color::print_warning(
+            &format!(
+                "  Skipped {} file(s): {}",
+                skipped_paths.len(),
+                skipped_paths.join(", ")
+            ),
+            None,
+        );
     }
 
     if do_commit {
@@ -446,13 +647,22 @@ pub fn resolve_command(
                 "Mergetopus resolve: '{slice_branch}' into '{integration_branch}'\n\nResolved-Paths: {paths_list}\nSource-Commit: {remote_commit}"
             );
             git_ops::commit_strict(&msg)?;
-            color::print_success(&format!("  Merge commit created on '{integration_branch}'."), None);
+            color::print_success(
+                &format!("  Merge commit created on '{integration_branch}'."),
+                None,
+            );
         } else {
             color::print_info("  No staged changes to commit.", None);
         }
     } else {
-        color::print_info(&format!("  Merge result is staged on '{integration_branch}' but not committed."), None);
-        color::print_info("  Review and commit when ready, or re-run with --commit.", None);
+        color::print_info(
+            &format!("  Merge result is staged on '{integration_branch}' but not committed."),
+            None,
+        );
+        color::print_info(
+            "  Review and commit when ready, or re-run with --commit.",
+            None,
+        );
     }
 
     tmp_dir.clean();
