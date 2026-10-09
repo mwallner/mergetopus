@@ -332,6 +332,61 @@ Why this matters for `git blame`:
 - Kokomeco keeps a proper merge ancestry edge to the original source side, so line-blame can continue to follow where unchanged lines actually came from.
 - Temporary integration/slice execution history can be cleaned up later, while the promoted branch still shows where changes came from in the final merge history.
 
+## Handling Multiple Merge Bases (Criss-Cross Histories)
+
+If both sides of a merge each contain the other's history through *different*
+merge commits (a "criss-cross"), git sees **more than one best common
+ancestor**. A plain `git merge` then consults none of them directly: it
+builds a *virtual merge base* from all of them, which can report conflicts
+that no single base would ever produce.
+
+Mergetopus anchors slice branches, merge-tool `BASE` inputs, auto-applied
+reporting and the 3-way diff overlay to **one concrete base**, so it asks
+which one to use:
+
+- The base reported by `git merge-base A B` is the **default** — the same
+  single-base view that forge PRs (GitHub/GitLab/Bitbucket) show.
+- **Interactive mode:** when multiple bases exist, Mergetopus lists all of
+  them (with commit subjects) and lets you pick one; the default is marked
+  and used if you cancel.
+- **Non-interactive mode** (`--quiet`; `--yes` additionally for the
+  workflow and `HERE`): prints a warning naming the chosen base and
+  proceeds with the default.
+
+The conflict list is then taken **with respect to the chosen base**: git's
+merge output is re-evaluated with `git merge-tree --merge-base=<chosen>`
+(git's own ort semantics, rename detection included). Files that a single
+base merge would auto-resolve are settled immediately and never become
+slices — `Conflict count` reflects only the conflicts that genuinely remain
+against the chosen base. Genuinely conflicting paths, including correlated
+rename/rename and modify/delete groups, are sliced as usual. The same
+handling applies to `mergetopus HERE` takeover and to `mergetopus resolve`
+(resumed slice merges reconstruct their conflict topology pinned to the
+chosen base).
+
+> Requires git >= 2.42 for the pinned-base re-evaluation; older git falls
+> back to the raw merge conflict list.
+
+## Large Repositories
+
+Slice setup, resolve, status and cleanup scale to thousands of conflicted
+paths by driving git in bulk instead of per path:
+
+- Path lists are streamed to git over **stdin** (`--pathspec-from-file=-
+  --pathspec-file-nul`, `update-index --index-info`, `checkout-index
+  --stdin`), avoiding any command-line length limit (git < 2.25 falls back
+  to bounded argv chunks).
+- Conflicted paths are classified with single `ls-tree` / `cat-file
+  --batch` walks; merge-tool `LOCAL`/`BASE`/`REMOTE` inputs are fetched in
+  one batched process.
+- Slice and status reports resolve branch reachability with one
+  `git branch --merged` instead of a `merge-base --is-ancestor` probe per
+  slice branch.
+
+With the default one-slice-per-conflict policy the remaining cost is
+creating and committing one branch per slice; `--unassigned single` or
+explicit grouping collapses that into a handful of operations.
+
 ## Installation
 
 Download the `mergetopus` binary for your platform from the [GitHub Releases](https://github.com/mwallner/mergetopus/releases) page and place it in a directory on your system's `PATH`.
@@ -583,7 +638,9 @@ mergetopus resolve --commit _mmm/main/feature/slice1
 3. For each currently conflicted file, derives from the Git graph:
   - `LOCAL` as the integration branch `HEAD` before the merge
   - `REMOTE` as the slice branch tip
-  - `BASE` as `merge-base(LOCAL, REMOTE)`
+  - `BASE` as the chosen merge base of `LOCAL`/`REMOTE` (`git merge-base`
+    default, or your pick on criss-cross histories — see
+    [Handling Multiple Merge Bases](#handling-multiple-merge-bases-criss-cross-histories))
 4. Writes three temporary files per conflicted path:
   - `LOCAL`  — the file at the integration branch side
   - `BASE`   — the file at the common ancestor (merge-base)
