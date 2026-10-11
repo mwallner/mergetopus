@@ -190,6 +190,7 @@ pub fn resolve_command(
     branch_arg: Option<&str>,
     do_commit: bool,
     quiet: bool,
+    yes: bool,
     on_group: Option<mergetopus::models::GroupMode>,
     tui_title: &str,
 ) -> Result<()> {
@@ -291,7 +292,8 @@ pub fn resolve_command(
         (local, slice_commit.clone())
     };
 
-    let merge_base = super::select_merge_base(&local_commit, &remote_commit, quiet, tui_title)?;
+    let merge_base =
+        super::select_merge_base(&local_commit, &remote_commit, quiet || yes, tui_title)?;
     let raw_conflicts = git_ops::conflicted_files()?;
     // The merge itself consulted git's (possibly virtual) base selection;
     // re-evaluate the conflict set against the single chosen base so paths

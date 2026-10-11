@@ -108,6 +108,7 @@ pub fn run(args: Args) -> Result<()> {
             branch.as_deref(),
             *commit,
             args.quiet,
+            args.yes,
             *on_group,
             &tui_title,
         );

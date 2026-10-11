@@ -349,9 +349,9 @@ which one to use:
 - **Interactive mode:** when multiple bases exist, Mergetopus lists all of
   them (with commit subjects) and lets you pick one; the default is marked
   and used if you cancel.
-- **Non-interactive mode** (`--quiet`; `--yes` additionally for the
-  workflow and `HERE`): prints a warning naming the chosen base and
-  proceeds with the default.
+- **Non-interactive mode** (`--quiet`, and `--yes` with a TUI-suppressed
+  run): prints a warning naming the chosen base and proceeds with the
+  default.
 
 The conflict list is then taken **with respect to the chosen base**: git's
 merge output is re-evaluated with `git merge-tree --merge-base=<chosen>`

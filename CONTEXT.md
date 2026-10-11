@@ -251,7 +251,7 @@ Organized by functional area, this module wraps all Git interactions:
 Each command has its own module. `mod.rs` additionally hosts shared flow
 helpers: `select_merge_base()` (criss-cross base choice: TUI pick with the
 `git merge-base` output marked as default; warn-and-default in the
-non-interactive modes: `--quiet`, plus `--yes` for workflow/HERE).
+non-interactive modes: `--quiet`, plus `--yes` for workflow/HERE/resolve).
 
 #### `cmd_merge_workflow.rs` - Main Workflow
 - Source branch selection/validation
@@ -370,7 +370,7 @@ Command-line interface definition using clap:
 
 2. **Conflict Detection** (`git_ops/merge.rs`, `commands::select_merge_base`)
    - Choose the concrete merge base (criss-cross: interactive pick, default
-     = `git merge-base`; warn + default in non-interactive modes)
+     = `git merge-base`; warn + default with `--quiet`/`--yes`)
    - Attempt merge with `--no-commit`
    - Re-evaluate the conflicted set against the chosen base via
      `git merge-tree --merge-base` (virtual-base artifacts settle to the
@@ -610,7 +610,8 @@ from all best common ancestors and can conflict files that no single base
 would. Mergetopus therefore:
 - asks the user which concrete base to anchor to when several exist
   (default = the one `git merge-base A B` reports, mirroring forge PR bases;
-  `--quiet`, plus `--yes` for workflow/HERE, warns and uses the default)
+  `--quiet`, plus `--yes` for workflow/HERE/resolve, warns and uses the
+  default)
 - re-evaluates the conflict list against that base with
   `git merge-tree --merge-base=<chosen>` — settling single-base-clean paths
   from the pinned result tree and keeping genuine (including correlated
