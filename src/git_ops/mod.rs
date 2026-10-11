@@ -332,24 +332,26 @@ pub fn write_blobs_batch(requests: &[(String, String, String)]) -> Result<BTreeM
             }
             let trimmed = header.trim_end_matches('\n');
             let parts: Vec<&str> = trimmed.split(' ').collect();
-            let blob_size: Option<usize> = parts
-                .get(1)
-                .filter(|t| **t == "blob")
-                .and_then(|_| parts.get(2))
-                .and_then(|sz| sz.parse().ok());
-            let Some(size) = blob_size else {
-                if trimmed.ends_with(" missing") {
-                    present.insert(format!("{reference}:{path}"), false);
-                    continue;
-                }
-                bail!("unexpected cat-file response for '{reference}:{path}': {trimmed}");
+            let size: Option<usize> = parts.get(2).and_then(|sz| sz.parse().ok());
+            let Some(size) = size.filter(|_| parts.len() == 3) else {
+                // "<spec> missing" or unparsable header: absent at that ref.
+                present.insert(format!("{reference}:{path}"), false);
+                continue;
             };
+            let is_blob = parts.get(1).is_some_and(|t| *t == "blob");
             let mut buf = vec![0u8; size];
             std::io::Read::read_exact(&mut reader, &mut buf)
                 .context("failed reading cat-file blob bytes")?;
             let mut newline = [0u8; 1];
             std::io::Read::read_exact(&mut reader, &mut newline)
                 .context("failed reading cat-file terminator")?;
+            if !is_blob {
+                // Tree/commit at that path (e.g. directory collision): the
+                // body was drained to keep the stream in sync; degrade this
+                // spec to "absent" instead of aborting the whole batch.
+                present.insert(format!("{reference}:{path}"), false);
+                continue;
+            }
             std::fs::write(dest, &buf).with_context(|| {
                 format!("failed to write blob of '{reference}:{path}' to '{dest}'")
             })?;
@@ -392,22 +394,23 @@ pub fn commit_messages_batch(oids: &[String]) -> Result<BTreeMap<String, String>
             }
             let trimmed = header.trim_end_matches('\n');
             let parts: Vec<&str> = trimmed.split(' ').collect();
-            if trimmed.ends_with(" missing") {
+            let size: Option<usize> = parts.get(2).and_then(|sz| sz.parse().ok());
+            let Some(size) = size.filter(|_| parts.len() == 3) else {
                 out.insert(oid.clone(), String::new());
                 continue;
-            }
-            if !(parts.len() == 3 && parts[1] == "commit") {
-                bail!("unexpected cat-file response for '{oid}': {trimmed}");
-            }
-            let size: usize = parts[2]
-                .parse()
-                .with_context(|| format!("bad cat-file size header: {trimmed}"))?;
+            };
+            let is_commit = parts.get(1).is_some_and(|t| *t == "commit");
             let mut buf = vec![0u8; size];
             std::io::Read::read_exact(&mut reader, &mut buf)
                 .context("failed reading cat-file commit bytes")?;
             let mut newline = [0u8; 1];
             std::io::Read::read_exact(&mut reader, &mut newline)
                 .context("failed reading cat-file terminator")?;
+            if !is_commit {
+                // non-commit object at that oid: body drained, empty message
+                out.insert(oid.clone(), String::new());
+                continue;
+            }
             let object = String::from_utf8_lossy(&buf).into_owned();
             let message = match object.split_once("\n\n") {
                 Some((_headers, msg)) => msg,
@@ -1454,12 +1457,38 @@ mod tests {
         conflict_stage_map, deconflict_against_base, is_slice_branch_ref, list_all_slice_branches,
         list_slice_branches_for_integration, prepare_absent_side_file,
         resolve_paths_as_deleted_batch, restore_from_ref, restore_ours, restore_paths_from_ref,
-        tree_entries, write_blob_to_path, write_stage_to_staged_path, write_stages_to_staged_paths,
+        tree_entries, write_blob_to_path, write_blobs_batch, write_stage_to_staged_path,
+        write_stages_to_staged_paths,
     };
     use super::{conflicted_files, merge_base};
     use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn cat_file_batch_degrades_unexpected_object_shapes() -> TestResult<()> {
+        let repo = test_helpers::init_repo()?;
+        test_helpers::write_file(&repo, "pkg/f.txt", "x\n")?;
+        test_helpers::commit_all(&repo, "base")?;
+        let head = test_helpers::git(&repo, &["rev-parse", "HEAD"])?;
+        let head = head.trim().to_string();
+
+        // "pkg" is a tree, not a blob; the batch must drain it, report the
+        // spec absent, and still answer the following (valid) spec.
+        let dest_tree = repo.join("out-tree").to_string_lossy().into_owned();
+        let dest_blob = repo.join("out-blob").to_string_lossy().into_owned();
+        let present = test_helpers::with_repo_cwd(&repo, || {
+            write_blobs_batch(&[
+                (head.clone(), "pkg".to_string(), dest_tree.clone()),
+                (head.clone(), "pkg/f.txt".to_string(), dest_blob.clone()),
+            ])
+        })?;
+        assert_eq!(present.get(&format!("{head}:pkg")), Some(&false));
+        assert_eq!(present.get(&format!("{head}:pkg/f.txt")), Some(&true));
+        assert!(!std::path::Path::new(&dest_tree).exists());
+        assert_eq!(std::fs::read_to_string(&dest_blob)?.trim(), "x");
+        Ok(())
+    }
 
     #[test]
     fn gitlink_stage_entries_survive_batch_materialization() -> TestResult<()> {
