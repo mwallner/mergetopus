@@ -225,6 +225,12 @@ pub fn write_stages_to_staged_paths(entries: &[(String, String, String)]) -> Res
         .filter(|p| seen.insert(p))
         .collect();
     ordered.reverse();
+    // gitlinks have no blob to materialize: staging them is the whole job
+    let checkoutable: Vec<&str> = ordered
+        .iter()
+        .copied()
+        .filter(|p| by_path[p].0 != "160000")
+        .collect();
 
     if supports_pathspec_from_file() {
         let mut payload = Vec::new();
@@ -238,9 +244,12 @@ pub fn write_stages_to_staged_paths(entries: &[(String, String, String)]) -> Res
             payload.push(0);
         }
         run_git_stdin(&["update-index", "--add", "-z", "--index-info"], &payload)?;
+        if checkoutable.is_empty() {
+            return Ok(()); // all gitlinks: staging was the whole job
+        }
         return run_git_stdin(
             &["checkout-index", "-f", "-z", "--stdin"],
-            &nul_lines(ordered.iter().copied(), ""),
+            &nul_lines(checkoutable.into_iter(), ""),
         );
     }
 
@@ -269,7 +278,11 @@ pub fn write_stages_to_staged_paths(entries: &[(String, String, String)]) -> Res
         }
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         run_git(&arg_refs)?;
-        let paths: Vec<String> = batch.iter().map(|p| (*p).to_string()).collect();
+        let paths: Vec<String> = batch
+            .iter()
+            .filter(|p| by_path[*p].0 != "160000")
+            .map(|p| (*p).to_string())
+            .collect();
         restore_worktree_from_index(&paths)?;
     }
     Ok(())
@@ -872,10 +885,16 @@ pub fn tree_entries(
                 continue;
             };
             let mut parts = meta.split_whitespace();
-            let (Some(mode), Some("blob"), Some(oid)) = (parts.next(), parts.next(), parts.next())
+            let (Some(mode), Some(typ), Some(oid)) = (parts.next(), parts.next(), parts.next())
             else {
                 continue;
             };
+            // blobs, and gitlinks (160000 commit rows: mode must survive so
+            // staging recreates the submodule entry without checking out)
+            let gitlink = typ == "commit" && mode == "160000";
+            if typ != "blob" && !gitlink {
+                continue;
+            }
             found.insert(name.to_string(), (mode.to_string(), oid.to_string()));
         }
     }
@@ -1435,12 +1454,66 @@ mod tests {
         conflict_stage_map, deconflict_against_base, is_slice_branch_ref, list_all_slice_branches,
         list_slice_branches_for_integration, prepare_absent_side_file,
         resolve_paths_as_deleted_batch, restore_from_ref, restore_ours, restore_paths_from_ref,
-        tree_entries, write_blob_to_path, write_stage_to_staged_path,
+        tree_entries, write_blob_to_path, write_stage_to_staged_path, write_stages_to_staged_paths,
     };
     use super::{conflicted_files, merge_base};
     use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn gitlink_stage_entries_survive_batch_materialization() -> TestResult<()> {
+        let repo = test_helpers::init_repo()?;
+        test_helpers::write_file(&repo, "seed.txt", "seed\n")?;
+        test_helpers::commit_all(&repo, "seed")?;
+
+        // Build a tree containing a gitlink without needing a real submodule.
+        let empty_tree = test_helpers::git(&repo, &["hash-object", "-t", "tree", "/dev/null"])?;
+        let fake_sha = {
+            let obj = format!(
+                "tree {}\nauthor t <t@t> 0 +0000\ncommitter t <t@t> 0 +0000\n\nsub\n",
+                empty_tree.trim()
+            );
+            std::fs::write(repo.join(".cmt"), obj)?;
+            let sha = test_helpers::git(&repo, &["hash-object", "-t", "commit", "-w", ".cmt"])?;
+            std::fs::remove_file(repo.join(".cmt")).ok();
+            sha
+        };
+        test_helpers::git(
+            &repo,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{},sub", fake_sha.trim()),
+            ],
+        )?;
+        let tree = test_helpers::git(&repo, &["write-tree"])?;
+        test_helpers::git(&repo, &["read-tree", "--reset", "HEAD"])?;
+
+        // classification sees the gitlink with its mode intact
+        let entries =
+            test_helpers::with_repo_cwd(&repo, || tree_entries(tree.trim(), &["sub".to_string()]))?;
+        let (mode, oid) = entries.get("sub").expect("gitlink listed");
+        assert_eq!(mode, "160000");
+        assert_eq!(oid.trim(), fake_sha.trim());
+
+        // batch staging of a gitlink must not fail on a checkout of it
+        test_helpers::with_repo_cwd(&repo, || {
+            write_stages_to_staged_paths(&[(
+                "160000".to_string(),
+                fake_sha.trim().to_string(),
+                "sub2".to_string(),
+            )])
+        })?;
+        let staged = test_helpers::git(&repo, &["ls-files", "-s", "sub2"])?;
+        assert!(
+            staged.starts_with("160000 "),
+            "gitlink staged with mode: {staged}"
+        );
+        assert!(!repo.join("sub2").exists(), "no worktree materialization");
+        Ok(())
+    }
 
     #[test]
     fn bulk_and_single_pathspecs_never_glob_match_siblings() -> TestResult<()> {
