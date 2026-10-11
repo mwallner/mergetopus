@@ -240,7 +240,7 @@ pub fn write_stages_to_staged_paths(entries: &[(String, String, String)]) -> Res
         run_git_stdin(&["update-index", "--add", "-z", "--index-info"], &payload)?;
         return run_git_stdin(
             &["checkout-index", "-f", "-z", "--stdin"],
-            &nul_lines(ordered.iter().copied()),
+            &nul_lines(ordered.iter().copied(), ""),
         );
     }
 
@@ -420,10 +420,11 @@ pub fn stage_paths_batch(paths: &[String]) -> Result<()> {
     if supports_pathspec_from_file() {
         return run_git_stdin(
             &["add", "--pathspec-from-file=-", "--pathspec-file-nul"],
-            &nul_lines(paths.iter().map(String::as_str)),
+            &nul_lines(paths.iter().map(String::as_str), LITERAL_MAGIC),
         );
     }
     for chunk in pathspec_chunks(paths) {
+        let chunk = literalize(&chunk);
         let mut args: Vec<&str> = vec!["add", "--"];
         args.extend(chunk.iter().map(String::as_str));
         run_git(&args)?;
@@ -437,10 +438,11 @@ fn restore_worktree_from_index(paths: &[String]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
+    // checkout-index takes index file names, not pathspecs: already exact.
     if supports_pathspec_from_file() {
         return run_git_stdin(
             &["checkout-index", "-f", "-z", "--stdin"],
-            &nul_lines(paths.iter().map(String::as_str)),
+            &nul_lines(paths.iter().map(String::as_str), ""),
         );
     }
     for chunk in pathspec_chunks(paths) {
@@ -708,19 +710,21 @@ pub fn path_exists_in_ref(reference: &str, path: &str) -> Result<bool> {
 }
 
 pub fn restore_from_ref(reference: &str, path: &str) -> Result<()> {
+    let spec = format!("{LITERAL_MAGIC}{path}");
     run_git(&[
         "restore",
         &format!("--source={reference}"),
         "--staged",
         "--worktree",
         "--",
-        path,
+        &spec,
     ])
     .map(|_| ())
 }
 
 pub fn rm_path(path: &str) -> Result<()> {
-    run_git(&["rm", "--ignore-unmatch", "--", path]).map(|_| ())
+    let spec = format!("{LITERAL_MAGIC}{path}");
+    run_git(&["rm", "--ignore-unmatch", "--", &spec]).map(|_| ())
 }
 
 // ── bulk path operations ───────────────────────────────────────────────────
@@ -758,14 +762,28 @@ fn run_git_stdin(args: &[&str], payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// NUL-terminated path lines.
-fn nul_lines<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<u8> {
+/// NUL-terminated path lines. `magic` (e.g. `":(literal)"`) prefixes each
+/// line for commands that interpret their input as pathspecs; pass an empty
+/// string for literal-name consumers (checkout-index).
+fn nul_lines<'a>(paths: impl Iterator<Item = &'a str>, magic: &str) -> Vec<u8> {
     let mut buf = Vec::new();
     for p in paths {
+        buf.extend_from_slice(magic.as_bytes());
         buf.extend_from_slice(p.as_bytes());
         buf.push(0);
     }
     buf
+}
+
+/// Force exact matching: without it `?`/`*`/`[...]` in a path act as
+/// wildcards and a bulk call can touch sibling files.
+const LITERAL_MAGIC: &str = ":(literal)";
+
+fn literalize(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|p| format!("{LITERAL_MAGIC}{p}"))
+        .collect()
 }
 
 static PATHSPEC_FROM_FILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -836,6 +854,7 @@ pub fn tree_entries(
     }
 
     for chunk in pathspec_chunks(&plain) {
+        let chunk = literalize(&chunk);
         let mut args: Vec<&str> = vec![
             "-c",
             "core.quotePath=false",
@@ -846,6 +865,7 @@ pub fn tree_entries(
         ];
         args.extend(chunk.iter().map(String::as_str));
         let entries_out = run_git(&args)?;
+        // (chunk is already literalized below)
         for line in entries_out.lines() {
             // "<mode> <type> <oid>\t<path>"
             let Some((meta, name)) = line.split_once('\t') else {
@@ -863,7 +883,7 @@ pub fn tree_entries(
     for p in &exotic {
         if path_exists_in_ref(reference, p)? {
             let oid = run_git(&["rev-parse", &format!("{reference}:{p}")])?;
-            let listing = run_git(&["ls-tree", reference, "--", p])?;
+            let listing = run_git(&["ls-tree", reference, "--", &format!("{LITERAL_MAGIC}{p}")])?;
             let mode = listing
                 .split_whitespace()
                 .next()
@@ -877,8 +897,25 @@ pub fn tree_entries(
 
 /// `git restore --source=<reference> --staged --worktree` for many paths.
 pub fn restore_paths_from_ref(reference: &str, paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let source_arg = format!("--source={reference}");
+    if supports_pathspec_from_file() {
+        return run_git_stdin(
+            &[
+                "restore",
+                &source_arg,
+                "--staged",
+                "--worktree",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ],
+            &nul_lines(paths.iter().map(String::as_str), LITERAL_MAGIC),
+        );
+    }
     for chunk in pathspec_chunks(paths) {
-        let source_arg = format!("--source={reference}");
+        let chunk = literalize(&chunk);
         let mut args: Vec<&str> = vec![
             "restore",
             source_arg.as_str(),
@@ -906,10 +943,11 @@ pub fn rm_paths_batch(paths: &[String]) -> Result<()> {
                 "--pathspec-from-file=-",
                 "--pathspec-file-nul",
             ],
-            &nul_lines(paths.iter().map(String::as_str)),
+            &nul_lines(paths.iter().map(String::as_str), LITERAL_MAGIC),
         );
     }
     for chunk in pathspec_chunks(paths) {
+        let chunk = literalize(&chunk);
         let mut args: Vec<&str> = vec!["rm", "-q", "--ignore-unmatch", "--"];
         args.extend(chunk.iter().map(String::as_str));
         run_git(&args)?;
@@ -932,10 +970,11 @@ pub fn resolve_paths_as_deleted_batch(paths: &[String]) -> Result<()> {
                 "--pathspec-from-file=-",
                 "--pathspec-file-nul",
             ],
-            &nul_lines(paths.iter().map(String::as_str)),
+            &nul_lines(paths.iter().map(String::as_str), LITERAL_MAGIC),
         )?;
     } else {
         for chunk in pathspec_chunks(paths) {
+            let chunk = literalize(&chunk);
             let mut args: Vec<&str> = vec!["rm", "-f", "--cached", "--ignore-unmatch", "--"];
             args.extend(chunk.iter().map(String::as_str));
             run_git(&args)?;
@@ -1005,7 +1044,7 @@ pub fn paths_last_touched(
             source_sha,
             "--",
         ])
-        .args(chunk.iter().map(String::as_str));
+        .args(chunk.iter().map(|p| format!("{LITERAL_MAGIC}{p}")));
         cmd.stdout(std::process::Stdio::piped());
         let child = cmd.spawn().context("failed to spawn git log")?;
         // Early completion (or a panic while streaming) must not leave a git
@@ -1364,7 +1403,8 @@ pub fn prepare_absent_side_file(dest: &str) -> Result<String> {
 
 /// Stage a single path in the index (`git add -- <path>`).
 pub fn stage_path(path: &str) -> Result<()> {
-    run_git(&["add", "--", path]).map(|_| ())
+    let spec = format!("{LITERAL_MAGIC}{path}");
+    run_git(&["add", "--", &spec]).map(|_| ())
 }
 
 pub fn select_conflicts_by_list(all_conflicts: &[String], csv: &str) -> Result<Vec<String>> {
@@ -1394,13 +1434,63 @@ mod tests {
     use super::{
         conflict_stage_map, deconflict_against_base, is_slice_branch_ref, list_all_slice_branches,
         list_slice_branches_for_integration, prepare_absent_side_file,
-        resolve_paths_as_deleted_batch, restore_ours, write_blob_to_path,
-        write_stage_to_staged_path,
+        resolve_paths_as_deleted_batch, restore_from_ref, restore_ours, restore_paths_from_ref,
+        tree_entries, write_blob_to_path, write_stage_to_staged_path,
     };
     use super::{conflicted_files, merge_base};
     use crate::test_support as test_helpers;
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+    #[test]
+    fn bulk_and_single_pathspecs_never_glob_match_siblings() -> TestResult<()> {
+        let repo = test_helpers::init_repo()?;
+        test_helpers::write_file(&repo, "q?x.txt", "one\n")?;
+        test_helpers::write_file(&repo, "qcx.txt", "two\n")?;
+        test_helpers::write_file(&repo, "a[1].txt", "three\n")?;
+        test_helpers::write_file(&repo, "a11.txt", "four\n")?;
+        test_helpers::commit_all(&repo, "base")?;
+
+        // classification: literal pathspec lists exactly the named paths
+        let paths = vec!["q?x.txt".to_string(), "a[1].txt".to_string()];
+        let entries = test_helpers::with_repo_cwd(&repo, || tree_entries("HEAD", &paths))?;
+        assert_eq!(entries.len(), 2, "only the literal names: {entries:?}");
+
+        // dirty BOTH the glob-y files and their wildcard siblings
+        test_helpers::write_file(&repo, "q?x.txt", "dirty\n")?;
+        test_helpers::write_file(&repo, "qcx.txt", "dirty\n")?;
+        test_helpers::with_repo_cwd(&repo, || restore_paths_from_ref("HEAD", &paths[..1]))?;
+        assert_eq!(
+            std::fs::read_to_string(repo.join("q?x.txt"))?.trim(),
+            "one",
+            "named file restored"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("qcx.txt"))?.trim(),
+            "dirty",
+            "wildcard sibling must not be touched"
+        );
+
+        // single-path variant likewise
+        test_helpers::write_file(&repo, "a[1].txt", "dirty\n")?;
+        test_helpers::write_file(&repo, "a11.txt", "dirty\n")?;
+        test_helpers::with_repo_cwd(&repo, || restore_from_ref("HEAD", "a[1].txt"))?;
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a11.txt"))?.trim(),
+            "dirty"
+        );
+
+        // bulk deletion only removes the named path
+        test_helpers::with_repo_cwd(&repo, || {
+            resolve_paths_as_deleted_batch(&["a[1].txt".to_string()])
+        })?;
+        assert!(!repo.join("a[1].txt").exists());
+        assert!(
+            repo.join("a11.txt").exists(),
+            "literal deletion must not glob"
+        );
+        Ok(())
+    }
 
     #[test]
     fn bulk_deletion_streams_more_paths_than_an_argv_chunk() -> TestResult<()> {
