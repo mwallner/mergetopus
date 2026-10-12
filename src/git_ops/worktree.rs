@@ -230,32 +230,33 @@ fn pick_new_worktree_path(base: &Path, branch: &str, entries: &[WorktreeEntry]) 
     // a short hash-only name.
     const MAX_PATH_LEN: usize = 240;
     let base_len = base.to_string_lossy().len() + 1; // +1 for separator
-    if base_len + base_name.len() > MAX_PATH_LEN {
+    // Preferred leaf: the branch name, or a short hash form when even that
+    // would exceed the limit. The collision scan below runs for BOTH cases —
+    // a stale directory or hash collision must not yield an occupied path.
+    let preferred_leaf = if base_len + base_name.len() > MAX_PATH_LEN {
         let hash = branch
             .bytes()
             .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-        // Ensure the fallback also respects the limit.
-        let fallback_leaf = {
-            // Try progressively shorter prefixes until one fits.
-            let candidates = [
-                format!("mm-{:08x}", hash), // 11 chars
-                format!("wt-{:08x}", hash), // 11 chars
-                format!("m{:08x}", hash),   // 9 chars
-                format!("{:08x}", hash),    // 8 chars
-            ];
-            candidates
-                .into_iter()
-                .find(|leaf| base_len + leaf.len() <= MAX_PATH_LEN)
-                .unwrap_or_else(|| format!("{:08x}", hash))
-        };
-        return base.join(fallback_leaf);
-    }
+        // Try progressively shorter prefixes until one fits.
+        let candidates = [
+            format!("mm-{:08x}", hash), // 11 chars
+            format!("wt-{:08x}", hash), // 11 chars
+            format!("m{:08x}", hash),   // 9 chars
+            format!("{:08x}", hash),    // 8 chars
+        ];
+        candidates
+            .into_iter()
+            .find(|leaf| base_len + leaf.len() <= MAX_PATH_LEN)
+            .unwrap_or_else(|| format!("{:08x}", hash))
+    } else {
+        base_name.clone()
+    };
 
     for idx in 0..1000usize {
         let leaf = if idx == 0 {
-            base_name.clone()
+            preferred_leaf.clone()
         } else {
-            format!("{base_name}-{idx}")
+            format!("{preferred_leaf}-{idx}")
         };
         let candidate = base.join(leaf);
         if known.iter().any(|p| p == &candidate) {
@@ -266,7 +267,7 @@ fn pick_new_worktree_path(base: &Path, branch: &str, entries: &[WorktreeEntry]) 
         }
     }
 
-    base.join(format!("{}-fallback", base_name))
+    base.join(format!("{preferred_leaf}-fallback"))
 }
 
 pub fn switch_to_dir(path: &Path) -> Result<()> {
@@ -664,6 +665,20 @@ mod tests {
             !leaf.contains("aaaaa"),
             "leaf should not contain the original branch name"
         );
+    }
+
+    #[test]
+    fn pick_new_worktree_path_avoids_collisions_for_long_branch_names() {
+        let tmp = std::env::temp_dir().join(format!("mmm-wt-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let branch = "integration/with-a-really-long-name-that-keeps-going-and-going-across-240-chars-for-sure-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let first = pick_new_worktree_path(&tmp, branch, &[]);
+        // Occupy it; the next pick must differ (even though the branch name
+        // forced the hash fallback leaf).
+        std::fs::create_dir_all(&first).unwrap();
+        let second = pick_new_worktree_path(&tmp, branch, &[]);
+        assert_ne!(first, second, "fallback leaf must still collide-check");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
