@@ -1,5 +1,10 @@
 //! The library surface must be reachable from an external crate without
 //! building the TUI/CLI stack (overlay-plan task 0a acceptance).
+//!
+//! NOTE: this target compiles with the package's default features, so it
+//! proves type reachability only. The actual `default-features = false`
+//! guarantee is enforced by the "Check library without default features"
+//! step in every build workflow (`cargo check --no-default-features --lib`).
 
 #[test]
 fn planner_branch_logic_is_pure_and_public() {
