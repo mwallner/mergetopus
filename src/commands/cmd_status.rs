@@ -283,8 +283,14 @@ impl RefSnapshot {
 }
 
 fn build_status_unit(integration_branch: &str, snap: &RefSnapshot) -> Result<StatusUnit> {
-    let (target, source) = planner::parse_integration_branch(integration_branch)
-        .unwrap_or_else(|| ("(unknown)".to_string(), "(unknown)".to_string()));
+    // Original refs from the partial-merge metadata; sanitized tokens would
+    // render e.g. 'release_1.4' as the target and break the kokomeco
+    // ancestry probe on refs that never existed.
+    let (target, source) = if planner::parse_integration_branch(integration_branch).is_some() {
+        planner::original_workflow_refs(integration_branch)?
+    } else {
+        ("(unknown)".to_string(), "(unknown)".to_string())
+    };
     let integration_ref = snap
         .best_ref(integration_branch)
         .unwrap_or_else(|| integration_branch.to_string());
@@ -449,8 +455,12 @@ fn print_integration_status(
     let kokomeco = git_ops::consolidated_branch_name(&integration_branch);
     if git_ops::branch_exists_anywhere(&kokomeco)? {
         // Determine the intended target branch from the integration branch name.
-        let expected_target =
-            planner::parse_integration_branch(&integration_branch).map(|(target, _)| target);
+        let expected_target = match planner::parse_integration_branch(&integration_branch) {
+            Some(_) => planner::original_workflow_refs(&integration_branch)
+                .ok()
+                .map(|(target, _)| target),
+            None => None,
+        };
 
         let target_mismatch = expected_target
             .as_ref()
