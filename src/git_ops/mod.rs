@@ -1546,49 +1546,52 @@ mod tests {
 
     #[test]
     fn bulk_and_single_pathspecs_never_glob_match_siblings() -> TestResult<()> {
+        // '?' and '*' cannot appear in Windows filenames, but bracket
+        // classes can — and '[1]' is still a wildcard that matches '1':
+        // a glob-y path must never touch its sibling 'a11.txt'.
         let repo = test_helpers::init_repo()?;
-        test_helpers::write_file(&repo, "q?x.txt", "one\n")?;
-        test_helpers::write_file(&repo, "qcx.txt", "two\n")?;
-        test_helpers::write_file(&repo, "a[1].txt", "three\n")?;
-        test_helpers::write_file(&repo, "a11.txt", "four\n")?;
+        test_helpers::write_file(&repo, "a[1]1.txt", "one\n")?;
+        test_helpers::write_file(&repo, "a11.txt", "two\n")?;
+        test_helpers::write_file(&repo, "b[2]2.txt", "three\n")?;
+        test_helpers::write_file(&repo, "b22.txt", "four\n")?;
         test_helpers::commit_all(&repo, "base")?;
 
         // classification: literal pathspec lists exactly the named paths
-        let paths = vec!["q?x.txt".to_string(), "a[1].txt".to_string()];
+        let paths = vec!["a[1]1.txt".to_string(), "b[2]2.txt".to_string()];
         let entries = test_helpers::with_repo_cwd(&repo, || tree_entries("HEAD", &paths))?;
         assert_eq!(entries.len(), 2, "only the literal names: {entries:?}");
 
-        // dirty BOTH the glob-y files and their wildcard siblings
-        test_helpers::write_file(&repo, "q?x.txt", "dirty\n")?;
-        test_helpers::write_file(&repo, "qcx.txt", "dirty\n")?;
+        // dirty the glob-y file and its wildcard sibling
+        test_helpers::write_file(&repo, "a[1]1.txt", "dirty\n")?;
+        test_helpers::write_file(&repo, "a11.txt", "dirty\n")?;
         test_helpers::with_repo_cwd(&repo, || restore_paths_from_ref("HEAD", &paths[..1]))?;
         assert_eq!(
-            std::fs::read_to_string(repo.join("q?x.txt"))?.trim(),
+            std::fs::read_to_string(repo.join("a[1]1.txt"))?.trim(),
             "one",
             "named file restored"
         );
         assert_eq!(
-            std::fs::read_to_string(repo.join("qcx.txt"))?.trim(),
+            std::fs::read_to_string(repo.join("a11.txt"))?.trim(),
             "dirty",
             "wildcard sibling must not be touched"
         );
 
         // single-path variant likewise
-        test_helpers::write_file(&repo, "a[1].txt", "dirty\n")?;
-        test_helpers::write_file(&repo, "a11.txt", "dirty\n")?;
-        test_helpers::with_repo_cwd(&repo, || restore_from_ref("HEAD", "a[1].txt"))?;
+        test_helpers::write_file(&repo, "b[2]2.txt", "dirty\n")?;
+        test_helpers::write_file(&repo, "b22.txt", "dirty\n")?;
+        test_helpers::with_repo_cwd(&repo, || restore_from_ref("HEAD", "b[2]2.txt"))?;
         assert_eq!(
-            std::fs::read_to_string(repo.join("a11.txt"))?.trim(),
+            std::fs::read_to_string(repo.join("b22.txt"))?.trim(),
             "dirty"
         );
 
         // bulk deletion only removes the named path
         test_helpers::with_repo_cwd(&repo, || {
-            resolve_paths_as_deleted_batch(&["a[1].txt".to_string()])
+            resolve_paths_as_deleted_batch(&["b[2]2.txt".to_string()])
         })?;
-        assert!(!repo.join("a[1].txt").exists());
+        assert!(!repo.join("b[2]2.txt").exists());
         assert!(
-            repo.join("a11.txt").exists(),
+            repo.join("b22.txt").exists(),
             "literal deletion must not glob"
         );
         Ok(())
