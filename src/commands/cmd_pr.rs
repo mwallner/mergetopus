@@ -10,6 +10,7 @@ use mergetopus::planner;
 pub fn pr_command(
     action: PrAction,
     source: Option<&str>,
+    remote_override: Option<&str>,
     quiet: bool,
     current_branch: &str,
     tui_title: &str,
@@ -23,7 +24,7 @@ pub fn pr_command(
     // fragments only); recovered from the partial-merge commit trailers.
     let (target, source) = planner::original_workflow_refs(&integration_branch)?;
 
-    let remote = resolve_remote(None, quiet, tui_title)?;
+    let remote = resolve_remote(remote_override, quiet, tui_title)?;
     let remote_url = git_ops::get_remote_url(&remote)?;
     let forge = detect_forge(&remote_url)?;
     let info = parse_remote_url(&remote_url)?;

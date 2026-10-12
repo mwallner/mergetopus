@@ -179,13 +179,28 @@ pub fn run(args: Args) -> Result<()> {
     if let Some(Commands::Pr { action }) = &args.command {
         let (current_branch, tui_title) = current_branch_and_tui_title_worktree()?;
 
-        let (pr_action, source) = match action {
-            PrSubcommand::Create { source } => (cmd_pr::PrAction::Create, source.as_deref()),
-            PrSubcommand::Sync { source } => (cmd_pr::PrAction::Sync, source.as_deref()),
-            PrSubcommand::List { source } => (cmd_pr::PrAction::List, source.as_deref()),
+        let (pr_action, source, remote) = match action {
+            PrSubcommand::Create { source, remote } => (
+                cmd_pr::PrAction::Create,
+                source.as_deref(),
+                remote.as_deref(),
+            ),
+            PrSubcommand::Sync { source, remote } => {
+                (cmd_pr::PrAction::Sync, source.as_deref(), remote.as_deref())
+            }
+            PrSubcommand::List { source, remote } => {
+                (cmd_pr::PrAction::List, source.as_deref(), remote.as_deref())
+            }
         };
 
-        return cmd_pr::pr_command(pr_action, source, args.quiet, &current_branch, &tui_title);
+        return cmd_pr::pr_command(
+            pr_action,
+            source,
+            remote,
+            args.quiet,
+            &current_branch,
+            &tui_title,
+        );
     }
 
     // if we get to this point, it means we're starting or selecting integration with the "mergetopus <source>" command

@@ -326,6 +326,11 @@ pub enum PrSubcommand {
         /// Source branch or integration branch name.
         #[arg(value_name = "SOURCE")]
         source: Option<String>,
+
+        /// Remote whose URL identifies the forge (defaults to origin, or a
+        /// picker when multiple remotes are configured).
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
     },
 
     /// Sync existing pull request titles and descriptions.
@@ -336,6 +341,11 @@ pub enum PrSubcommand {
         /// Source branch or integration branch name.
         #[arg(value_name = "SOURCE")]
         source: Option<String>,
+
+        /// Remote whose URL identifies the forge (defaults to origin, or a
+        /// picker when multiple remotes are configured).
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
     },
 
     /// List pull request URLs for all MMM branches.
@@ -346,5 +356,10 @@ pub enum PrSubcommand {
         /// Source branch or integration branch name.
         #[arg(value_name = "SOURCE")]
         source: Option<String>,
+
+        /// Remote whose URL identifies the forge (defaults to origin, or a
+        /// picker when multiple remotes are configured).
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
     },
 }
