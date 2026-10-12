@@ -113,6 +113,20 @@ fn parse_scp_url(full: &str, at_pos: usize) -> Result<RemoteInfo> {
     })
 }
 
+/// Match a remote host to a known SaaS forge. Known-host matching ignores
+/// any `:port` (ssh URLs often carry one); the caller keeps the full host
+/// (with port) for API URL construction.
+fn match_known_host(host: &str) -> Option<ForgeId> {
+    let name = host.split(':').next().unwrap_or(host);
+    match name {
+        "github.com" => Some(ForgeId::GitHub),
+        h if SAAS_GITLAB_HOSTS.contains(&h) => Some(ForgeId::GitLab),
+        h if SAAS_BITBUCKET_HOSTS.contains(&h) => Some(ForgeId::Bitbucket),
+        h if SAAS_FORGEJO_HOSTS.contains(&h) => Some(ForgeId::Forgejo),
+        _ => None,
+    }
+}
+
 pub fn detect_forge(remote_url: &str) -> Result<Box<dyn Forge>> {
     let info = parse_remote_url(remote_url)?;
     let host = info.host.as_str();
@@ -126,12 +140,9 @@ pub fn detect_forge(remote_url: &str) -> Result<Box<dyn Forge>> {
         );
     }
 
-    let forge_id = match host {
-        "github.com" => ForgeId::GitHub,
-        host if SAAS_GITLAB_HOSTS.contains(&host) => ForgeId::GitLab,
-        host if SAAS_BITBUCKET_HOSTS.contains(&host) => ForgeId::Bitbucket,
-        host if SAAS_FORGEJO_HOSTS.contains(&host) => ForgeId::Forgejo,
-        _ => {
+    let forge_id = match match_known_host(host) {
+        Some(id) => id,
+        None => {
             let config_type = crate::git_ops::get_git_config("mergetopus.forge-type")?;
             match config_type.as_deref() {
                 Some("gitlab") => ForgeId::GitLab,
@@ -211,6 +222,18 @@ mod tests {
         assert!(is_bitbucket_cloud_host("altssh.bitbucket.org"));
         assert!(!is_bitbucket_cloud_host("bitbucket.example.com"));
         assert!(!is_bitbucket_cloud_host("bitbucket.company.com:7999"));
+    }
+
+    #[test]
+    fn match_known_host_ignores_ports() {
+        assert_eq!(match_known_host("github.com"), Some(ForgeId::GitHub));
+        assert_eq!(
+            match_known_host("gitlab.com:22"),
+            Some(ForgeId::GitLab),
+            "ssh gitlab URL with explicit port must still match"
+        );
+        assert_eq!(match_known_host("codeberg.org"), Some(ForgeId::Forgejo));
+        assert_eq!(match_known_host("git.internal.example"), None);
     }
 
     #[test]
