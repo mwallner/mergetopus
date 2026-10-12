@@ -10,33 +10,44 @@ pub fn auto_applied_entries(
     source_sha: &str,
     conflicted: &[String],
 ) -> Result<Vec<(String, String)>> {
-    let (ok, out, _) =
-        run_git_allow_failure(&["diff", "--name-status", "-M", merge_base, source_sha])?;
+    // -z: NUL-separated records, no path quoting — machine-safe for every
+    // legal filename (tabs/quotes/unicode). Layout per entry:
+    //   "<status>\0<path>\0"  (or "<status>\0<old>\0<new>\0" for R/C)
+    let (ok, out, _) = run_git_allow_failure(&[
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--name-status",
+        "-z",
+        "-M",
+        merge_base,
+        source_sha,
+    ])?;
     if !ok {
         return Ok(Vec::new());
     }
 
     let conflicted_set = conflicted
         .iter()
-        .map(|p| p.as_str())
+        .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
 
     let mut entries = Vec::new();
-    for line in out.lines() {
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 2 {
-            continue;
-        }
-        let (kind, detail) = if fields[0].starts_with('D') {
-            ("D", fields[1].to_string())
-        } else if fields[0].starts_with('R') {
-            let second = *fields.get(2).unwrap_or(&fields[1]);
-            ("R", format!("{} -> {second}", fields[1]))
+    let mut fields = out.split('\0').filter(|f| !f.is_empty()).peekable();
+    while let Some(status) = fields.next() {
+        let Some(path) = fields.next() else { break };
+        let (kind, detail, involved): (char, String, Vec<&str>) = if status.starts_with('D') {
+            ('D', path.to_string(), vec![path])
+        } else if status.starts_with('R') || status.starts_with('C') {
+            match fields.next() {
+                Some(new_path) => ('R', format!("{path} -> {new_path}"), vec![path, new_path]),
+                None => break,
+            }
         } else {
             continue;
         };
 
-        if fields[1..].iter().any(|p| conflicted_set.contains(*p)) {
+        if involved.iter().any(|p| conflicted_set.contains(*p)) {
             continue;
         }
         entries.push((kind.to_string(), detail));
