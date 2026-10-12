@@ -199,6 +199,11 @@ fn find_or_create_pr(
                 return Ok(Some(existing));
             }
 
+            // Sync must not create: only Create reaches the create path.
+            if matches!(action, PrAction::Sync) {
+                return Ok(None);
+            }
+
             let pr = forge.create_pr(forges::PrParams {
                 owner: owner.to_string(),
                 repo: repo.to_string(),
@@ -560,6 +565,32 @@ mod tests {
         let slice_pr = forge.find_pr_by_head("o/r", "_mmm/main/ts/slice1").unwrap();
         assert!(slice_pr.is_some());
         assert!(slice_pr.unwrap().draft);
+    }
+
+    /// `sync` must never create missing PRs (CLI contract: "Does not create
+    /// new PRs") — only existing ones get updated.
+    #[test]
+    fn exec_pr_action_inner_sync_does_not_create() {
+        let forge = MockForge::new(vec![]);
+        let before = forge.existing_prs.lock().unwrap().len();
+        exec_pr_action_inner(
+            &forge,
+            "owner",
+            "repo",
+            "_mmm/main/feature/integration",
+            &["_mmm/main/feature/slice1".to_string()],
+            None,
+            "main",
+            "feature",
+            "origin",
+            PrAction::Sync,
+        )
+        .expect("sync without existing PRs succeeds as no-op");
+        assert_eq!(
+            forge.existing_prs.lock().unwrap().len(),
+            before,
+            "sync must not create PRs"
+        );
     }
 
     #[test]
