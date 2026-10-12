@@ -28,6 +28,12 @@ jobs:
           Set-StrictMode -Version Latest
           cargo install --locked cargo-bundle-licenses
 
+      - name: Check library without default features
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          cargo check --no-default-features --lib
+
       - name: Build + Test
         shell: pwsh
         run: |

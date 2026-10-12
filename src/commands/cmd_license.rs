@@ -1,4 +1,4 @@
-use crate::color;
+use mergetopus::color;
 use serde::Deserialize;
 use std::collections::HashMap;
 

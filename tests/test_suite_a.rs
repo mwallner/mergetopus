@@ -136,6 +136,176 @@ fn release_a_slice_parent_is_merge_base_for_explicit_slice_group() -> TestResult
     Ok(())
 }
 
+fn branch_exists(repo: &std::path::Path, branch: &str) -> bool {
+    test_helpers::git(
+        repo,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
+}
+
+/// `--unassigned single` must collapse every ungrouped conflict into one slice branch.
+#[test]
+fn release_a_unassigned_single_creates_one_shared_slice() -> TestResult<()> {
+    let repo = test_helpers::setup_two_conflicts_repo()?;
+
+    let out = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--unassigned", "single"])?;
+    assert!(
+        out.status.success(),
+        "mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        branch_exists(&repo, "_mmm/main/feature/slice1"),
+        "shared unassigned slice should exist"
+    );
+    assert!(
+        !branch_exists(&repo, "_mmm/main/feature/slice2"),
+        "no second slice should be created when unassigned files share one slice"
+    );
+
+    let message = test_helpers::git(
+        &repo,
+        &["log", "-1", "--format=%B", "_mmm/main/feature/slice1"],
+    )?;
+    assert!(
+        message.contains("* a.txt"),
+        "slice must carry a.txt:\n{message}"
+    );
+    assert!(
+        message.contains("* b.txt"),
+        "slice must carry b.txt:\n{message}"
+    );
+    assert!(
+        message.contains("Slice-Paths: a.txt, b.txt"),
+        "combined slice should list both paths:\n{message}"
+    );
+
+    Ok(())
+}
+
+/// Default behavior stays one slice branch per unassigned file.
+#[test]
+fn release_a_unassigned_defaults_to_separate_slices() -> TestResult<()> {
+    let repo = test_helpers::setup_two_conflicts_repo()?;
+
+    let out = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        out.status.success(),
+        "mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(branch_exists(&repo, "_mmm/main/feature/slice1"));
+    assert!(
+        branch_exists(&repo, "_mmm/main/feature/slice2"),
+        "default policy keeps one slice branch per unassigned file"
+    );
+
+    let first = test_helpers::git(
+        &repo,
+        &["log", "-1", "--format=%B", "_mmm/main/feature/slice1"],
+    )?;
+    assert!(
+        first.contains("* a.txt"),
+        "slice1 should carry a.txt:\n{first}"
+    );
+    assert!(
+        !first.contains("* b.txt"),
+        "slice1 must not carry b.txt:\n{first}"
+    );
+
+    let second = test_helpers::git(
+        &repo,
+        &["log", "-1", "--format=%B", "_mmm/main/feature/slice2"],
+    )?;
+    assert!(
+        second.contains("* b.txt"),
+        "slice2 should carry b.txt:\n{second}"
+    );
+
+    Ok(())
+}
+
+/// An explicit group keeps its own slice; the remaining conflicts share one slice.
+#[test]
+fn release_a_unassigned_single_coexists_with_explicit_group() -> TestResult<()> {
+    let repo = test_helpers::setup_two_conflicts_repo()?;
+
+    let out = test_helpers::mergetopus(
+        &repo,
+        &[
+            "feature",
+            "--quiet",
+            "--select-paths",
+            "a.txt",
+            "--unassigned",
+            "single",
+        ],
+    )?;
+    assert!(
+        out.status.success(),
+        "mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(branch_exists(&repo, "_mmm/main/feature/slice1"));
+    assert!(branch_exists(&repo, "_mmm/main/feature/slice2"));
+    assert!(
+        !branch_exists(&repo, "_mmm/main/feature/slice3"),
+        "explicit group plus one shared slice is two slices"
+    );
+
+    let explicit = test_helpers::git(
+        &repo,
+        &["log", "-1", "--format=%B", "_mmm/main/feature/slice1"],
+    )?;
+    assert!(
+        explicit.contains("* a.txt"),
+        "slice1 should be the explicit group:\n{explicit}"
+    );
+    assert!(
+        !explicit.contains("* b.txt"),
+        "slice1 must not carry b.txt:\n{explicit}"
+    );
+
+    let shared = test_helpers::git(
+        &repo,
+        &["log", "-1", "--format=%B", "_mmm/main/feature/slice2"],
+    )?;
+    assert!(
+        shared.contains("* b.txt"),
+        "slice2 should carry the leftover:\n{shared}"
+    );
+
+    Ok(())
+}
+
+/// An invalid --unassigned value is rejected instead of silently defaulting.
+#[test]
+fn release_a_rejects_invalid_unassigned_mode() -> TestResult<()> {
+    let repo = test_helpers::setup_two_conflicts_repo()?;
+
+    let out = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--unassigned", "bogus"])?;
+    assert!(!out.status.success(), "invalid mode should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("separate") && stderr.contains("single"),
+        "error should list valid modes:\n{stderr}"
+    );
+
+    Ok(())
+}
+
 /// Validates resolve behavior: stage-only resolve does not commit, and --commit writes one integration merge commit.
 #[test]
 fn release_a_resolve_stages_by_default_and_commits_with_flag() -> TestResult<()> {
@@ -410,6 +580,199 @@ fn consolidation_uses_original_and_source_as_parents_and_integration_tree() -> T
     assert_eq!(
         consolidated_tree, integration_tree,
         "consolidated commit tree must match final integration branch state"
+    );
+
+    Ok(())
+}
+
+/// Consolidating after resolving a conflict by deleting the file must not include it in the
+/// kokomeco tree — git restore --source (the previous approach) would preserve files that existed
+/// in both parents but were deleted in integration; read-tree --reset -u replaces the entire index.
+#[test]
+fn consolidation_excludes_deleted_files_from_slice_resolution() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        create.status.success(),
+        "initial mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    // Resolve the slice by deleting the conflicting file.
+    test_helpers::git(&repo, &["checkout", slice_branch()])?;
+    test_helpers::git(&repo, &["rm", "conflict.txt"])?;
+    test_helpers::git(&repo, &["commit", "-m", "resolve by deleting conflict.txt"])?;
+
+    // Merge the resolved slice into integration.
+    // The slice deleted the file, so this produces a modify/delete conflict —
+    // accept the deletion by removing the file and committing.
+    test_helpers::git(&repo, &["checkout", integration_branch()])?;
+    let merge_result = test_helpers::git(
+        &repo,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            "merge resolved slice (deletion)",
+            slice_branch(),
+        ],
+    );
+    match merge_result {
+        Ok(_) => { /* clean merge — proceed */ }
+        Err(e) if e.to_string().contains("CONFLICT") => {
+            // Accept the deletion side.
+            test_helpers::git(&repo, &["rm", "conflict.txt"])?;
+            test_helpers::git(&repo, &["commit", "-m", "merge resolved slice (deletion)"])?;
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
+
+    // Verify integration no longer has the file.
+    let integration_files = test_helpers::git(
+        &repo,
+        &["ls-tree", "--name-only", "-r", integration_branch()],
+    )?;
+    assert!(
+        !integration_files.lines().any(|l| l == "conflict.txt"),
+        "conflict.txt should not be in integration after deletion resolution"
+    );
+
+    // Consolidate.
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let consolidate = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--yes"])?;
+    assert!(
+        consolidate.status.success(),
+        "consolidation run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&consolidate.stdout),
+        String::from_utf8_lossy(&consolidate.stderr)
+    );
+
+    // Verify kokomeco tree does NOT contain the deleted file.
+    let kokomeco_files =
+        test_helpers::git(&repo, &["ls-tree", "--name-only", "-r", kokomeco_branch()])?;
+    assert!(
+        !kokomeco_files.lines().any(|l| l == "conflict.txt"),
+        "conflict.txt must not be in kokomeco tree after deletion resolution:\n{}",
+        kokomeco_files
+    );
+
+    // Double-check via worktree that the file really doesn't exist.
+    let worktree_path = repo.join("conflict.txt");
+    assert!(
+        !worktree_path.exists(),
+        "conflict.txt must not exist in worktree after consolidation"
+    );
+
+    Ok(())
+}
+
+/// Status reports kokomeco as \"Unmerged\" when it exists but has not been merged into its target.
+#[test]
+fn status_shows_kokomeco_unmerged_when_not_merged_into_target() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    // Create the merge plan and resolve the slice.
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(create.status.success(), "initial run failed");
+
+    test_helpers::git(&repo, &["checkout", slice_branch()])?;
+    test_helpers::git(&repo, &["commit", "--allow-empty", "-m", "resolve"])?;
+    test_helpers::git(&repo, &["checkout", integration_branch()])?;
+    let merge_result = test_helpers::git(
+        &repo,
+        &["merge", "--no-ff", "-m", "merge slice", slice_branch()],
+    );
+    if merge_result.is_err() {
+        test_helpers::git(&repo, &["add", "."])?;
+        test_helpers::git(&repo, &["commit", "-m", "merge slice (with conflicts)"])?;
+    }
+
+    // Consolidate.
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let consolidate = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--yes"])?;
+    assert!(consolidate.status.success(), "consolidation failed");
+
+    // Switch back to main before checking status (kokomeco branch is now HEAD).
+    test_helpers::git(&repo, &["checkout", "main"])?;
+
+    // Status should show kokomeco as "Unmerged" (not yet merged into main).
+    let status = test_helpers::mergetopus(&repo, &["--quiet", "status", "feature"])?;
+    assert!(
+        status.status.success(),
+        "status failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("Merged into target:   No"),
+        "expected 'Merged into target:   No' in status output, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("kokomeco"),
+        "expected kokomeco reference in status output:\n{stdout}"
+    );
+
+    Ok(())
+}
+
+/// Status reports kokomeco as \"Merged\" after it has been merged into the target branch.
+#[test]
+fn status_shows_kokomeco_merged_when_merged_into_target() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    // Create plan, resolve, consolidate.
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(create.status.success());
+
+    test_helpers::git(&repo, &["checkout", slice_branch()])?;
+    test_helpers::git(&repo, &["commit", "--allow-empty", "-m", "resolve"])?;
+    test_helpers::git(&repo, &["checkout", integration_branch()])?;
+    let merge_result = test_helpers::git(
+        &repo,
+        &["merge", "--no-ff", "-m", "merge slice", slice_branch()],
+    );
+    if merge_result.is_err() {
+        test_helpers::git(&repo, &["add", "."])?;
+        test_helpers::git(&repo, &["commit", "-m", "merge slice (with conflicts)"])?;
+    }
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    let consolidate = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--yes"])?;
+    assert!(consolidate.status.success());
+
+    // Switch back to main before checking status (kokomeco branch is now HEAD).
+    test_helpers::git(&repo, &["checkout", "main"])?;
+
+    // Merge kokomeco into target (main).
+    let kokomeco = kokomeco_branch();
+    test_helpers::git(
+        &repo,
+        &["merge", "--no-ff", "-m", "merge kokomeco", &kokomeco],
+    )?;
+
+    // Status should now show "Merged".
+    let status = test_helpers::mergetopus(&repo, &["--quiet", "status", "feature"])?;
+    assert!(
+        status.status.success(),
+        "status failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("Merged into target:   Yes"),
+        "expected 'Merged into target: Yes' in status output, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("has already been merged"),
+        "expected 'has already been merged' in status output:\n{stdout}"
     );
 
     Ok(())
@@ -921,8 +1284,7 @@ fn configure_marker_tool(repo: &std::path::Path) -> TestResult<()> {
     #[cfg(target_os = "windows")]
     let cmd = r#"(echo ^<^<^<^<^<^<^< HEAD & echo ours & echo ======= & echo theirs & echo ^>^>^>^>^>^>^> branch) > "%MERGED%""#;
     #[cfg(not(target_os = "windows"))]
-    let cmd =
-        r#"printf '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n' > "$MERGED""#;
+    let cmd = r#"printf '<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n' > "$MERGED""#;
     test_helpers::git(repo, &["config", "mergetool.testmerge.cmd", cmd])?;
     Ok(())
 }
@@ -945,7 +1307,10 @@ fn setup_resolve_scenario() -> TestResult<(std::path::PathBuf, String)> {
 fn resolve_trust_exit_code_true_exit_zero_stages_file() -> TestResult<()> {
     let (repo, slice) = setup_resolve_scenario()?;
     configure_resolve_tool(&repo, 0)?;
-    test_helpers::git(&repo, &["config", "mergetool.testmerge.trustExitCode", "true"])?;
+    test_helpers::git(
+        &repo,
+        &["config", "mergetool.testmerge.trustExitCode", "true"],
+    )?;
 
     let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
     assert!(
@@ -973,7 +1338,10 @@ fn resolve_trust_exit_code_true_exit_zero_stages_file() -> TestResult<()> {
 fn resolve_trust_exit_code_true_exit_nonzero_skips_file() -> TestResult<()> {
     let (repo, slice) = setup_resolve_scenario()?;
     configure_resolve_tool(&repo, 1)?;
-    test_helpers::git(&repo, &["config", "mergetool.testmerge.trustExitCode", "true"])?;
+    test_helpers::git(
+        &repo,
+        &["config", "mergetool.testmerge.trustExitCode", "true"],
+    )?;
 
     let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
     assert!(
@@ -1115,7 +1483,10 @@ fn resolve_tool_specific_trust_overrides_global() -> TestResult<()> {
     configure_resolve_tool(&repo, 1)?;
     // Global says don't trust, tool-specific says trust
     test_helpers::git(&repo, &["config", "mergetool.trustExitCode", "false"])?;
-    test_helpers::git(&repo, &["config", "mergetool.testmerge.trustExitCode", "true"])?;
+    test_helpers::git(
+        &repo,
+        &["config", "mergetool.testmerge.trustExitCode", "true"],
+    )?;
 
     let out = test_helpers::mergetopus(&repo, &["--quiet", "resolve", &slice])?;
     assert!(
@@ -1134,5 +1505,168 @@ fn resolve_tool_specific_trust_overrides_global() -> TestResult<()> {
         "tool-specific trust should override global:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
+    Ok(())
+}
+
+/// Criss-cross histories have multiple merge bases; git merges against a
+/// virtual base while Mergetopus anchors to one concrete base. In --quiet
+/// mode it must warn and use the 'git merge-base A B' default, and the slice
+/// branch must be created at exactly that default base.
+#[test]
+fn criss_cross_quiet_uses_default_merge_base_and_warns() -> TestResult<()> {
+    let repo = test_helpers::init_repo()?;
+    test_helpers::write_file(&repo, "f.txt", "0\n")?;
+    test_helpers::write_file(&repo, "u.txt", "a\n")?;
+    test_helpers::commit_all(&repo, "A")?;
+
+    test_helpers::git(&repo, &["checkout", "-b", "b1"])?;
+    test_helpers::write_file(&repo, "f.txt", "1\n")?;
+    test_helpers::commit_all(&repo, "B1 edits f")?;
+
+    test_helpers::git(&repo, &["checkout", "-b", "b2", "main"])?;
+    test_helpers::write_file(&repo, "f.txt", "2\n")?;
+    test_helpers::write_file(&repo, "u.txt", "9\n")?;
+    test_helpers::commit_all(&repo, "B2 edits f and u")?;
+
+    // X = b1 merge B2 (resolve f to 1)
+    let b1 = test_helpers::git(&repo, &["rev-parse", "b1"])?;
+    let b2 = test_helpers::git(&repo, &["rev-parse", "b2"])?;
+    test_helpers::git(&repo, &["checkout", "b1"])?;
+    test_helpers::git(&repo, &["merge", "--no-commit", b2.trim()]).ok();
+    test_helpers::write_file(&repo, "f.txt", "1\n")?;
+    test_helpers::git(&repo, &["add", "f.txt"])?;
+    test_helpers::git(&repo, &["commit", "-m", "X merges B2"])?;
+
+    // Y = b2 merge B1 (resolve f to 2)
+    test_helpers::git(&repo, &["checkout", "b2"])?;
+    test_helpers::git(&repo, &["merge", "--no-commit", b1.trim()]).ok();
+    test_helpers::write_file(&repo, "f.txt", "2\n")?;
+    test_helpers::git(&repo, &["add", "f.txt"])?;
+    test_helpers::git(&repo, &["commit", "-m", "Y merges B1"])?;
+
+    // Two distinct merge bases now exist between b1 (X) and b2 (Y).
+    let all_bases = test_helpers::git(&repo, &["merge-base", "--all", "b1", "b2"])?;
+    assert!(
+        all_bases.lines().count() == 2,
+        "expected a criss-cross with 2 merge bases, got:\n{all_bases}"
+    );
+    let default_base = test_helpers::git(&repo, &["merge-base", "b1", "b2"])?;
+
+    test_helpers::git(&repo, &["checkout", "b1"])?;
+    let out = test_helpers::mergetopus(&repo, &["b2", "--quiet"])?;
+    assert!(
+        out.status.success(),
+        "quiet criss-cross workflow failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("merge bases"),
+        "quiet mode must warn about multiple merge bases:\n{combined}"
+    );
+
+    // Against the single chosen base, f was modified by only ONE side
+    // (the other side equals the base), so the conflict is a virtual-base
+    // artifact: Mergetopus must settle it exactly as a single-base merge
+    // would and NOT create any slice for it.
+    let branches = test_helpers::git(&repo, &["branch", "--list", "_mmm/*"])?;
+    assert!(
+        branches.contains("integration"),
+        "integration branch should exist:\n{branches}"
+    );
+    assert!(
+        !branches.contains("slice"),
+        "no slice may be created for a path that auto-resolves against the chosen base:\n{branches}"
+    );
+
+    let integration = "_mmm/b1/b2/integration";
+    let f_ref = format!("{integration}:f.txt");
+    let f_content = test_helpers::git(&repo, &["show", &f_ref])?;
+    // ours X has f=1, theirs Y has f=2; base B1 has f=1, base B2 has f=2.
+    // The side matching the chosen base yields to the other side.
+    let expected_f = if default_base.trim() == b1.trim() {
+        "2"
+    } else {
+        "1"
+    };
+    assert_eq!(
+        f_content.trim(),
+        expected_f,
+        "single-base resolution against {}",
+        default_base.trim()
+    );
+
+    // The settled path shows up as zero conflicts instead of one slice.
+    assert!(
+        combined.contains("Conflict count: 0"),
+        "virtual-base conflict must drop out of the conflict count:\n{combined}"
+    );
+    Ok(())
+}
+
+/// Bulk slice setup must be correct at scale: 150 conflicting files collapse
+/// into ONE shared unassigned slice via --unassigned single, with every file
+/// carrying the source-side content and trailers.
+#[test]
+fn bulk_unassigned_single_slice_at_scale() -> TestResult<()> {
+    let repo = test_helpers::init_repo()?;
+    let n = 150usize;
+    for i in 0..n {
+        test_helpers::write_file(&repo, &format!("dir/file{i:03}.txt"), &format!("base{i}\n"))?;
+    }
+    test_helpers::commit_all(&repo, "base")?;
+
+    test_helpers::git(&repo, &["checkout", "-b", "feature"])?;
+    for i in 0..n {
+        test_helpers::write_file(
+            &repo,
+            &format!("dir/file{i:03}.txt"),
+            &format!("feature{i}\n"),
+        )?;
+    }
+    test_helpers::commit_all(&repo, "feature edits all")?;
+
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    for i in 0..n {
+        test_helpers::write_file(&repo, &format!("dir/file{i:03}.txt"), &format!("main{i}\n"))?;
+    }
+    test_helpers::commit_all(&repo, "main edits all")?;
+
+    let out = test_helpers::mergetopus(&repo, &["feature", "--quiet", "--unassigned", "single"])?;
+    assert!(
+        out.status.success(),
+        "bulk workflow failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("for {n} file(s)")),
+        "one slice should cover all {n} files:\n{stdout}"
+    );
+
+    let slice = "_mmm/main/feature/slice1";
+    assert!(!branch_exists(&repo, "_mmm/main/feature/slice2"));
+    for idx in [0usize, 7, 74, 149] {
+        let name = format!("dir/file{idx:03}.txt");
+        let content = test_helpers::git(&repo, &["show", &format!("{slice}:{name}")])?;
+        assert_eq!(content, format!("feature{idx}"), "slice content for {name}");
+    }
+
+    // Provenance trailers survived batching for a sample of paths.
+    let msg = test_helpers::git(&repo, &["log", "-1", "--format=%B", slice])?;
+    assert!(
+        msg.contains("Source-Path: dir/file000.txt")
+            && msg.contains("Source-Path: dir/file149.txt"),
+        "per-path trailers must list every slice file:\n{msg}"
+    );
+    assert!(
+        msg.contains("Co-authored-by:"),
+        "author trailers must survive bulk provenance:\n{msg}"
+    );
     Ok(())
 }

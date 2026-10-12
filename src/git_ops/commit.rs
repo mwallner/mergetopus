@@ -1,12 +1,47 @@
 use crate::git_ops::run_git;
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
+use std::io::Write;
+use std::process::Command;
+
+fn commit_via_stdin(message: &str, extra_args: &[&str]) -> Result<()> {
+    let mut cmd = Command::new("git");
+    cmd.arg("commit");
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.arg("-F").arg("-");
+
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to spawn git commit")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(message.as_bytes())
+            .context("failed to write commit message to stdin")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for git commit")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git commit failed: {}", stderr.trim());
+    }
+
+    Ok(())
+}
 
 pub fn commit(message: &str) -> Result<()> {
-    run_git(&["commit", "--allow-empty", "-m", message]).map(|_| ())
+    commit_via_stdin(message, &["--allow-empty"])
 }
 
 pub fn commit_strict(message: &str) -> Result<()> {
-    run_git(&["commit", "-m", message]).map(|_| ())
+    commit_via_stdin(message, &[])
 }
 
 /// Return the full commit message of the tip commit on `branch`.

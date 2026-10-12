@@ -29,7 +29,7 @@ When you run `mergetopus <source>`, it:
 3. Runs `git merge --no-commit` against the source.
 4. Commits everything that merged cleanly into the integration branch.
 5. Resets conflicted files back to `ours` in that same commit — they'll be dealt with in slices.
-6. Lets you group conflicts into slices (via TUI or `--select-paths`). Any conflicts you don't explicitly group get their own one-file slice.
+6. Lets you group conflicts into slices (via TUI or `--select-paths`). Conflicts you don't explicitly group get their own one-file slice by default, or one shared slice with `--unassigned single` (the TUI asks which one you want).
 7. Creates a branch per slice from the merge base, with the source-side version of each file and a commit message noting where it came from.
 
 From there, use `mergetopus resolve` to work through each slice with your merge tool (see [Resolving Conflicts](#resolving-conflicts)).
@@ -132,6 +132,9 @@ _mmm/main/feature/slice1   B---S1 (explicit group: fileA,fileB)
 _mmm/main/feature/slice2   B---S2 (explicit group: fileC)
 _mmm/main/feature/slice3   B---S3 (auto singleton for unassigned fileD)
 _mmm/main/feature/slice4   B---S4 (auto singleton for unassigned fileE)
+
+with --unassigned single, fileD and fileE share one branch instead:
+_mmm/main/feature/slice3   B---S3 (unassigned: fileD,fileE)
 ```
 
 3. After resolution and optional consolidation:
@@ -329,6 +332,61 @@ Why this matters for `git blame`:
 - Kokomeco keeps a proper merge ancestry edge to the original source side, so line-blame can continue to follow where unchanged lines actually came from.
 - Temporary integration/slice execution history can be cleaned up later, while the promoted branch still shows where changes came from in the final merge history.
 
+## Handling Multiple Merge Bases (Criss-Cross Histories)
+
+If both sides of a merge each contain the other's history through *different*
+merge commits (a "criss-cross"), git sees **more than one best common
+ancestor**. A plain `git merge` then consults none of them directly: it
+builds a *virtual merge base* from all of them, which can report conflicts
+that no single base would ever produce.
+
+Mergetopus anchors slice branches, merge-tool `BASE` inputs, auto-applied
+reporting and the 3-way diff overlay to **one concrete base**, so it asks
+which one to use:
+
+- The base reported by `git merge-base A B` is the **default** — the same
+  single-base view that forge PRs (GitHub/GitLab/Bitbucket) show.
+- **Interactive mode:** when multiple bases exist, Mergetopus lists all of
+  them (with commit subjects) and lets you pick one; the default is marked
+  and used if you cancel.
+- **Non-interactive mode** (`--quiet`, and `--yes` with a TUI-suppressed
+  run): prints a warning naming the chosen base and proceeds with the
+  default.
+
+The conflict list is then taken **with respect to the chosen base**: git's
+merge output is re-evaluated with `git merge-tree --merge-base=<chosen>`
+(git's own ort semantics, rename detection included). Files that a single
+base merge would auto-resolve are settled immediately and never become
+slices — `Conflict count` reflects only the conflicts that genuinely remain
+against the chosen base. Genuinely conflicting paths, including correlated
+rename/rename and modify/delete groups, are sliced as usual. The same
+handling applies to `mergetopus HERE` takeover and to `mergetopus resolve`
+(resumed slice merges reconstruct their conflict topology pinned to the
+chosen base).
+
+> Requires git >= 2.42 for the pinned-base re-evaluation; older git falls
+> back to the raw merge conflict list.
+
+## Large Repositories
+
+Slice setup, resolve, status and cleanup scale to thousands of conflicted
+paths by driving git in bulk instead of per path:
+
+- Path lists are streamed to git over **stdin** (`--pathspec-from-file=-
+  --pathspec-file-nul`, `update-index --index-info`, `checkout-index
+  --stdin`), avoiding any command-line length limit (git < 2.25 falls back
+  to bounded argv chunks).
+- Conflicted paths are classified with single `ls-tree` / `cat-file
+  --batch` walks; merge-tool `LOCAL`/`BASE`/`REMOTE` inputs are fetched in
+  one batched process.
+- Slice and status reports resolve branch reachability with one
+  `git branch --merged` instead of a `merge-base --is-ancestor` probe per
+  slice branch.
+
+With the default one-slice-per-conflict policy the remaining cost is
+creating and committing one branch per slice; `--unassigned single` or
+explicit grouping collapses that into a handful of operations.
+
 ## Installation
 
 Download the `mergetopus` binary for your platform from the [GitHub Releases](https://github.com/mwallner/mergetopus/releases) page and place it in a directory on your system's `PATH`.
@@ -428,6 +486,12 @@ Explicit conflict grouping by path list:
 ```bash
 # Put explicit paths into one grouped slice; all remaining conflicts become one-file slices
 mergetopus feature/refactor-auth --select-paths src/a.rs,src/b.rs
+
+# Same, but every remaining conflict shares one slice branch
+mergetopus feature/refactor-auth --select-paths src/a.rs,src/b.rs --unassigned single
+
+# No explicit grouping: one shared slice for every conflict
+mergetopus feature/refactor-auth --quiet --unassigned single
 ```
 
 Interactive conflict grouping (with `F3` opening your configured `diff.tool`, or the inline 3-way view when no `diff.tool` is set) when `--select-paths` is not provided:
@@ -457,6 +521,12 @@ mergetopus feature/refactor-auth --quiet --yes
 # Show slice/integration progress status
 mergetopus status feature/refactor-auth
 
+# Include pull/merge request URLs in status output
+mergetopus status feature/refactor-auth --pr
+
+# Show global MMM overview across local + configured remotes
+mergetopus status
+
 # Show global MMM overview across local + configured remotes
 mergetopus status
 
@@ -468,6 +538,9 @@ mergetopus verify --global
 
 # Cleanup temporary integration/slice branches (interactive confirmation)
 mergetopus cleanup
+
+# Close associated PRs when cleaning up branches
+mergetopus cleanup --close-prs
 
 # Push an initialized merge plan to a remote
 mergetopus push origin
@@ -502,6 +575,7 @@ Status behavior:
 
 - with no argument: prints a global MMM overview table (integration, target, source, state, pending/resolved, kokomeco)
 - with a source/integration argument: prints detailed status for that one integration branch
+- with `--pr`: also fetches and displays pull/merge request URLs and states (requires forge auth)
 - when discoverable refs do not form a valid integration family, reports them under `Orphaned MMM Refs (warning)`
 
 Detailed integration status output includes:
@@ -564,7 +638,9 @@ mergetopus resolve --commit _mmm/main/feature/slice1
 3. For each currently conflicted file, derives from the Git graph:
   - `LOCAL` as the integration branch `HEAD` before the merge
   - `REMOTE` as the slice branch tip
-  - `BASE` as `merge-base(LOCAL, REMOTE)`
+  - `BASE` as the chosen merge base of `LOCAL`/`REMOTE` (`git merge-base`
+    default, or your pick on criss-cross histories — see
+    [Handling Multiple Merge Bases](#handling-multiple-merge-bases-criss-cross-histories))
 4. Writes three temporary files per conflicted path:
   - `LOCAL`  — the file at the integration branch side
   - `BASE`   — the file at the common ancestor (merge-base)
@@ -625,6 +701,99 @@ git config merge.tool vimdiff
 git config mergetool.vimdiff.cmd 'vimdiff "$LOCAL" "$BASE" "$REMOTE" -c "wincmd J" "$MERGED"'
 ```
 
+## Pull Request Integration
+
+Mergetopus can create and manage pull/merge requests for the integration and
+slice branches on GitHub, GitLab, Bitbucket Data Center, and Forgejo.
+
+### Forge Detection
+
+The forge is detected automatically from the remote URL:
+
+| Remote URL                           | Detected Forge |
+| ------------------------------------ | -------------- |
+| `https://github.com/owner/repo.git`  | GitHub         |
+| `git@github.com:owner/repo.git`      | GitHub         |
+| `https://gitlab.com/owner/repo.git`  | GitLab         |
+| `https://bitbucket.company.com/scm/PROJ/repo.git` | Bitbucket Data Center |
+| `ssh://git@bitbucket.company.com:7999/PROJ/repo.git` | Bitbucket Data Center |
+| `https://codeberg.org/owner/repo.git` | Forgejo       |
+| `git@codeberg.org:owner/repo.git`    | Forgejo        |
+
+> **Bitbucket Cloud (`bitbucket.org`) is not supported.** PR integration
+> implements the Bitbucket **Data Center** REST API (`/rest/api/latest`);
+> Cloud remotes are rejected with an explicit error.
+
+For **self-managed** instances (e.g. `gitlab.internal.example.com`,
+`bitbucket.company.com`, `git.forgejo.instance`), set the forge type explicitly:
+
+```bash
+git config mergetopus.forge-type gitlab
+# or: forgejo, bitbucket
+```
+
+### Authentication
+
+Each forge reads a token from git config (scoped to the repository or global),
+falling back to an environment variable:
+
+| Forge     | Git Config Key               | Environment Variable          |
+| --------- | ---------------------------- | ----------------------------- |
+| GitHub    | `mergetopus.github-token`    | `GITHUB_TOKEN`                |
+| GitLab    | `mergetopus.gitlab-token`    | `GITLAB_TOKEN`                |
+| Bitbucket | `mergetopus.bitbucket-token` | `BITBUCKET_TOKEN` (Data Center personal access token, sent as `Bearer`) |
+| Forgejo   | `mergetopus.forgejo-token`   | `FORGEJO_TOKEN` or `CODEBERG_TOKEN` |
+
+Example:
+
+```bash
+git config mergetopus.github-token ghp_xxxxxxxxxxxxxxxxxxxx
+# or
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+```
+
+### Commands
+
+Create pull requests for integration and slice branches (as drafts):
+
+```bash
+# Create PRs for the current merge plan
+mergetopus pr create
+
+# Create PRs for a specific source/integration
+mergetopus pr create feature/refactor-auth
+```
+
+Sync PR titles and descriptions after changes:
+
+```bash
+mergetopus pr sync
+```
+
+List existing PR URLs and states:
+
+```bash
+mergetopus pr list
+```
+
+Create PRs as part of push (combines push + pr create):
+
+```bash
+mergetopus push --pr
+```
+
+Show PR URLs alongside status output:
+
+```bash
+mergetopus status --pr
+```
+
+Close associated PRs during branch cleanup:
+
+```bash
+mergetopus cleanup --close-prs
+```
+
 Some common examples:
 
 | Tool           | Example `mergetool.<name>.cmd`                               |
@@ -664,10 +833,10 @@ Conflict selector:
 - `Tab`: switch pane
 - `n`: create new explicit slice
 - `Space`: assign/move highlighted conflict into currently selected slice
-- `u`: unassign highlighted conflict (it will become default one-file slice)
+- `u`: unassign highlighted conflict (it will become a default one-file slice, or join the shared slice when `--unassigned single` is in effect)
 - `d`: delete selected explicit slice (its files become unassigned)
 - `F3`: open configured difftool for selected file (or inline 3-way diff if `diff.tool` is not set)
-- `Enter`: apply selection
+- `Enter`: apply selection (when files are still unassigned, asks whether they get separate slices or one shared slice; `Esc` in that prompt returns to the selector)
 - `Esc`: close overlay or cancel selector
 - `q`: cancel selector
 
@@ -723,6 +892,10 @@ The main merge target, created and managed by Mergetopus. Holds all auto-merged 
 ### Slice Branch
 
 A per-conflict-group branch created to isolate and resolve a specific set of conflicted files. Multiple slices can exist for a single merge.
+
+### Unassigned Conflicts
+
+Conflicted files that no explicit slice group covers. By default each one becomes its own slice branch; `--unassigned single` puts them all in one shared slice branch. In interactive mode the conflict selector asks which you want when you apply a grouping that leaves files unassigned.
 
 ### Kokomeco Branch
 

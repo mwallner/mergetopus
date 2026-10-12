@@ -1,6 +1,62 @@
 use crate::git_ops::{run_git, run_git_allow_failure};
 use anyhow::Result;
 
+/// Source-side deletions (`D`) and renames (`R...`) between the merge base and
+/// the source, excluding paths that ended up conflicted. These are the merge
+/// decisions git applies silently — reporting them makes an audit possible
+/// (e.g. a file both sides deleted never surfaces as a conflict).
+pub fn auto_applied_entries(
+    merge_base: &str,
+    source_sha: &str,
+    conflicted: &[String],
+) -> Result<Vec<(String, String)>> {
+    // -z: NUL-separated records, no path quoting — machine-safe for every
+    // legal filename (tabs/quotes/unicode). Layout per entry:
+    //   "<status>\0<path>\0"  (or "<status>\0<old>\0<new>\0" for R/C)
+    let (ok, out, _) = run_git_allow_failure(&[
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--name-status",
+        "-z",
+        "-M",
+        merge_base,
+        source_sha,
+    ])?;
+    if !ok {
+        return Ok(Vec::new());
+    }
+
+    let conflicted_set = conflicted
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut entries = Vec::new();
+    let mut fields = out.split('\0').filter(|f| !f.is_empty()).peekable();
+    while let Some(status) = fields.next() {
+        let Some(path) = fields.next() else { break };
+        let (kind, detail, involved): (char, String, Vec<&str>) = if status.starts_with('D') {
+            ('D', path.to_string(), vec![path])
+        } else if status.starts_with('R') || status.starts_with('C') {
+            match fields.next() {
+                Some(new_path) => ('R', format!("{path} -> {new_path}"), vec![path, new_path]),
+                None => break,
+            }
+        } else {
+            continue;
+        };
+
+        if involved.iter().any(|p| conflicted_set.contains(*p)) {
+            continue;
+        }
+        entries.push((kind.to_string(), detail));
+    }
+
+    entries.sort();
+    Ok(entries)
+}
+
 pub fn conflicted_files() -> Result<Vec<String>> {
     let out = run_git(&["diff", "--name-only", "--diff-filter=U"])?;
     Ok(out

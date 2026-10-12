@@ -82,6 +82,8 @@ Traditional Git merges with hundreds or thousands of conflicts block development
 - **Team-friendly:** Interactive TUI for humans, `--quiet` mode for CI/CD
 - **Expertise-routing:** Slices can be assigned to domain experts
 - **Incremental progress:** Test and validate as slices are resolved
+- **Single concrete base:** With multiple merge bases (criss-cross), the user picks one (default = `git merge-base A B`); the conflict set is re-evaluated against it
+- **Bulk-safe:** Path-heavy flows batch git calls (stdin pathspecs, single tree walks, `branch --merged`) so huge repos stay usable
 
 ### Execution Flow
 
@@ -193,11 +195,26 @@ Organized by functional area, this module wraps all Git interactions:
 - Path provenance tracking
 - File operations
 - Slice branch discovery
+- Conflict stage capture with index modes (`conflict_stage_map` →
+  `StageBlob{mode, oid}`); faithful materialization via
+  `update-index --cacheinfo` + `checkout-index` (exact bytes, exec bits,
+  symlinks)
+- `deconflict_against_base()` - re-evaluate git's conflict list against a
+  chosen single base (`merge_tree_with_base` oracle), settling
+  virtual-base artifacts from the pinned merge-tree result
+- Bulk helpers (`pathspec_chunks`, `tree_entries`, `restore_paths_from_ref`,
+  `rm_paths_batch`, `resolve_paths_as_deleted_batch`, `write_stages_to_staged_paths`,
+  `write_blobs_batch`, `commit_messages_batch`, `paths_last_touched`):
+  stream path lists over stdin (`--pathspec-from-file=- --pathspec-file-nul`,
+  `--index-info`, `--stdin`), argv-chunked fallback for git < 2.25
 
 #### `branch.rs` - Branch Management
 - Branch existence checks (local, remote, anywhere)
 - Current branch detection
 - Remote tracking branch operations
+- Ref inventory preloads for batch flows: `list_remote_refs`,
+  `slice_branch_names_from_refs`, `remote_for_tracking_ref` (slash-safe
+  remote names), `WorktreeState` (one `worktree list` probe per batch)
 
 #### `checkout.rs` - Checkout Operations
 - Safe checkout operations
@@ -210,12 +227,15 @@ Organized by functional area, this module wraps all Git interactions:
 
 #### `diff.rs` - Diff Operations
 - File content retrieval at specific refs
-- Three-way diff generation
+- Three-way diff generation (BASE pane uses the chosen merge base)
 
 #### `merge.rs` - Merge Operations
 - `merge_no_commit()` - Non-committing merge with conflict detection
 - Merge-in-progress detection
-- Merge base calculation
+- Merge base calculation (`merge_base`, `merge_bases` for criss-cross)
+- `merge_conflict_messages()` - reconstruct `CONFLICT (...)` lines via
+  `git merge-tree --write-tree`, optionally pinned to the chosen base
+  (used when resuming in-progress slice merges)
 
 #### `refs.rs` - Reference Operations
 - HEAD manipulation
@@ -228,7 +248,10 @@ Organized by functional area, this module wraps all Git interactions:
 
 ### 2. Commands Module (`src/commands/`)
 
-Each command has its own module:
+Each command has its own module. `mod.rs` additionally hosts shared flow
+helpers: `select_merge_base()` (criss-cross base choice: TUI pick with the
+`git merge-base` output marked as default; warn-and-default in the
+non-interactive modes: `--quiet`, plus `--yes` for workflow/HERE/resolve).
 
 #### `cmd_merge_workflow.rs` - Main Workflow
 - Source branch selection/validation
@@ -241,15 +264,22 @@ Each command has its own module:
 - Conflict marker detection
 - Trust exit code handling
 - Resolves conflicts in individual slice branches
+- Tool inputs fetched via one batched `cat-file --batch`; staging applied
+  in bulk; conflict topology reconstructed pinned to the chosen base when
+  resuming an interrupted slice merge
 
 #### `cmd_status.rs` - Status Reporting
 - Global MMM overview across branches
 - Per-integration detailed status
 - Shows pending/merged slices
+- `RefSnapshot`: one ref inventory load per command; slice merge state via
+  `git branch --merged`; ancestry probed on resolved local/remote refs;
+  pending-slice tips batched through `commit_messages_batch`
 
 #### `cmd_cleanup.rs` - Branch Cleanup
 - Cleanup of temporary branches after merge completion
 - Interactive branch selection
+- Ref inventory preloaded once; worktree probe shared across the delete batch
 
 #### `cmd_verify.rs` - Integration Verification
 - Validates that integration hasn't drifted from kokomeco
@@ -262,6 +292,7 @@ Each command has its own module:
 #### `cmd_here.rs` - Takeover
 - Takes over in-progress manual merges
 - Converts existing merge state to MMM workflow
+- Already-resolved snapshots re-applied with bulk staging
 
 #### `cmd_license.rs` - License Display
 - Displays bundled third-party license information
@@ -273,7 +304,9 @@ Branch naming and slice planning logic:
 
 - **Branch Sanitization:** Converts arbitrary branch names to safe identifiers
 - **Branch Naming Conventions:** Generates MMM branch names
-- **Slice Creation:** Materializes slice branches from conflict groups
+- **Slice Creation:** Materializes slice branches from conflict groups;
+  `SliceInputs` precomputes source/base tree entries, last-touch provenance
+  and the worktree probe once per run so per-path git calls vanish
 - **Branch Pattern Matching:** Parses and validates MMM branch names
 
 ### 4. TUI Module (`src/tui.rs`)
@@ -282,6 +315,7 @@ Terminal user interface components using ratatui:
 
 - **Branch Picker:** Interactive branch selection with filtering
 - **Conflict Selector:** Multi-pane interface for grouping conflicts into slices
+  - On apply, asks whether unassigned conflicts get separate slices or one shared slice
   - File list navigation
   - Slice group management
   - F3 difftool integration
@@ -297,6 +331,7 @@ Command-line interface definition using clap:
   - `--quiet` - Suppress interactive prompts
   - `--yes` - Auto-confirm prompts
   - `--select-paths` - Filter specific paths
+  - `--unassigned <separate|single>` - How to slice conflicts left unassigned
   - `--color` - Color output control
 - Subcommands enum defining all available commands
 - Help text and documentation strings
@@ -306,6 +341,7 @@ Command-line interface definition using clap:
 #### `models.rs` - Data Structures
 - `SlicePlanItem` - Represents a planned slice with file paths
 - `PathProvenance` - Tracks file origin (target, source, both)
+- `UnassignedPolicy` - `Separate` (one slice per unassigned file, default) or `Single` (all unassigned files share one slice)
 
 #### `helpers.rs` - Utility Functions
 - Command parsing (e.g., `parse_difftool_command`)
@@ -332,10 +368,14 @@ Command-line interface definition using clap:
    - Validate clean working tree
    - Compute target branch (current HEAD)
 
-2. **Conflict Detection** (`git_ops/merge.rs`)
+2. **Conflict Detection** (`git_ops/merge.rs`, `commands::select_merge_base`)
+   - Choose the concrete merge base (criss-cross: interactive pick, default
+     = `git merge-base`; warn + default with `--quiet`/`--yes`)
    - Attempt merge with `--no-commit`
-   - Capture conflicting file paths
-   - If no conflicts: complete merge normally
+   - Re-evaluate the conflicted set against the chosen base via
+     `git merge-tree --merge-base` (virtual-base artifacts settle to the
+     changed side; correlated rename groups survive)
+   - If no conflicts remain: complete merge normally
    - If conflicts: proceed to slicing
 
 3. **Slice Planning** (`tui.rs` + `planner.rs`)
@@ -563,6 +603,35 @@ Respects `merge.tool` configuration:
 - Fallback conflict marker detection
 - F3 hotkey for difftool during slice planning
 
+### 9. Multiple Merge Bases (Criss-Cross)
+
+With criss-cross history, `git merge` consults a *virtual* merge base built
+from all best common ancestors and can conflict files that no single base
+would. Mergetopus therefore:
+- asks the user which concrete base to anchor to when several exist
+  (default = the one `git merge-base A B` reports, mirroring forge PR bases;
+  `--quiet`, plus `--yes` for workflow/HERE/resolve, warns and uses the
+  default)
+- re-evaluates the conflict list against that base with
+  `git merge-tree --merge-base=<chosen>` — settling single-base-clean paths
+  from the pinned result tree and keeping genuine (including correlated
+  rename) conflicts for slicing
+- anchors slice branches, merge-tool `BASE` inputs, auto-applied reporting
+  and the 3-way overlay at the chosen base
+
+### 10. Bulk Git Operations
+
+Per-path and per-branch subprocess spawning is the dominant cost on huge
+merges. Bulk flows:
+- path lists stream over stdin (`--pathspec-from-file=-` + NUL,
+  `update-index --index-info`, `checkout-index --stdin`); bounded argv
+  chunks (Windows 32 KiB safe) for `ls-tree`/`log` and as fallback on
+  git < 2.25
+- single `cat-file --batch` fetches merge-tool inputs and commit messages;
+  one streamed `git log` answers provenance trailers for all slice paths
+- reachability (`git branch --merged`) and ref inventory (`for-each-ref`)
+  are loaded once per command instead of probed per branch
+
 ---
 
 ## Command Reference
@@ -600,6 +669,7 @@ mergetopus license
 - `--quiet` - Suppress interactive prompts, use defaults
 - `--yes` - Auto-confirm all prompts
 - `--select-paths <paths>` - Filter specific paths during merge
+- `--unassigned <separate|single>` - Slice handling for unassigned conflicted files
 - `--color <mode>` - Control color output (auto/always/never)
 
 ---
@@ -658,5 +728,5 @@ mergetopus license
 
 ---
 
-**Last Updated:** 2026-06-12  
+**Last Updated:** 2026-10-09  
 **For LLMs:** This document provides comprehensive context for code understanding, modification, and extension tasks.

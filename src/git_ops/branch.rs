@@ -1,14 +1,20 @@
-use super::{head_sha, run_git, run_git_allow_failure};
+use super::{run_git, run_git_allow_failure, run_git_allow_failure_in, run_git_in};
 use crate::git_ops::{refs, worktree};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 pub fn current_branch() -> Result<String> {
-    let (ok, out, _) = run_git_allow_failure(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    current_branch_in(&std::env::current_dir()?)
+}
+
+/// Path-taking variant of [`current_branch`].
+pub fn current_branch_in(repo_path: &std::path::Path) -> Result<String> {
+    let (ok, out, _) =
+        run_git_allow_failure_in(repo_path, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     if ok && !out.is_empty() {
         return Ok(out);
     }
 
-    let head = head_sha()?;
+    let head = run_git_in(repo_path, &["rev-parse", "HEAD"])?;
     Ok(format!("detached_{}", &head[..8.min(head.len())]))
 }
 
@@ -52,6 +58,63 @@ pub fn local_branch_name_from_remote_ref(reference: &str) -> Option<String> {
         return None;
     }
     Some(tail.to_string())
+}
+
+/// All remote-tracking short names (excluding `origin/HEAD`), sorted.
+pub fn list_remote_refs() -> Result<Vec<String>> {
+    let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/remotes"])?;
+    let mut refs = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    refs.sort();
+    Ok(refs)
+}
+
+/// Pure slice enumeration over preloaded ref names; mirrors
+/// `list_slice_branches_for_integration_in`'s mapping/prefix rules.
+pub fn slice_branch_names_from_refs<'a>(
+    names: impl Iterator<Item = &'a str>,
+    integration_branch: &str,
+) -> Vec<String> {
+    let Some(base) = integration_branch.strip_suffix("/integration") else {
+        return Vec::new();
+    };
+    let prefix = format!("{base}/slice");
+    let mut slices = names
+        .filter(|l| !l.is_empty() && *l != "origin/HEAD")
+        .filter_map(|l| {
+            if l.starts_with(&prefix) {
+                Some(l.to_string())
+            } else {
+                local_branch_name_from_remote_ref(l).filter(|local| local.starts_with(&prefix))
+            }
+        })
+        .collect::<Vec<_>>();
+    slices.sort();
+    slices.dedup();
+    slices
+}
+
+/// Pure remote lookup; see `remote_for_tracking_ref`.
+pub fn remote_for_tracking_ref_with(
+    remotes: &[String],
+    tracked_ref: &str,
+    branch: &str,
+) -> Option<String> {
+    let mut sorted: Vec<&String> = remotes.iter().collect();
+    sorted.sort_by_key(|r| std::cmp::Reverse(r.len()));
+    for remote in sorted {
+        if tracked_ref == format!("{remote}/{branch}") {
+            return Some(remote.clone());
+        }
+    }
+    tracked_ref
+        .split_once('/')
+        .filter(|(head, rest)| !head.is_empty() && *rest == branch)
+        .map(|(head, _)| head.to_string())
 }
 
 pub fn remote_refs_for_local_branch(local_branch: &str) -> Result<Vec<String>> {
@@ -159,7 +222,15 @@ pub fn list_branch_refs() -> Result<Vec<String>> {
 }
 
 pub fn list_local_branches() -> Result<Vec<String>> {
-    let out = run_git(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
+    list_local_branches_in(&std::env::current_dir()?)
+}
+
+/// Path-taking variant of [`list_local_branches`].
+pub fn list_local_branches_in(repo_path: &std::path::Path) -> Result<Vec<String>> {
+    let out = run_git_in(
+        repo_path,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    )?;
     let mut branches = out
         .lines()
         .map(str::trim)
@@ -168,6 +239,10 @@ pub fn list_local_branches() -> Result<Vec<String>> {
         .collect::<Vec<_>>();
     branches.sort();
     Ok(branches)
+}
+
+pub fn get_remote_url(remote: &str) -> Result<String> {
+    run_git(&["remote", "get-url", remote])
 }
 
 pub fn list_remote_names() -> Result<Vec<String>> {
@@ -184,7 +259,56 @@ pub fn list_remote_names() -> Result<Vec<String>> {
         .collect())
 }
 
+/// Resolve which configured remote owns a remote-tracking ref for `branch`.
+/// Matches the full `<remote>/<branch>` shape longest-first so remote names
+/// that themselves contain slashes (e.g. `foo/bar`) resolve correctly;
+/// falls back to the first path segment for conventional layouts.
+pub fn remote_for_tracking_ref(tracked_ref: &str, branch: &str) -> Result<Option<String>> {
+    let remotes = list_remote_names()?;
+    Ok(remote_for_tracking_ref_with(&remotes, tracked_ref, branch))
+}
+
+/// Linked-worktree snapshot for batch branch deletions: probing
+/// `git worktree list` per deleted branch is one subprocess each.
+pub struct WorktreeState {
+    entries: Vec<worktree::WorktreeEntry>,
+    has_linked: bool,
+}
+
+impl WorktreeState {
+    pub fn load() -> Result<Self> {
+        let entries = worktree::list_worktree_entries()?;
+        let has_linked = worktree::has_existing_linked_worktrees(&entries);
+        Ok(WorktreeState {
+            entries,
+            has_linked,
+        })
+    }
+}
+
 pub fn delete_branch(branch: &str) -> Result<()> {
+    let state = WorktreeState::load()?;
+    delete_branch_with(&state, branch)
+}
+
+/// `delete_branch` against a preloaded [`WorktreeState`].
+pub fn delete_branch_with(state: &WorktreeState, branch: &str) -> Result<()> {
+    let entries = &state.entries;
+    if state.has_linked {
+        if let Some(path) = worktree::find_worktree_for_branch(&entries, branch) {
+            // No --force: git refuses to remove a worktree with uncommitted
+            // or untracked files (or one that is locked), so another slice's
+            // in-progress work is never silently destroyed.
+            run_git(&["worktree", "remove", &path.to_string_lossy()]).with_context(|| {
+                format!(
+                    "failed to remove worktree at '{}'; it may hold uncommitted or \
+                     untracked changes, or be locked — resolve or discard the work \
+                     there (or 'git worktree unlock') before deleting branch '{branch}'",
+                    path.display()
+                )
+            })?;
+        }
+    }
     run_git(&["branch", "-D", branch]).map(|_| ())
 }
 
@@ -217,6 +341,19 @@ pub fn checkout_new_or_reset(branch: &str, at: &str) -> Result<()> {
         worktree::switch_to_dir(&path)?;
     }
 
+    run_git(&["checkout", "-B", branch, at]).map(|_| ())
+}
+
+/// Whether the repo currently has linked worktrees. Bulk operations probe
+/// this once instead of paying a `git worktree list` per checkout.
+pub fn has_linked_worktrees() -> Result<bool> {
+    let entries = worktree::list_worktree_entries()?;
+    Ok(worktree::has_existing_linked_worktrees(&entries))
+}
+
+/// `checkout_new_or_reset` for repos WITHOUT linked worktrees: plain
+/// `git checkout -B`, skipping the per-call worktree probe.
+pub fn checkout_new_or_reset_light(branch: &str, at: &str) -> Result<()> {
     run_git(&["checkout", "-B", branch, at]).map(|_| ())
 }
 
@@ -313,6 +450,50 @@ mod tests {
 
         let exists = test_helpers::git(&repo, &["show-ref", "--verify", "refs/heads/trash"]);
         assert!(exists.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn remote_for_tracking_ref_resolves_remotes_with_slashes() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        let bare = test_helpers::unique_temp_repo_dir();
+        std::fs::create_dir_all(&bare)?;
+        test_helpers::git(&bare, &["init", "--bare"])?;
+        test_helpers::git(&repo, &["remote", "add", "foo/bar", bare.to_str().unwrap()])?;
+        test_helpers::git(&repo, &["push", "-q", "foo/bar", "main"])?;
+        test_helpers::git(&repo, &["fetch", "-q", "foo/bar"])?;
+
+        // "foo/bar/main" belongs to the remote "foo/bar", not "foo".
+        let resolved =
+            test_helpers::with_repo_cwd(&repo, || remote_for_tracking_ref("foo/bar/main", "main"))?;
+        assert_eq!(resolved.as_deref(), Some("foo/bar"));
+
+        // A conventional prefix is still offered even when it is not in the
+        // configured remotes (custom refspec layouts); the push itself will
+        // report if that remote does not exist.
+        let resolved =
+            test_helpers::with_repo_cwd(&repo, || remote_for_tracking_ref("origin/main", "main"))?;
+        assert_eq!(resolved.as_deref(), Some("origin"));
+        Ok(())
+    }
+
+    #[test]
+    fn delete_branch_refuses_dirty_linked_worktree() -> TestResult<()> {
+        let repo = test_helpers::init_repo_with_base_file()?;
+        test_helpers::git(&repo, &["branch", "slice"])?;
+        let wt = repo.join("wt-slice");
+        test_helpers::git(&repo, &["worktree", "add", &wt.to_string_lossy(), "slice"])?;
+        std::fs::write(wt.join("untracked.txt"), b"precious work")?;
+
+        let result = test_helpers::with_repo_cwd(&repo, || delete_branch("slice"));
+        assert!(result.is_err(), "dirty worktree must not be force-removed");
+
+        let exists = test_helpers::git(&repo, &["show-ref", "--verify", "refs/heads/slice"]);
+        assert!(exists.is_ok(), "branch must survive the refused delete");
+        assert!(
+            wt.join("untracked.txt").exists(),
+            "untracked work must survive"
+        );
         Ok(())
     }
 

@@ -36,7 +36,8 @@ pub struct ProgressStep {
 ///
 /// Each step is executed sequentially. While a step runs, an animated spinner
 /// is displayed next to its label. When all steps complete (or one fails), the
-/// screen stays visible until the user presses Enter, Esc, or Space.
+/// screen stays visible until the user presses Esc. If all steps succeed the
+/// screen auto-dismisses after 500 ms.
 pub fn run_progress(title: &str, steps: Vec<ProgressStep>) -> Result<()> {
     let mut guard = TerminalGuard::new(title)?;
     run_progress_on_terminal(
@@ -45,6 +46,7 @@ pub fn run_progress(title: &str, steps: Vec<ProgressStep>) -> Result<()> {
         steps,
         |d| Ok(event::poll(d)?),
         || Ok(event::read()?),
+        Some(Duration::from_millis(500)),
     )
 }
 
@@ -55,6 +57,7 @@ pub(crate) fn run_progress_on_terminal<B: Backend>(
     steps: Vec<ProgressStep>,
     mut poll_event: impl FnMut(Duration) -> Result<bool>,
     mut read_event: impl FnMut() -> Result<Event>,
+    auto_dismiss_after: Option<Duration>,
 ) -> Result<()>
 where
     <B as Backend>::Error: Send + Sync + 'static,
@@ -158,7 +161,9 @@ where
         }
     }
 
-    // Final state — wait for dismissal
+    // Final state — wait for dismissal (or auto-dismiss after success)
+    let final_started = std::time::Instant::now();
+    let all_succeeded = failed == 0 && !cancelled;
     loop {
         terminal.draw(|f| {
             let states = states.lock().unwrap();
@@ -167,11 +172,19 @@ where
             );
         })?;
 
+        if all_succeeded {
+            if let Some(timeout) = auto_dismiss_after {
+                if final_started.elapsed() >= timeout {
+                    break;
+                }
+            }
+        }
+
         if poll_event(Duration::from_millis(200))? {
             if let Event::Key(key) = read_event()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Enter | KeyCode::Esc | KeyCode::Char(' ') => break,
+                        KeyCode::Esc => break,
                         _ => {}
                     }
                 }
@@ -259,14 +272,11 @@ fn render_progress(
     }
 
     let summary: String = if failed > 0 {
-        "Operation failed \u{2014} press Enter or Esc to continue.".into()
+        "Operation failed \u{2014} press Esc to continue.".into()
     } else if cancelled {
-        "Operation cancelled \u{2014} press Enter or Esc to continue.".into()
+        "Operation cancelled \u{2014} press Esc to continue.".into()
     } else {
-        let remaining = total - completed - failed;
-        format!(
-            "\u{2713} {completed} completed \u{00b7} {remaining} remaining \u{00b7} {failed} failed"
-        )
+        format!("\u{2713} {completed} completed")
     };
 
     let summary_line = Paragraph::new(Line::from(Span::styled(
@@ -285,13 +295,31 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
-    use std::cell::Cell;
 
-    macro_rules! events {
-        ($($event:expr),* $(,)?) => {{
-            let mut __iter = vec![$($event),*].into_iter();
-            move || Ok(__iter.next().expect("events! exhausted"))
-        }};
+    /// Poll source for the step/dismissal loop tests.
+    ///
+    /// `run_progress_on_terminal` calls this with 80 ms while a step is running
+    /// and 200 ms in the dismissal loop, so the timeout identifies the phase.
+    /// During a step we report "no event available" (after yielding the CPU, so
+    /// the worker thread can finish) and in the dismissal loop we report the
+    /// single Esc. Event availability therefore never depends on how many times
+    /// the loop spins, which is what made a fixed-length event queue flaky on
+    /// slow CI.
+    fn phase_poll() -> impl FnMut(Duration) -> Result<bool> {
+        move |timeout| {
+            if timeout >= Duration::from_millis(200) {
+                Ok(true)
+            } else {
+                thread::sleep(Duration::from_millis(1));
+                Ok(false)
+            }
+        }
+    }
+
+    /// Read source returning Esc on every call — the dismissal loop breaks on the
+    /// first one.
+    fn esc_source() -> impl FnMut() -> Result<Event> {
+        move || Ok(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
     }
 
     fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
@@ -383,9 +411,7 @@ mod tests {
                     label: "error test".into(),
                     status: StepStatus::Error,
                 }];
-                render_progress(
-                    f, &states, 0, "Title", 0, 1, 1, "something failed", false,
-                );
+                render_progress(f, &states, 0, "Title", 0, 1, 1, "something failed", false);
             })
             .unwrap();
 
@@ -438,63 +464,13 @@ mod tests {
             },
         ];
 
-        // Use a shared counter so poll_event returns true only after
-        // both steps have had time to finish. The loop injects ignored
-        // Tab keys during the render-loop polls; Enter is injected only
-        // once for the dismissal loop.
-        let polls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let polls_clone = polls.clone();
         let result = run_progress_on_terminal(
             &mut terminal,
             "Test",
             steps,
-            move |_| {
-                let n = polls_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(n > 20)
-            },
-            events![
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            ],
+            phase_poll(),
+            esc_source(),
+            None,
         );
 
         assert!(result.is_ok(), "expected Ok, got {result:?}");
@@ -525,60 +501,13 @@ mod tests {
             },
         ];
 
-        let polls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let polls_clone = polls.clone();
         let result = run_progress_on_terminal(
             &mut terminal,
             "Test",
             steps,
-            move |_| {
-                let n = polls_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(n > 20)
-            },
-            events![
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            ],
+            phase_poll(),
+            esc_source(),
+            None,
         );
 
         assert!(result.is_err(), "expected Err, got {result:?}");
