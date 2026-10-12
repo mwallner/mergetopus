@@ -452,11 +452,11 @@ fn print_integration_status(
 
     // If a kokomeco consolidated branch already exists for this integration
     // branch, show the merge suggestion instead of the raw integration status.
-    let kokomeco = git_ops::consolidated_branch_name(&integration_branch);
+    let kokomeco = git_ops::consolidated_branch_name(integration_branch);
     if git_ops::branch_exists_anywhere(&kokomeco)? {
         // Determine the intended target branch from the integration branch name.
-        let expected_target = match planner::parse_integration_branch(&integration_branch) {
-            Some(_) => planner::original_workflow_refs(&integration_branch)
+        let expected_target = match planner::parse_integration_branch(integration_branch) {
+            Some(_) => planner::original_workflow_refs(integration_branch)
                 .ok()
                 .map(|(target, _)| target),
             None => None,
