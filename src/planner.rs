@@ -399,12 +399,22 @@ pub fn decide_group_action(group: &ConflictGroup, mode: GroupMode) -> Option<Gro
         GroupMode::Ours => match group.kind {
             ConflictKind::RenameRename => GroupAction::KeepOurs,
             ConflictKind::FileLocation => GroupAction::KeepOriginal,
-            ConflictKind::RenameDelete => GroupAction::KeepDeleted,
+            // 'ours' is whichever side the integration branch holds: if OURS
+            // performed the rename, keeping ours keeps the renamed file;
+            // if the source renamed and we deleted, keeping ours deletes.
+            ConflictKind::RenameDelete => {
+                if roles.ours.is_some() {
+                    GroupAction::AcceptRename
+                } else {
+                    GroupAction::KeepDeleted
+                }
+            }
             ConflictKind::ModifyDelete => {
                 if roles.ours.is_some() {
                     GroupAction::KeepOurs
                 } else {
-                    return None;
+                    // deleted by us: our side's state IS the deletion
+                    GroupAction::KeepDeleted
                 }
             }
             ConflictKind::Content => return None,
@@ -412,7 +422,15 @@ pub fn decide_group_action(group: &ConflictGroup, mode: GroupMode) -> Option<Gro
         GroupMode::Theirs => match group.kind {
             ConflictKind::RenameRename => GroupAction::TakeTheirs,
             ConflictKind::FileLocation => GroupAction::AcceptSuggested,
-            ConflictKind::RenameDelete => GroupAction::AcceptRename,
+            // mirrored: accept the source's rename only when the source
+            // renamed; when the source deleted, 'theirs' means the deletion
+            ConflictKind::RenameDelete => {
+                if roles.theirs.is_some() {
+                    GroupAction::AcceptRename
+                } else {
+                    GroupAction::KeepDeleted
+                }
+            }
             ConflictKind::ModifyDelete => {
                 if roles.theirs.is_some() {
                     GroupAction::TakeTheirs
@@ -1954,6 +1972,41 @@ mod tests {
         );
     }
 
+    /// rename/delete where the TARGET renamed (stage 2 at new path, source
+    /// deleted the old one): 'ours' must keep our renamed file, 'theirs' the
+    /// source's deletion — the blind old mapping did the opposite.
+    #[test]
+    fn decide_group_action_rename_delete_respects_renaming_side() {
+        use crate::models::GroupMode;
+        let target_renamed = ConflictGroup {
+            kind: ConflictKind::RenameDelete,
+            paths: vec!["old.txt".to_string(), "new.txt".to_string()],
+            stage_blobs: stages(&[("old.txt", &[(1, "b")]), ("new.txt", &[(2, "o")])]),
+        };
+        assert_eq!(
+            decide_group_action(&target_renamed, GroupMode::Ours),
+            Some(GroupAction::AcceptRename)
+        );
+        assert_eq!(
+            decide_group_action(&target_renamed, GroupMode::Theirs),
+            Some(GroupAction::KeepDeleted)
+        );
+
+        let source_renamed = ConflictGroup {
+            kind: ConflictKind::RenameDelete,
+            paths: vec!["old.txt".to_string(), "new.txt".to_string()],
+            stage_blobs: stages(&[("old.txt", &[(1, "b")]), ("new.txt", &[(3, "t")])]),
+        };
+        assert_eq!(
+            decide_group_action(&source_renamed, GroupMode::Ours),
+            Some(GroupAction::KeepDeleted)
+        );
+        assert_eq!(
+            decide_group_action(&source_renamed, GroupMode::Theirs),
+            Some(GroupAction::AcceptRename)
+        );
+    }
+
     #[test]
     fn decide_group_action_modify_delete_uses_surviving_side() {
         use crate::models::GroupMode;
@@ -1986,7 +2039,11 @@ mod tests {
             decide_group_action(&du, GroupMode::Theirs),
             Some(GroupAction::TakeTheirs)
         );
-        assert_eq!(decide_group_action(&du, GroupMode::Ours), None);
+        // deleted by us: 'ours' keeps our state = the deletion
+        assert_eq!(
+            decide_group_action(&du, GroupMode::Ours),
+            Some(GroupAction::KeepDeleted)
+        );
     }
 
     #[test]
