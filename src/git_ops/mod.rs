@@ -153,6 +153,8 @@ pub struct PinnedBaseMerge {
     pub tree: String,
     /// Paths left unmerged by that single-base merge.
     pub conflicts: BTreeSet<String>,
+    /// Unmerged index entries emitted by merge-tree, grouped by path and stage.
+    pub stages: BTreeMap<String, BTreeMap<usize, crate::models::StageBlob>>,
 }
 
 /// Run `git merge-tree --write-tree --merge-base=<base> <ours> <theirs>`:
@@ -182,23 +184,39 @@ pub fn merge_tree_with_base(
     }
 
     let mut conflicts = BTreeSet::new();
+    let mut stages = BTreeMap::new();
     for line in lines {
         // conflicted file info: "<mode> <oid> <stage>\t<path>"
         let Some((meta, path)) = line.split_once('\t') else {
             continue;
         };
-        let unmerged = meta
-            .split_whitespace()
-            .nth(2)
-            .and_then(|s| s.parse::<u8>().ok())
-            .is_some_and(|stage| (1..=3).contains(&stage));
-        if unmerged {
-            conflicts.insert(path.to_string());
+        let mut fields = meta.split_whitespace();
+        let (Some(mode), Some(oid), Some(stage)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let Ok(stage) = stage.parse::<usize>() else {
+            continue;
+        };
+        if !(1..=3).contains(&stage) {
+            continue;
         }
+        conflicts.insert(path.to_string());
+        stages
+            .entry(path.to_string())
+            .or_insert_with(BTreeMap::new)
+            .insert(
+                stage,
+                crate::models::StageBlob {
+                    mode: mode.to_string(),
+                    oid: oid.to_string(),
+                },
+            );
     }
     Ok(Some(PinnedBaseMerge {
         tree: tree.to_string(),
         conflicts,
+        stages,
     }))
 }
 
@@ -478,7 +496,8 @@ fn restore_worktree_from_index(paths: &[String]) -> Result<()> {
 /// rename/rename or modify/delete conflicts survive) but pinned to the base
 /// Mergetopus anchors to. Paths the pinned merge resolves cleanly are
 /// materialized from its result tree exactly as that single-base merge would
-/// have left them; genuinely conflicting paths stay untouched.
+/// have left them. Its full conflict set is returned, and newly conflicting
+/// paths receive the pinned merge's unmerged index stages.
 ///
 /// Returns the remaining conflicts. Falls back to the unchanged input set
 /// when git is too old for the pinned merge-tree probe.
@@ -488,19 +507,27 @@ pub fn deconflict_against_base(
     ours_ref: &str,
     theirs_ref: &str,
 ) -> Result<Vec<String>> {
-    if conflicted.is_empty() {
-        return Ok(Vec::new());
-    }
     let Some(pinned) = merge_tree_with_base(ours_ref, theirs_ref, chosen_base)? else {
         return Ok(conflicted.to_vec());
     };
 
-    let mut remaining = Vec::new();
+    let raw_conflicts = conflicted
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let remaining = pinned.conflicts.iter().cloned().collect::<Vec<_>>();
+    let new_conflicts = pinned
+        .conflicts
+        .iter()
+        .filter(|path| !raw_conflicts.contains(path.as_str()))
+        .collect::<Vec<_>>();
+    if !new_conflicts.is_empty() {
+        materialize_pinned_conflict_stages(&pinned.stages, &new_conflicts)?;
+    }
+
     let mut to_settle = Vec::new();
     for path in conflicted {
-        if pinned.conflicts.contains(path.as_str()) {
-            remaining.push(path.clone());
-        } else {
+        if !pinned.conflicts.contains(path.as_str()) {
             to_settle.push(path.clone());
         }
     }
@@ -526,6 +553,35 @@ pub fn deconflict_against_base(
     write_stages_to_staged_paths(&present)?;
     resolve_paths_as_deleted_batch(&deleted)?;
     Ok(remaining)
+}
+
+fn materialize_pinned_conflict_stages(
+    stages: &BTreeMap<String, BTreeMap<usize, crate::models::StageBlob>>,
+    paths: &[&String],
+) -> Result<()> {
+    let mut payload = Vec::new();
+    for path in paths {
+        let path_stages = stages
+            .get(path.as_str())
+            .context("pinned merge conflict is missing its index stages")?;
+        let oid_length = path_stages
+            .values()
+            .next()
+            .context("pinned merge conflict has no index stages")?
+            .oid
+            .len();
+
+        payload.extend_from_slice(format!("0 {}\t", "0".repeat(oid_length)).as_bytes());
+        payload.extend_from_slice(path.as_bytes());
+        payload.push(0);
+        for (stage, entry) in path_stages {
+            payload
+                .extend_from_slice(format!("{} {} {}\t", entry.mode, entry.oid, stage).as_bytes());
+            payload.extend_from_slice(path.as_bytes());
+            payload.push(0);
+        }
+    }
+    run_git_stdin(&["update-index", "--add", "-z", "--index-info"], &payload)
 }
 
 /// Parse unmerged index entries (`git ls-files -u`) into
@@ -1764,6 +1820,56 @@ mod tests {
         assert_eq!(
             remaining, raw,
             "a genuine two-sided conflict must survive deconfliction"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deconflict_against_base_adds_pinned_conflicts_missing_from_raw_set() -> TestResult<()> {
+        let repo = test_helpers::init_repo()?;
+        test_helpers::write_file(&repo, "f.txt", "base\n")?;
+        test_helpers::commit_all(&repo, "base")?;
+        let base = test_helpers::git(&repo, &["rev-parse", "HEAD"])?;
+
+        test_helpers::git(&repo, &["checkout", "-b", "feature"])?;
+        test_helpers::write_file(&repo, "f.txt", "theirs\n")?;
+        test_helpers::commit_all(&repo, "feature change")?;
+        let feature = test_helpers::git(&repo, &["rev-parse", "HEAD"])?;
+
+        test_helpers::git(&repo, &["checkout", "main"])?;
+        test_helpers::write_file(&repo, "f.txt", "ours\n")?;
+        test_helpers::commit_all(&repo, "main change")?;
+        let ours = test_helpers::git(&repo, &["rev-parse", "HEAD"])?;
+
+        // Leave a clean stage-zero entry as though the unpinned merge had
+        // auto-merged this path; the selected-base merge conflicts instead.
+        test_helpers::git(&repo, &["merge", "--no-commit", "-s", "ours", "feature"])?;
+        let raw = test_helpers::with_repo_cwd(&repo, conflicted_files)?;
+        assert!(
+            raw.is_empty(),
+            "original conflict set should be empty: {raw:?}"
+        );
+
+        let remaining = test_helpers::with_repo_cwd(&repo, || {
+            deconflict_against_base(&raw, base.trim(), ours.trim(), feature.trim())
+        })?;
+        assert_eq!(remaining, vec!["f.txt"]);
+
+        let map = test_helpers::with_repo_cwd(&repo, conflict_stage_map)?;
+        let stages = map
+            .get("f.txt")
+            .expect("pinned conflict stages materialized");
+        assert_eq!(
+            stages[&1].oid,
+            test_helpers::git(&repo, &["rev-parse", &format!("{}:f.txt", base.trim())])?.trim()
+        );
+        assert_eq!(
+            stages[&2].oid,
+            test_helpers::git(&repo, &["rev-parse", &format!("{}:f.txt", ours.trim())])?.trim()
+        );
+        assert_eq!(
+            stages[&3].oid,
+            test_helpers::git(&repo, &["rev-parse", &format!("{}:f.txt", feature.trim())])?.trim()
         );
         Ok(())
     }
