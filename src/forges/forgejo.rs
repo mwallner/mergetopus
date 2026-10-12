@@ -159,8 +159,11 @@ fn convert_pr(r: ForgejoPrResponse) -> PullRequest {
             _ => PrState::Open,
         },
         draft: r.draft,
-        head: r.head.label,
-        base: r.base.label,
+        // `ref` carries the plain branch name; `label` is owner-qualified
+        // ("owner:feature") and would not match PullRequest::head usage
+        // elsewhere (find/sync compare against bare branch names).
+        head: r.head.ref_field.unwrap_or(r.head.label),
+        base: r.base.ref_field.unwrap_or(r.base.label),
     }
 }
 
@@ -178,6 +181,8 @@ struct ForgejoPrResponse {
 #[derive(Deserialize)]
 struct ForgejoBranchRef {
     label: String,
+    #[serde(rename = "ref")]
+    ref_field: Option<String>,
 }
 
 #[cfg(test)]
@@ -192,12 +197,33 @@ mod tests {
             draft: false,
             merged_at: merged_at.map(String::from),
             head: ForgejoBranchRef {
-                label: "feature".into(),
+                label: "owner:feature".into(),
+                ref_field: Some("feature".into()),
             },
             base: ForgejoBranchRef {
-                label: "main".into(),
+                label: "owner:main".into(),
+                ref_field: Some("main".into()),
             },
         }
+    }
+
+    /// The wire format labels head/base with "owner:branch"; PullRequest
+    /// must carry the plain branch names from the `ref` fields.
+    #[test]
+    fn deserializes_wire_response_preferring_ref_over_label() {
+        let json = r#"{
+            "number": 3,
+            "html_url": "https://forgejo.example/owner/repo/pulls/3",
+            "state": "open",
+            "draft": false,
+            "merged_at": null,
+            "head": {"label": "owner:feat/x", "ref": "feat/x"},
+            "base": {"label": "owner:main", "ref": "main"}
+        }"#;
+        let resp: ForgejoPrResponse = serde_json::from_str(json).expect("wire JSON parses");
+        let pr = convert_pr(resp);
+        assert_eq!(pr.head, "feat/x");
+        assert_eq!(pr.base, "main");
     }
 
     #[test]
