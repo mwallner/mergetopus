@@ -6,99 +6,11 @@
 
 ![mergetopus logo](assets/mergetopus-logo.svg)
 
-`mergetopus` is a tool that helps teams follow a structured workflow for very large merges by splitting one risky merge into parallelizable tasks:
+Ever started a merge only to find yourself with 100 conflicts that would require specific domain knowledge (from coworkers)? `mergetopus` splits one large merge into team-sized tasks so multiple people can resolve them in parallel. Written in Rust, works on Windows/macOS/Linux, has a TUI for interactive use and a `--quiet` mode for CI/CD.
 
-- one integration branch for trivial/non-conflicting merge results
-- optional slice branches for selected conflicted files
+## The problem
 
-It follows and extends the workflow in `ext/Invoke-TheMergetopus.ps1`.
-
-The core idea is collaborative merge execution:
-
-- one person initializes the merge plan (`mergetopus`)
-- multiple developers resolve different slice branches in parallel (`mergetopus resolve`)
-- a coordinator monitors progress and next actions (`mergetopus status`)
-- once promoted, temporary branches are cleaned up (`mergetopus cleanup`)
-
-## What It Does
-
-When you run `mergetopus <source>`, it:
-
-1. Checks that you're in a Git repo with a clean working tree.
-2. Creates an integration branch (`_mmm/<target>/<source>/integration`).
-3. Runs `git merge --no-commit` against the source.
-4. Commits everything that merged cleanly into the integration branch.
-5. Resets conflicted files back to `ours` in that same commit — they'll be dealt with in slices.
-6. Lets you group conflicts into slices (via TUI or `--select-paths`). Conflicts you don't explicitly group get their own one-file slice by default, or one shared slice with `--unassigned single` (the TUI asks which one you want).
-7. Creates a branch per slice from the merge base, with the source-side version of each file and a commit message noting where it came from.
-
-From there, use `mergetopus resolve` to work through each slice with your merge tool (see [Resolving Conflicts](#resolving-conflicts)).
-
-## Collaborative Workflow (Large Merges)
-
-Use the commands together as a repeatable team process.
-
-1. Plan and split the merge (`mergetopus`).
-
-```bash
-# from your target branch (for example: main)
-mergetopus feature/very-large-change
-```
-
-What this does:
-
-- creates `_mmm/<target>/<source>/integration`
-- records non-conflicting merge results
-- creates per-conflict slice branches (`_mmm/<target>/<source>/sliceN`)
-
-2. Resolve slices in parallel (`mergetopus resolve`).
-
-```bash
-# each developer picks a slice and resolves it
-mergetopus resolve _mmm/main/feature_very-large-change/slice1
-mergetopus resolve --commit _mmm/main/feature_very-large-change/slice1
-```
-
-Each slice is merged into the integration branch with `--no-commit`, resolved with your merge tool, and optionally committed.
-
-3. Track progress and next actions (`mergetopus status`).
-
-```bash
-mergetopus status feature/very-large-change
-```
-
-Status reports merged vs pending slices and suggests what to do next.
-
-4. Push the merge plan to a shared remote (`mergetopus push`).
-
-- pushes the integration branch, all slice branches, and the kokomeco branch (if it exists) with `--force-with-lease`
-- verifies that source and target branches already exist on the remote before pushing
-- automatically selects the remote when only one is configured; shows a TUI picker when multiple remotes exist
-
-```bash
-# single remote — auto-selected
-mergetopus push
-
-# explicit remote
-mergetopus push origin
-
-# quiet mode requires an explicit remote when multiple are configured
-mergetopus push origin --quiet
-```
-
-5. Promote and clean up (`mergetopus cleanup`).
-
-- after all slices are merged, optionally create a [`kokomeco`](#why-kokomeco-exists) snapshot branch (a consolidated merge commit for promotion)
-- merge the chosen final branch into your target branch using normal Git policy
-- run cleanup to remove obsolete integration/slice branches
-
-```bash
-mergetopus cleanup
-```
-
-## Complex Merge Diagrams
-
-1. Hard merge without slicing (everything blocked in one place):
+A long-running branch eventually has to be merged back. You run `git merge`. Git stops with hundreds of conflicts. Now the whole merge is blocked on one person, resolving everything by hand, in one working tree, one file at a time:
 
 ```text
 main:      A---B---C
@@ -113,688 +25,146 @@ result:
 - hard to parallelize
 ```
 
-2. mergetopus split strategy (parallel conflict handling):
+Nobody else can help, and the merge blocks the release until it's done.
+
+## The idea
+
+The idea is simple: most files don't actually conflict. So split the merge accordingly:
+
+- **Integration branch**: takes everything Git could merge automatically.
+- **Slices**: small, independent branches for groups of conflicting files. Different people can resolve these in parallel, with whatever merge tool they prefer.
+- **Kokomeco branch**: a consolidated snapshot once all slices are done, with proper ancestry so `git blame` still works correctly.
 
 ```text
-remembered HEAD: C
-
-main:                 A---B---C
-                            \
-source feature:              D---E---F
-
 integration branch:
-_mmm/main/feature/integration   C---M(partial: only non-conflicting files)
-                         |
-                         +-- conflicted files reset to ours in M
+_mmm/main/feature/integration   C---M (only the auto-merged files)
 
-slice branches from merge-base(C,F):
-_mmm/main/feature/slice1   B---S1 (explicit group: fileA,fileB)
-_mmm/main/feature/slice2   B---S2 (explicit group: fileC)
-_mmm/main/feature/slice3   B---S3 (auto singleton for unassigned fileD)
-_mmm/main/feature/slice4   B---S4 (auto singleton for unassigned fileE)
+slice branches (one per conflict group):
+_mmm/main/feature/slice1   files A and B   -> developer 1
+_mmm/main/feature/slice2   file C          -> developer 2
+_mmm/main/feature/slice3   file D          -> developer 3
 
-with --unassigned single, fileD and fileE share one branch instead:
-_mmm/main/feature/slice3   B---S3 (unassigned: fileD,fileE)
+after resolution, slices are merged back into integration:
+_mmm/main/feature/integration   C---M---S1---S2---S3
 ```
 
-3. After resolution and optional consolidation:
+`mergetopus` sets this structure up, tracks it, and removes the temporary branches when you're done. The actual resolving is still you and your merge tool, one slice at a time.
 
-```text
-integration after merging slices:
-_mmm/main/feature/integration   C---M---(merge S1)---(merge S2)---(merge S3)---(merge S4)
-
-optional non-destructive consolidation output:
-_mmm/main/feature/kokomeco
-                      \---MC (single merge-commit snapshot branch)
-
-notes:
-- integration history stays intact
-- consolidated branch is created for review/promotion
-```
-
-## Example: Large Team Merge across LTS Versions
-
-### Scenario
-
-Five developers maintain a project with multiple long-term stable (LTS) release branches:
-
-| Developer      | Role                 | Active branches          |
-| -------------- | -------------------- | ------------------------ |
-| Wendy Corduroy | Developer            | LTS_v17, LTS_v32         |
-| Gideon Gleeful | Developer            | LTS_v17, LTS_v32         |
-| Dipper Pines   | Developer            | LTS_v32, main            |
-| Mabel Pines    | Team lead (Gideon's) | LTS_v32, main            |
-| Stan Pines     | Senior integrator    | LTS_v42 (merges forward) |
-
-Wendy and Gideon make **overlapping changes** to `config.toml` and `engine.rs`
-in LTS_v17. All four developers contribute to LTS_v32. Dipper and Mabel also
-work on `main`. Stan regularly merges from older LTS versions into newer ones
-and eventually upstream to `main`.
-
-### Branch Topology
-
-```text
-                    Wendy: v17 pooling     Gideon: v17 hardening
-                    (config, engine,       (config line 2,
-                     api, utils)            engine line 2)
-LTS_v17:  M0 ──────── W1 ────────────────── G1
-            │
-            │          Wendy: v32   Gideon: v32   Dipper: v32     Mabel: v32
-            │          retry        caching       debug logging   auth + logging
-LTS_v32:  M0 ──────── W2 ──────── G2 ──────── D1 ──────────── MB1
-            │
-            │          Stan: v42
-            │          baseline
-LTS_v42:  M0 ──────── S1 ────── kokomeco₁ ────── kokomeco₂ ──── ···
-            │                       ↑                  ↑
-            │                 merge LTS_v17       merge LTS_v32
-            │
-            │          Dipper:      Mabel:
-            │          metrics      telemetry
-main:     M0 ──────── D2 ──────── MB2 ─────────────── ··· ────── merge kokomeco₃
-```
-
-### Cascade Merge Steps
-
-Stan merges LTS_v17 → LTS_v42, then LTS_v32 → LTS_v42, then LTS_v42 → main.
-
-#### Step 1: LTS_v17 → LTS_v42
+## Quick tour
 
 ```bash
-# Stan initiates the merge from LTS_v42
-mergetopus LTS_v17 --select-paths config.toml,engine.rs
+# intentionally init the mergetopus workflow from your target branch:
+mergetopus feature/very-large-change
+
+# already started a merge and hit conflicts? hand over the rest:
+mergetopus HERE
+
+# push so the team can collaborate:
+mergetopus push origin
+
+# each dev resolves a slice:
+mergetopus resolve _mmm/main/feature_very-large-change_c6e0/slice1
+
+# check who's done what:
+mergetopus status
+
+# clean up when everything's merged:
+mergetopus cleanup
 ```
 
-```text
-LTS_v42 HEAD (Stan)                             LTS_v17 (Wendy + Gideon)
-     │                                               │
-     └─── mergetopus LTS_v17 ───┐                    │
-                                │                    │
-   _mmm/LTS_v42/LTS_v17/        │                    │
-     integration ◄── partial merge (auto-merged files,
-         │               conflicts reset to ours)
-         │
-         ├── slice1: config.toml + engine.rs  ←  explicit group (--select-paths)
-         │     → Mabel resolves (contains Gideon's overlapping changes)
-         │
-         ├── slice2: api.rs
-         │     → Dipper resolves (Wendy's caching changes)
-         │
-         └── slice3: utils.rs
-               → Dipper resolves (Wendy's format changes)
+What each of these commands does in detail:
 
-  After all slices resolved + consolidated:
-  _mmm/LTS_v42/LTS_v17/kokomeco
-      parent 1: original LTS_v42 HEAD (Stan's baseline)
-      parent 2: LTS_v17 tip (Wendy + Gideon)
-      tree:     final integration state
-```
+## Installing
 
-#### Step 2: LTS_v32 → LTS_v42
+Grab a binary for your platform from the [GitHub Releases](https://github.com/mwallner/mergetopus/releases) page and put it on your `PATH`.
 
-```bash
-# After promoting kokomeco₁ into LTS_v42
-git checkout LTS_v42 && git merge _mmm/LTS_v42/LTS_v17/kokomeco
-mergetopus LTS_v32 --select-paths engine.rs,utils.rs
-```
-
-```text
-  _mmm/LTS_v42/LTS_v32/
-     integration
-         │
-         ├── slice1: engine.rs + utils.rs  ←  Mabel resolves (Gideon/Mabel changes)
-         │
-         ├── slice2: api.rs                ←  Dipper resolves (Wendy's retry logic)
-         │
-         └── slice3: config.toml           ←  Dipper resolves (Wendy/Dipper's config)
-
-  After consolidation:
-  _mmm/LTS_v42/LTS_v32/kokomeco
-      parent 1: LTS_v42 (post kokomeco₁)
-      parent 2: LTS_v32 tip
-```
-
-#### Step 3: LTS_v42 → main
-
-```bash
-# After promoting kokomeco₂
-git checkout main
-mergetopus LTS_v42
-```
-
-Only `config.toml` and `engine.rs` conflict (main never changed `api.rs` or
-`utils.rs` from the initial commit, so those auto-merge).
-
-### Blame Verification on kokomeco
-
-After the full cascade, `git blame` on the final kokomeco correctly traces
-through the merge parents back to the original authors — no squash, no
-history rewrite:
-
-```text
-git blame _mmm/LTS_v42/LTS_v17/kokomeco -- config.toml:
-  max_connections = 200   → Wendy Corduroy   ("Wendy: v17 connection pooling and caching")
-  timeout = 60            → Gideon Gleeful   ("Gideon: v17 timeout hardening and error handling")
-
-git blame _mmm/LTS_v42/LTS_v17/kokomeco -- engine.rs:
-  fn init() { wendy_pool(); }       → Wendy Corduroy
-  fn process() { gideon_errors(); } → Gideon Gleeful
-
-git blame _mmm/LTS_v42/LTS_v17/kokomeco -- api.rs:
-  fn handle() { wendy_caching(); }  → Wendy Corduroy
-
-git blame _mmm/LTS_v42/LTS_v17/kokomeco -- utils.rs:
-  fn format() { wendy_format(); }   → Wendy Corduroy
-
-git blame _mmm/main/LTS_v42/kokomeco -- engine.rs:
-  fn init() { mabel_auth(); }       → Mabel Pines     (from LTS_v32)
-  fn process() { gideon_cache(); }  → Gideon Gleeful   (from LTS_v32)
-
-git blame _mmm/main/LTS_v42/kokomeco -- api.rs:
-  fn handle() { wendy_retry(); }    → Wendy Corduroy   (from LTS_v32, auto-merged)
-```
-
-The kokomeco merge topology preserves correct line-blame because:
-
-- each kokomeco has the source branch as merge parent 2
-- unchanged lines from the source side trace through that parent to original commits
-- the cascade (kokomeco₁ → kokomeco₂ → kokomeco₃) maintains a clean ancestry chain
-- no squash or history rewrite occurs — only clean merge snapshots
-
-> This scenario is exercised by the integration test
-> `lts_cascade_merge_preserves_authorship_in_kokomeco` in `tests/test_suite_d.rs`.
-
-## Existing Topology Handling
-
-If the integration branch already exists, `mergetopus`:
-
-1. discovers related slice branches (`_mmm/<safe-current>/<safe-source>/sliceN`)
-2. checks whether each slice is merged into the integration branch
-3. reports merged/pending status
-4. when all slices are merged, offers optional consolidation
-
-Consolidation is non-destructive: it creates a separate branch `_mmm/<safe-current>/<safe-source>/kokomeco` with a single merge commit snapshot.
-
-### Why "kokomeco" Exists
-
-`kokomeco` stands for **KOrrekt KOnsoliderter MErge COmmit** (German: "correctly consolidated merge commit").
-
-The name is intentional: the consolidation step is not a squash and not a history rewrite of the integration branch. Instead, Mergetopus creates a separate merge-commit snapshot branch with merge parents derived from:
-
-- the remembered target-branch head (before the merge workflow started)
-- the original merge source commit
-
-and with the final resolved tree copied from the integration branch.
-
-Why this matters for `git blame`:
-
-- A plain squash-style consolidation would collapse ownership and often attribute many lines to the integrator commit.
-- Kokomeco keeps a proper merge ancestry edge to the original source side, so line-blame can continue to follow where unchanged lines actually came from.
-- Temporary integration/slice execution history can be cleaned up later, while the promoted branch still shows where changes came from in the final merge history.
-
-## Handling Multiple Merge Bases (Criss-Cross Histories)
-
-If both sides of a merge each contain the other's history through *different*
-merge commits (a "criss-cross"), git sees **more than one best common
-ancestor**. A plain `git merge` then consults none of them directly: it
-builds a *virtual merge base* from all of them, which can report conflicts
-that no single base would ever produce.
-
-Mergetopus anchors slice branches, merge-tool `BASE` inputs, auto-applied
-reporting and the 3-way diff overlay to **one concrete base**, so it asks
-which one to use:
-
-- The base reported by `git merge-base A B` is the **default** — the same
-  single-base view that forge PRs (GitHub/GitLab/Bitbucket) show.
-- **Interactive mode:** when multiple bases exist, Mergetopus lists all of
-  them (with commit subjects) and lets you pick one; the default is marked
-  and used if you cancel.
-- **Non-interactive mode** (`--quiet`, and `--yes` with a TUI-suppressed
-  run): prints a warning naming the chosen base and proceeds with the
-  default.
-
-The conflict list is then taken **with respect to the chosen base**: git's
-merge output is re-evaluated with `git merge-tree --merge-base=<chosen>`
-(git's own ort semantics, rename detection included). Files that a single
-base merge would auto-resolve are settled immediately and never become
-slices — `Conflict count` reflects only the conflicts that genuinely remain
-against the chosen base. Genuinely conflicting paths, including correlated
-rename/rename and modify/delete groups, are sliced as usual. The same
-handling applies to `mergetopus HERE` takeover and to `mergetopus resolve`
-(resumed slice merges reconstruct their conflict topology pinned to the
-chosen base).
-
-> Requires git >= 2.42 for the pinned-base re-evaluation; older git falls
-> back to the raw merge conflict list.
-
-## Large Repositories
-
-Slice setup, resolve, status and cleanup scale to thousands of conflicted
-paths by driving git in bulk instead of per path:
-
-- Path lists are streamed to git over **stdin** (`--pathspec-from-file=-
-  --pathspec-file-nul`, `update-index --index-info`, `checkout-index
-  --stdin`), avoiding any command-line length limit (git < 2.25 falls back
-  to bounded argv chunks).
-- Conflicted paths are classified with single `ls-tree` / `cat-file
-  --batch` walks; merge-tool `LOCAL`/`BASE`/`REMOTE` inputs are fetched in
-  one batched process.
-- Slice and status reports resolve branch reachability with one
-  `git branch --merged` instead of a `merge-base --is-ancestor` probe per
-  slice branch.
-
-With the default one-slice-per-conflict policy the remaining cost is
-creating and committing one branch per slice; `--unassigned single` or
-explicit grouping collapses that into a handful of operations.
-
-## Installation
-
-Download the `mergetopus` binary for your platform from the [GitHub Releases](https://github.com/mwallner/mergetopus/releases) page and place it in a directory on your system's `PATH`.
-
-On **Windows** with [Chocolatey](https://chocolatey.org/):
+On Windows, with [Chocolatey](https://chocolatey.org/):
 
 ```bash
 choco install mergetopus.portable
 ```
 
-**Anywhere**, with Cargo:
+Anywhere, with Cargo:
 
 ```bash
-cargo install --git https://github.com/mwallner/mergetopus.git 
+cargo install --git https://github.com/mwallner/mergetopus.git
 ```
 
-## Platform Support
+You also need Git. A couple of advanced behaviors want newer versions:
 
-`mergetopus` works on **Windows**, **macOS**, and **Linux**.
+- Git >= 2.42 for the criss-cross handling in [tricky histories](#tricky-histories)
+- Git >= 2.25 for the bulk fast paths in [large repositories](#very-large-repositories)
 
-During `resolve`, Mergetopus sets the same environment variables (`LOCAL`, `BASE`, `REMOTE`, `MERGED`) across platforms so merge tool configuration stays portable.
+Older Git still works; the fallbacks are noted where relevant.
 
-On Windows, merge tools are invoked directly (without `cmd /c`) to avoid quoting/whitespace proxy issues.
-On Unix-like systems (macOS, Linux), command execution uses `sh -c`.
+## Starting a merge
 
-When running inside a Git worktree on Windows, mergetopus ensures `core.longpaths=true`
-for the repository so deep path merges remain usable.
-
-## Worktree Behavior
-
-Mergetopus adapts its worktree behavior based on your existing setup:
-
-- If your repository has no additional worktrees, Mergetopus keeps the existing default behavior (no automatic worktree creation).
-- If your repository already uses worktrees, Mergetopus prefers running branch operations in branch-specific worktree directories.
-- When Mergetopus needs to create a branch worktree and no suitable branch worktree exists yet, it infers a base directory from existing worktree paths.
-- If a common base cannot be inferred, Mergetopus falls back to the parent of the repository root.
-
-This keeps non-worktree workflows unchanged while making branch checkouts easier in repositories that already use worktrees.
-
-## Branch Naming Conventions
-
-- **Integration branches** follow the pattern `_mmm/<safe-original-branch>/<safe-source-branch>/integration`.
-  These are temporary working branches that hold the merge result with auto-merged
-  files staged and conflicted files reset to "ours".
-  - Example: `_mmm/main/feature/integration`, `_mmm/develop/release_v1/integration`
-
-- **Slice branches** follow the pattern `_mmm/<safe-original-branch>/<safe-source-branch>/slice<N>` where `N` is a number (1, 2, 3, ...).
-  These are temporary per-conflict branches for resolving individual conflict groups.
-  - Example: `_mmm/main/feature/slice1`, `_mmm/main/feature/slice2`
-
-- **Kokomeco branches** follow the pattern `_mmm/<safe-original-branch>/<safe-source-branch>/kokomeco`.
-  These are optional output branches created after all slices are merged, containing
-  a single merge-commit snapshot.
-  - Example: `_mmm/main/feature/kokomeco`
-
-The `safe-*` components use the same sanitization rules as before: characters outside `[0-9A-Za-z._-]` are replaced with `_`.
-
-### Branch Filtering
-
-When selecting a source branch for `mergetopus`:
-- **Slice branches** (`_mmm/.../slice<N>`) are automatically filtered out from the branch picker.
-  They should only be used with `mergetopus resolve`, never as a source for a new merge.
-- Only non-slice branches are available for selection, reducing accidental misuse.
-
-### Integration Branch Redirection
-
-If you select an integration branch as the source, `mergetopus` detects this
-and asks what you want to do:
-
-- **Switch to this integration branch and view its status** — checks out the
-  integration branch and shows slice progress.
-- **Create a new merge targeting this integration branch** — checks out the
-  original target branch and merges the actual source, creating a fresh
-  integration branch.
-
-Example: if you select `_mmm/main/feature/integration`, mergetopus will
-recognize that the target was `main` and the source was `feature`, then let
-you pick between viewing existing status or starting a new merge of `feature`
-into `main`.
-
-## Usage
-
-Interactive source selection (branch picker overlay shown):
+From the branch you want to merge *into* (say `main`), with a clean working tree:
 
 ```bash
-mergetopus
+mergetopus feature/very-large-change
 ```
 
-Provide source branch explicitly:
+What happens, in order:
+
+1. Checks that you're in a Git repo with nothing uncommitted.
+2. Creates the integration branch: `_mmm/main/feature_very-large-change_c6e0/integration` (names get sanitized, see [Branch names](#branch-names)).
+3. Runs `git merge --no-commit` and commits everything that merged cleanly onto the integration branch. Conflicted files are reset to *your* side for now; they'll be dealt with in slices.
+4. Lets you group the conflicts into slices: interactively via TUI, or non-interactively with `--select-paths`. Conflicts you don't group get one slice each by default. Want them all in one shared slice instead? Use `--unassigned single`; the TUI asks.
+5. Creates one slice branch per group, starting from the merge base, carrying the source-side version of each file, with a commit message noting where it came from.
+
+Then everyone picks a slice and resolves it (see [Resolving conflicts](#resolving-conflicts)).
+
+## Working as a team
+
+The commands are meant to be used together as a repeatable process:
+
+1. **Plan and split**: one person runs `mergetopus <source>`.
+2. **Share the plan**: `mergetopus push` pushes the integration branch, all slice branches, and the kokomeco branch if it exists. Everything goes out with `--force-with-lease`, and the command checks that source and target are on the remote first. One remote configured? Auto-selected. Multiple? TUI picker.
+
+   ```bash
+   mergetopus push            # single remote: auto-selected
+   mergetopus push origin     # explicit
+   ```
+
+3. **Resolve in parallel**: each developer runs `mergetopus resolve <slice>`. Add `--commit` to commit automatically once everything is staged.
+4. **Track progress**: anyone can ask what's done and what's next:
+
+   ```bash
+   mergetopus status feature/very-large-change   # one plan in detail
+   mergetopus status                             # all plans, local + remotes
+   ```
+
+   Status reports merged vs pending slices and suggests the next commands.
+5. **Finish**: once all slices are back in integration, create the kokomeco snapshot, merge the result into your target branch using normal Git policy, then `mergetopus cleanup` removes the completed workflow's temporary branches. To abandon an incomplete workflow, use `mergetopus discard` instead.
+
+## Resolving conflicts
+
+`mergetopus resolve <slice>` merges that slice into its integration branch and walks you through the conflicts:
+
+1. Derives the integration branch from the slice name.
+2. Checks out the integration branch, runs `git merge --no-commit <slice>`.
+3. For each conflicted file, pulls three versions out of Git's history:
+   - `LOCAL`: the integration branch's version
+   - `BASE`: the common ancestor's version
+   - `REMOTE`: the slice branch's version
+4. Writes them to temp files and launches your merge tool with `LOCAL`, `BASE`, `REMOTE` and `MERGED` environment variables. That's the exact convention `git mergetool` uses, so your existing tool config just works. `MERGED` points at the real file in the working tree; whatever your tool writes *is* the resolution.
+5. Stages each resolved file. With `--commit`, creates the merge commit. Before committing it checks for leftover conflict markers, and it honors `mergetool.<tool>.trustExitCode` if you set one.
+
+For rename/delete and modify/delete groups, `--on-group` can choose the action without asking: `theirs`, `ours`, `both`, `delete`, or `tool`.
 
 ```bash
-mergetopus feature/refactor-auth
+mergetopus resolve --on-group theirs _mmm/main/feature/slice1
 ```
 
-Explicit conflict grouping by path list:
+Configure the tool like you would for git:
 
 ```bash
-# Put explicit paths into one grouped slice; all remaining conflicts become one-file slices
-mergetopus feature/refactor-auth --select-paths src/a.rs,src/b.rs
-
-# Same, but every remaining conflict shares one slice branch
-mergetopus feature/refactor-auth --select-paths src/a.rs,src/b.rs --unassigned single
-
-# No explicit grouping: one shared slice for every conflict
-mergetopus feature/refactor-auth --quiet --unassigned single
-```
-
-Interactive conflict grouping (with `F3` opening your configured `diff.tool`, or the inline 3-way view when no `diff.tool` is set) when `--select-paths` is not provided:
-
-```bash
-mergetopus feature/refactor-auth
-```
-
-Auto-confirm consolidation prompt:
-
-```bash
-mergetopus feature/refactor-auth --yes
-```
-
-Non-interactive CI/CD mode (no TUI):
-
-```bash
-# SOURCE is required in quiet mode
-mergetopus feature/refactor-auth --quiet
-
-# Quiet mode + explicit conflict grouping
-mergetopus feature/refactor-auth --quiet --select-paths src/a.rs,src/b.rs
-
-# Quiet mode + auto-consolidate when eligible
-mergetopus feature/refactor-auth --quiet --yes
-
-# Show slice/integration progress status
-mergetopus status feature/refactor-auth
-
-# Include pull/merge request URLs in status output
-mergetopus status feature/refactor-auth --pr
-
-# Show global MMM overview across local + configured remotes
-mergetopus status
-
-# Show global MMM overview across local + configured remotes
-mergetopus status
-
-# Verify one integration branch against its kokomeco timestamp
-mergetopus verify feature/refactor-auth
-
-# Verify all integration branches globally (only ones with kokomeco are checked)
-mergetopus verify --global
-
-# Cleanup temporary integration/slice branches (interactive confirmation)
-mergetopus cleanup
-
-# Close associated PRs when cleaning up branches
-mergetopus cleanup --close-prs
-
-# Push an initialized merge plan to a remote
-mergetopus push origin
-
-# Take over an already in-progress manual merge
-mergetopus HERE
-```
-
-Takeover mode for an in-progress merge:
-
-```bash
-# Optional: non-interactive explicit grouping for remaining conflicts
-mergetopus --quiet --select-paths src/big/file1.cs,src/big/file2.cs HERE
-```
-
-## Status Reporting
-
-Use `mergetopus status` to inspect merge progress.
-
-```bash
-# Global overview mode (no SOURCE): scans _mmm/* across local + configured remotes
-mergetopus status
-
-# Status by source ref
-mergetopus status feature/refactor-auth
-
-# Status by integration branch name
-mergetopus status _mmm/main/feature_refactor-auth/integration
-```
-
-Status behavior:
-
-- with no argument: prints a global MMM overview table (integration, target, source, state, pending/resolved, kokomeco)
-- with a source/integration argument: prints detailed status for that one integration branch
-- with `--pr`: also fetches and displays pull/merge request URLs and states (requires forge auth)
-- when discoverable refs do not form a valid integration family, reports them under `Orphaned MMM Refs (warning)`
-
-Detailed integration status output includes:
-
-- integration branch
-- source ref and source SHA (when derivable from integration history)
-- merged/pending slice counts
-- pending slice details with detected affected paths (when available)
-- suggested next commands
-
-## Verify Integration Status (safeguard)
-
-Use `mergetopus verify` after a kokomeco branch has been created to confirm that
-the integration branch has not drifted (no newer commits) since consolidation.
-
-```bash
-# Verify by source ref
-mergetopus verify feature/refactor-auth
-
-# Verify by integration branch name
-mergetopus verify _mmm/main/feature_refactor-auth/integration
-
-# Verify current branch when already on an integration branch
-mergetopus verify
-
-# Global validation across all discovered integration branches
-mergetopus verify --global
-```
-
-Verification behavior:
-
-- single-branch verify fails if the integration branch has commits newer than its corresponding kokomeco commit
-- `--global` scans all discovered integration branches and checks each branch that already has a corresponding kokomeco branch
-- global mode reports checked vs skipped counts (`skipped` means missing kokomeco)
-
-## Resolving Conflicts
-
-After mergetopus has created slice branches, use `resolve` to merge a selected
-slice into its corresponding integration branch with `--no-commit`, then open
-each conflicted file in your configured merge tool one-by-one:
-
-```bash
-# Interactive slice branch picker (TUI)
-mergetopus resolve
-
-# Resolve a specific slice branch directly
-mergetopus resolve _mmm/main/feature/slice1
-
-# Non-interactive (--quiet requires an explicit branch)
-mergetopus resolve --quiet _mmm/main/feature/slice1
-
-# Create a commit automatically after staging
-mergetopus resolve --commit _mmm/main/feature/slice1
-```
-
-### What resolve does
-
-1. Derives the corresponding integration branch from the slice branch name.
-2. Checks out the integration branch and starts `git merge --no-commit <slice>`.
-3. For each currently conflicted file, derives from the Git graph:
-  - `LOCAL` as the integration branch `HEAD` before the merge
-  - `REMOTE` as the slice branch tip
-  - `BASE` as the chosen merge base of `LOCAL`/`REMOTE` (`git merge-base`
-    default, or your pick on criss-cross histories — see
-    [Handling Multiple Merge Bases](#handling-multiple-merge-bases-criss-cross-histories))
-4. Writes three temporary files per conflicted path:
-  - `LOCAL`  — the file at the integration branch side
-  - `BASE`   — the file at the common ancestor (merge-base)
-  - `REMOTE` — the file at the slice branch side
-5. Executes the configured merge tool with `LOCAL`, `BASE`, `REMOTE`, and `MERGED`
-   set as environment variables (same convention as `git mergetool`). The command
-   is executed via the appropriate shell:
-  - **Windows**: invoked directly without `cmd /c`
-   - **Unix-like systems** (macOS, Linux): `sh -c <cmd>`
-   
-  `MERGED` points to the conflicted working-tree file on the integration branch,
-  so the tool writes the resolution directly into the repository.
-6. Stages each resolved file.
-7. Optional: if `--commit` is passed, creates the merge commit on the integration branch.
-
-## Take Over In-Progress Merge (`HERE`)
-
-Use `mergetopus HERE` when you already started a regular `git merge` manually,
-resolved some conflicts, and want Mergetopus to take over only the remaining
-unresolved conflicts.
-
-Typical scenario:
-
-1. You run `git merge <source>` on your target branch.
-2. Git stops with conflicts.
-3. You manually resolve some files.
-4. You run `mergetopus HERE` to continue using slice workflow for what remains.
-
-Behavior of `HERE`:
-
-- requires an active merge (`MERGE_HEAD` must exist)
-- preserves already-resolved file content from your working tree/index
-- aborts the manual merge and rebuilds canonical Mergetopus integration state
-- creates slices only for still-unresolved conflict paths
-- opens normal conflict grouping flow (or uses `--select-paths` in quiet mode)
-
-Command examples:
-
-```bash
-# Interactive takeover
-mergetopus HERE
-
-# Quiet takeover with explicit grouping for remaining conflicts
-mergetopus --quiet --select-paths src/module/a.rs,src/module/b.rs HERE
-```
-
-### Configuring the merge tool
-
-`mergetopus resolve` reads the merge tool from Git config.  Set it once in
-your global or repository config:
-
-```bash
-# Choose a tool name
 git config merge.tool vimdiff
-
-# Provide the shell command template.
-# $LOCAL, $BASE, $REMOTE, $MERGED are expanded at runtime.
 git config mergetool.vimdiff.cmd 'vimdiff "$LOCAL" "$BASE" "$REMOTE" -c "wincmd J" "$MERGED"'
 ```
 
-## Pull Request Integration
-
-Mergetopus can create and manage pull/merge requests for the integration and
-slice branches on GitHub, GitLab, Bitbucket Data Center, and Forgejo.
-
-### Forge Detection
-
-The forge is detected automatically from the remote URL:
-
-| Remote URL                           | Detected Forge |
-| ------------------------------------ | -------------- |
-| `https://github.com/owner/repo.git`  | GitHub         |
-| `git@github.com:owner/repo.git`      | GitHub         |
-| `https://gitlab.com/owner/repo.git`  | GitLab         |
-| `https://bitbucket.company.com/scm/PROJ/repo.git` | Bitbucket Data Center |
-| `ssh://git@bitbucket.company.com:7999/PROJ/repo.git` | Bitbucket Data Center |
-| `https://codeberg.org/owner/repo.git` | Forgejo       |
-| `git@codeberg.org:owner/repo.git`    | Forgejo        |
-
-> **Bitbucket Cloud (`bitbucket.org`) is not supported.** PR integration
-> implements the Bitbucket **Data Center** REST API (`/rest/api/latest`);
-> Cloud remotes are rejected with an explicit error.
-
-For **self-managed** instances (e.g. `gitlab.internal.example.com`,
-`bitbucket.company.com`, `git.forgejo.instance`), set the forge type explicitly:
-
-```bash
-git config mergetopus.forge-type gitlab
-# or: forgejo, bitbucket
-```
-
-### Authentication
-
-Each forge reads a token from git config (scoped to the repository or global),
-falling back to an environment variable:
-
-| Forge     | Git Config Key               | Environment Variable          |
-| --------- | ---------------------------- | ----------------------------- |
-| GitHub    | `mergetopus.github-token`    | `GITHUB_TOKEN`                |
-| GitLab    | `mergetopus.gitlab-token`    | `GITLAB_TOKEN`                |
-| Bitbucket | `mergetopus.bitbucket-token` | `BITBUCKET_TOKEN` (Data Center personal access token, sent as `Bearer`) |
-| Forgejo   | `mergetopus.forgejo-token`   | `FORGEJO_TOKEN` or `CODEBERG_TOKEN` |
-
-Example:
-
-```bash
-git config mergetopus.github-token ghp_xxxxxxxxxxxxxxxxxxxx
-# or
-export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-```
-
-### Commands
-
-Create pull requests for integration and slice branches (as drafts):
-
-```bash
-# Create PRs for the current merge plan
-mergetopus pr create
-
-# Create PRs for a specific source/integration
-mergetopus pr create feature/refactor-auth
-```
-
-Sync PR titles and descriptions after changes:
-
-```bash
-mergetopus pr sync
-```
-
-List existing PR URLs and states:
-
-```bash
-mergetopus pr list
-```
-
-Create PRs as part of push (combines push + pr create):
-
-```bash
-mergetopus push --pr
-```
-
-Show PR URLs alongside status output:
-
-```bash
-mergetopus status --pr
-```
-
-Close associated PRs during branch cleanup:
-
-```bash
-mergetopus cleanup --close-prs
-```
-
-Some common examples:
+Some ready-made ones, for any tool that reads the three inputs and writes `$MERGED`:
 
 | Tool           | Example `mergetool.<name>.cmd`                               |
 | -------------- | ------------------------------------------------------------ |
@@ -804,102 +174,246 @@ Some common examples:
 | meld           | `meld "$LOCAL" "$BASE" "$REMOTE" --output "$MERGED"`         |
 | kdiff3         | `kdiff3 "$BASE" "$LOCAL" "$REMOTE" -o "$MERGED"`             |
 
-Any tool that reads `$LOCAL`, `$BASE`, `$REMOTE` and writes its result to
-`$MERGED` will work.
+The `LOCAL`/`BASE`/`REMOTE`/`MERGED` convention is the same on all platforms. On Windows the tool is invoked directly (no `cmd /c`, which avoids quoting/whitespace problems), and mergetopus sets `core.longpaths=true` for the repository so deep path merges stay usable; on macOS and Linux commands run via `sh -c`.
 
-### Configuring optional F3 diff tool
-
-In the conflict selector, `F3` behaves as follows:
-
-- if `git config diff.tool` is set, `F3` launches that difftool for the selected conflicted file
-- if `diff.tool` is not set, `F3` opens the built-in inline 3-way diff overlay
-
-Example:
+While grouping conflicts in the selector, `F3` diffs the selected file: your configured `diff.tool` if you have one, otherwise a built-in 3-way view.
 
 ```bash
 git config diff.tool vscode
 git config difftool.vscode.cmd 'code --wait --diff "$LOCAL" "$REMOTE"'
 ```
 
-## TUI Keybindings
+## Branch names
 
-When `--quiet` is not set, TUI is used for source branch picking (if `SOURCE`
-is omitted), conflict selection (if `--select-paths` is omitted), and slice
-branch selection for `resolve` (if `BRANCH` is omitted).
+Every branch mergetopus creates shares one pattern:
 
-Conflict selector:
+```text
+_mmm/<target>/<source>/integration    the merge result so far
+_mmm/<target>/<source>/slice<N>       one conflict group (N = 1, 2, 3, ...)
+_mmm/<target>/<source>/kokomeco       final consolidated snapshot
+```
 
-- `Arrow Up/Down`: move cursor
-- `Tab`: switch pane
-- `n`: create new explicit slice
-- `Space`: assign/move highlighted conflict into currently selected slice
-- `u`: unassign highlighted conflict (it will become a default one-file slice, or join the shared slice when `--unassigned single` is in effect)
-- `d`: delete selected explicit slice (its files become unassigned)
-- `F3`: open configured difftool for selected file (or inline 3-way diff if `diff.tool` is not set)
-- `Enter`: apply selection (when files are still unassigned, asks whether they get separate slices or one shared slice; `Esc` in that prompt returns to the selector)
-- `Esc`: close overlay or cancel selector
-- `q`: cancel selector
+Branch names contain characters Git reserves for ref separators, like the `/` in `feature/auth`. So each component gets *sanitized*: anything outside `[0-9A-Za-z._-]` becomes `_`. Sanitizing can make two different names collide, so a short hash of the original is appended whenever a character was replaced. `feature/very-large-change` becomes `feature_very-large-change_c6e0`. Names that are already safe (`feature`, `LTS_v42`) are used as they are.
 
-Source branch picker / Slice branch picker:
+Two guard rails:
 
-- Type text to filter branch list
-- `Arrow Up/Down`: move
-- `Enter`: select
-- `Esc` or `q`: cancel
+- Slice branches are filtered out of the branch picker. They're inputs for `resolve`, never sources for a new merge.
+- If you pick an integration branch as a source anyway, mergetopus recognizes the running merge and asks: show its status, or start a fresh merge of the real source into the real target.
 
-3-way diff overlay:
+## Finishing: kokomeco and cleanup
 
-- `Up/Down`: scroll
-- `PageUp/PageDown`: fast scroll
-- `Home/End`: jump to top/bottom
-- `Esc`: close overlay
+Once all slices are merged back, you can *consolidate*: create a `kokomeco` branch holding a single merge commit that represents the finished merge.
 
-## Commit Metadata
+The name stands for **K**Orrekt **KO**nsoliderter **ME**rge **CO**mmit: the correctly consolidated merge commit.
 
-Slice commits include informational trailers that document where each file came from:
+Why bother? The obvious way to finish a messy merge is to squash everything into one commit. That works, but it destroys authorship: hundreds of lines Wendy and Gideon wrote now look like whoever ran the squash wrote them. `git blame` points at the integrator and the information is gone.
 
-- `Source-Ref`
-- `Source-Commit`
-- `Source-Path`
-- `Source-Path-Commit`
-- `Co-authored-by` (when source-side author info is available)
+Kokomeco avoids this by *not* rewriting anything. It's a separate branch whose single commit is an ordinary merge commit with two parents:
 
-These trailers are purely metadata for humans and tools like `mergetopus status`.
-Kokomeco creation does not depend on them — it works entirely from git history
-and the integration branch tree.
+- parent 1: the target branch's head from before the merge started
+- parent 2: the source branch's tip
 
-## Authorship Clarification
+...and whose tree is copied from the finished integration branch. Because the parentage is honest, `git blame` can still follow unchanged lines through parent 2 back to the original authors:
 
-A squash or consolidation commit does not preserve per-commit author lineage by itself.
-`mergetopus` keeps attribution info using co-author trailers on slice commits
-and preserves original integration/slice history by writing consolidated output
-to a separate branch. The kokomeco branch itself gets correct `git blame`
-through its merge parents, not through trailers.
+```text
+git blame _mmm/LTS_v42/LTS_v17/kokomeco -- config.toml
+  max_connections = 200   -> Wendy Corduroy
+  timeout = 60            -> Gideon Gleeful
+```
 
-## Safety Notes
+Nothing is destructive: integration history stays intact, and consolidation asks first. Under `--quiet` it is skipped and the run tells you so; pass `--yes` to create it unattended. Create the snapshot explicitly whenever you want it:
 
-- No destructive reset/rewrite is performed automatically.
-- Consolidation requires explicit confirmation (unless `--yes` is used).
-- `--quiet` disables TUI interactions; provide `SOURCE` explicitly for CI/CD runs.
-- Integration branch is not rewritten by default.
+```bash
+mergetopus consolidate feature/refactor-auth
+```
 
-## Domain Language
+`mergetopus cleanup` removes integration and slice branches after a kokomeco branch exists. It keeps the kokomeco branch, lists what it will delete, and waits for confirmation. To abandon a workflow before consolidation, use `mergetopus discard`; it removes the associated integration and slice branches instead. Both accept `--close-prs`, and neither runs under `--quiet`.
 
-### Integration Branch
+Before you promote the kokomeco branch, `mergetopus verify` gives you one safeguard: it fails if the integration branch carries commits with a committer timestamp newer than the kokomeco commit, which catches work added after consolidation. It is a timestamp comparison, not a content diff.
 
-The main merge target, created and managed by Mergetopus. Holds all auto-merged files and serves as the base for conflict slices.
+```bash
+mergetopus verify feature/refactor-auth     # one plan
+mergetopus verify --global                  # every plan with a kokomeco
+```
 
-### Slice Branch
+## Worked example: an LTS cascade
 
-A per-conflict-group branch created to isolate and resolve a specific set of conflicted files. Multiple slices can exist for a single merge.
+A realistic setting. Five developers, several long-term stable branches, and Stan, who merges old LTS versions into newer ones and eventually upstream to `main`.
 
-### Unassigned Conflicts
+| Developer      | Role                 | Active branches          |
+| -------------- | -------------------- | ------------------------ |
+| Wendy Corduroy | Developer            | LTS_v17, LTS_v32         |
+| Gideon Gleeful | Developer            | LTS_v17, LTS_v32         |
+| Dipper Pines   | Developer            | LTS_v32, main            |
+| Mabel Pines    | Team lead (Gideon's) | LTS_v32, main            |
+| Stan Pines     | Senior integrator    | LTS_v42 (merges forward) |
 
-Conflicted files that no explicit slice group covers. By default each one becomes its own slice branch; `--unassigned single` puts them all in one shared slice branch. In interactive mode the conflict selector asks which you want when you apply a grouping that leaves files unassigned.
+Wendy and Gideon made *overlapping* changes to `config.toml` and `engine.rs` in LTS_v17. Stan faces LTS_v17 into LTS_v42, then LTS_v32 into LTS_v42, then LTS_v42 into `main`.
 
-### Kokomeco Branch
+Step 1, from `LTS_v42`:
 
-A consolidated merge commit branch created after all slices are resolved and merged back into the integration branch. Represents the final merge state.
+```bash
+mergetopus LTS_v17 --select-paths config.toml,engine.rs
+```
+
+The explicitly grouped files become slice1 - that's where Wendy's and Gideon's changes collide. Mabel resolves it, since she knows that code. The remaining conflicts each get their own slice, resolved by Dipper. Once all slices are back:
+
+```text
+_mmm/LTS_v42/LTS_v17/kokomeco
+    parent 1: original LTS_v42 HEAD
+    parent 2: LTS_v17 tip
+    tree:     final resolved state
+```
+
+Step 2 promotes that snapshot into `LTS_v42`, then repeats for LTS_v32:
+
+```bash
+git checkout LTS_v42 && git merge _mmm/LTS_v42/LTS_v17/kokomeco
+mergetopus LTS_v32 --select-paths engine.rs,utils.rs
+```
+
+Step 3 merges LTS_v42 into `main`. By now most of it merges cleanly; only two files still conflict.
+
+After the full cascade, `git blame` on each kokomeco still traces every line to the developer who wrote it, because every step kept real merge ancestry. No squashes, no rewrites. The integration test `lts_cascade_merge_preserves_authorship_in_kokomeco` in `tests/test_suite_d.rs` exercises exactly this scenario.
+
+## HERE: take over a manual merge
+
+You already ran `git merge`, Git stopped with conflicts, and you resolved a few files by hand before realizing this is too big for one person. `mergetopus HERE` hands the remainder to the workflow. Your already-resolved files are kept, the manual merge is aborted, and the standard integration/slice structure is built. Only the *unresolved* conflicts become slices.
+
+```bash
+mergetopus HERE
+mergetopus --quiet --select-paths src/big/file1.cs,src/big/file2.cs HERE
+```
+
+It needs an active merge (`MERGE_HEAD`), and then it's business as usual.
+
+## Tricky histories
+
+**Multiple merge bases (criss-cross).** Occasionally something subtle happens in Git history. Both sides contain the other's history through *different* merge commits, so the branches share several equally-good common ancestors. A plain `git merge` doesn't consult any of them directly. It builds a *virtual* merge base from all of them, and that can report conflicts no single real base would produce.
+
+Mergetopus anchors everything (slice branches, the `BASE` input to your merge tool, the diff view) to *one concrete* base. So when several exist, it asks you to choose one. The default is what `git merge-base A B` reports - the same single-base view GitHub/GitLab PRs show.
+
+The conflict list is then re-evaluated against your chosen base with `git merge-tree --merge-base=...`. That uses git's own ort semantics, rename detection included, so files a single-base merge would auto-resolve are settled immediately and never become slices. Non-interactive mode (`--quiet`, plus `--yes` where the TUI is suppressed) warns and takes the default. Requires Git >= 2.42; older versions fall back to the raw conflict list.
+
+## Very large repositories
+
+A merge with thousands of conflicted paths is slow for a tool that calls Git once per file, because every subprocess has a cost. Mergetopus therefore doesn't call Git per file:
+
+- Path lists stream over stdin (`--pathspec-from-file=-`, `update-index --index-info`, `checkout-index --stdin`) instead of hitting command-line length limits (bounded argv chunks on Git < 2.25).
+- Files are classified and fetched in single batched walks (`ls-tree`, `cat-file --batch`); merge-tool inputs come from one `cat-file --batch` process.
+- "Is this slice merged yet?" is answered with one `git branch --merged` instead of an ancestry test per branch.
+
+The remaining cost is proportional to the number of *slices* (each needs a branch and a commit), not the number of files. With a four-digit conflict count, group them into fewer slices with `--select-paths`. Or let the leftovers share one slice with `--unassigned single`.
+
+**Worktrees.** If your repository already uses worktrees, mergetopus prefers running branch operations in a worktree per branch. New worktrees are created next to your existing ones; the base directory is inferred from current worktree paths, falling back to the repo root's parent. If you don't use worktrees, nothing changes for you.
+
+## Command and flag reference
+
+```bash
+mergetopus <source>                # start (or continue) a merge workflow
+mergetopus                         # same, with an interactive branch picker
+mergetopus resolve                 # resolve a slice, interactive picker
+mergetopus resolve <slice>         # resolve a specific slice
+mergetopus resolve --commit <slice>  # ... and commit when done
+mergetopus status                  # overview of all merge plans (local + remotes)
+mergetopus status <source>         # detailed status of one plan
+mergetopus status <source> --pr    # ... plus pull/merge request URLs
+mergetopus verify <source>         # integration still matches its kokomeco?
+mergetopus verify --global         # check every plan that has a kokomeco
+mergetopus push [remote]           # share the plan on a remote
+mergetopus HERE                    # take over an in-progress manual merge
+mergetopus consolidate [source]    # create the kokomeco branch
+mergetopus cleanup [--close-prs]   # remove temporary branches after kokomeco
+mergetopus discard [--close-prs] <workflow>  # abandon a workflow and remove its branches
+mergetopus license                 # bundled third-party license text
+```
+
+`resolve --on-group <mode>` supports `theirs`, `ours`, `both`, `delete`, and `tool` for rename/delete and modify/delete conflict groups.
+
+Global flags:
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--quiet`  | No TUI, no prompts. For CI/CD. `SOURCE` must be given explicitly; ambiguous choices fall back to documented defaults (with a warning for the merge-base choice). Branch deletion and consolidation prompts are skipped, not auto-approved. |
+| `--yes`    | Auto-confirm prompts (consolidation, `discard`). Not a `cleanup` flag. |
+| `--select-paths <paths>` | Comma-separated paths that form one explicit slice group. |
+| `--unassigned <separate\|single>` | What to do with conflicts you didn't group: `separate` (default) gives each its own slice, `single` puts them all in one shared slice. |
+| `--color <auto\|always\|never>` | Color output control. |
+
+## Pull request integration
+
+Mergetopus can create and manage pull/merge requests for the integration and slice branches, so each slice can be reviewed as its own PR. The forge (GitHub, GitLab, Bitbucket Data Center, Forgejo) is detected from the remote URL:
+
+| Remote URL | Detected forge |
+| ---------- | -------------- |
+| `https://github.com/owner/repo.git`, `git@github.com:...` | GitHub |
+| `https://gitlab.com/owner/repo.git` | GitLab |
+| `https://bitbucket.company.com/scm/PROJ/repo.git`, `ssh://git@bitbucket...` | Bitbucket Data Center |
+| `https://codeberg.org/owner/repo.git` | Forgejo |
+
+> Bitbucket **Cloud** (bitbucket.org) is not supported; only the Data Center REST API (`/rest/api/latest`) is. Cloud remotes get an explicit error. For self-hosted instances (e.g. `gitlab.internal.example.com`), declare the forge: `git config mergetopus.forge-type gitlab`.
+
+Authentication is a token, read from git config with an environment variable fallback:
+
+| Forge     | Git config key               | Environment variable |
+| --------- | ---------------------------- | -------------------- |
+| GitHub    | `mergetopus.github-token`    | `GITHUB_TOKEN`       |
+| GitLab    | `mergetopus.gitlab-token`    | `GITLAB_TOKEN`       |
+| Bitbucket | `mergetopus.bitbucket-token` | `BITBUCKET_TOKEN` (Data Center PAT, sent as `Bearer`) |
+| Forgejo   | `mergetopus.forgejo-token`   | `FORGEJO_TOKEN` or `CODEBERG_TOKEN` |
+
+```bash
+mergetopus pr create            # draft PRs for integration + slice branches
+mergetopus pr create <source>   # ... for one specific plan
+mergetopus pr sync              # refresh PR titles/descriptions
+mergetopus pr list              # show PR URLs and states
+mergetopus push --pr            # push + create PRs in one step
+mergetopus status --pr          # PR links inside status output
+mergetopus cleanup --close-prs  # close PRs when removing branches
+```
+
+## The interactive selector (TUI)
+
+Without `--quiet`, mergetopus shows terminal dialogs: to pick a source branch, to group conflicts into slices, and to pick a slice for `resolve`.
+
+Conflict selector keys:
+
+| Key | Action |
+| --- | ------ |
+| Up/Down | move the cursor |
+| Tab | switch between the conflict list and the slice list |
+| `n` | create a new slice group |
+| Space | assign (or move) the highlighted conflict into the selected slice |
+| `u` | unassign the highlighted conflict |
+| `d` | delete the selected slice (its files become unassigned) |
+| `F3` | diff the selected file (external `diff.tool`, or the built-in 3-way view) |
+| Enter | apply; if files are still unassigned, you're asked whether they get one slice each or one shared slice |
+| Esc / `q` | close overlay / cancel |
+
+Branch pickers: type to filter, Up/Down to move, Enter to select, Esc or `q` to cancel. The built-in diff view scrolls with Up/Down, PageUp/PageDown, Home/End, and closes with Esc.
+
+## Commit metadata
+
+Slice commits carry informational trailers recording where each file came from: `Source-Ref`, `Source-Commit`, `Source-Path`, `Source-Path-Commit`, plus a `Co-authored-by` line when author info is available. These are for humans and for `mergetopus status`; nothing structural depends on them. Authorship in the final history comes from kokomeco's real merge parents, not from trailers.
+
+## Safety, in one page
+
+- Nothing is rewritten or reset automatically. No history rewriting, ever.
+- Deletions are confirmed interactively. `cleanup` and `discard` refuse to run under `--quiet`; `discard --yes` and `mergetopus --yes` are the unattended variants.
+- Consolidation under `--quiet` is skipped rather than approved. Use `consolidate` or `--yes`.
+- The integration branch is not force-changed by default.
+- `mergetopus verify` lets you confirm the snapshot still matches before promoting it.
+
+## Glossary
+
+| Term | Meaning |
+| ---- | ------- |
+| Integration branch | Temporary branch holding the auto-merged part of the result. |
+| Slice branch | Temporary branch holding one group of conflicted files, for one developer to resolve. |
+| Kokomeco branch | The consolidated final merge commit, with honest merge parents. |
+| Merge base | The common ancestor a merge compares both sides against. |
+| Unassigned conflicts | Conflicts not grouped into an explicit slice; one slice each, or one shared slice with `--unassigned single`. |
+| Sanitized name | A branch name with unsafe characters replaced by `_`, used inside `_mmm/...` names. |
 
 ## License
 
