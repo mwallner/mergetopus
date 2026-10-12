@@ -22,6 +22,7 @@ fn is_bitbucket_cloud_host(host: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct RemoteInfo {
     pub host: String,
+    pub api_host: String,
     pub owner: String,
     pub repo: String,
 }
@@ -65,6 +66,7 @@ fn parse_https_url(_full: &str, rest: &str) -> Result<RemoteInfo> {
 
     Ok(RemoteInfo {
         host: host.to_string(),
+        api_host: host.to_string(),
         owner: owner.to_string(),
         repo: repo.to_string(),
     })
@@ -80,6 +82,16 @@ fn parse_ssh_url(rest: &str) -> Result<RemoteInfo> {
     let (host, path) = without_credentials
         .split_once('/')
         .context("SSH URL missing path")?;
+    let api_host = host
+        .rsplit_once(':')
+        .filter(|(hostname, port)| {
+            !hostname.is_empty()
+                && port.parse::<u16>().is_ok()
+                && (!hostname.contains(':')
+                    || (hostname.starts_with('[') && hostname.ends_with(']')))
+        })
+        .map(|(hostname, _)| hostname)
+        .unwrap_or(host);
 
     let path = path.trim_end_matches(".git").trim_matches('/');
 
@@ -89,6 +101,7 @@ fn parse_ssh_url(rest: &str) -> Result<RemoteInfo> {
 
     Ok(RemoteInfo {
         host: host.to_string(),
+        api_host: api_host.to_string(),
         owner: owner.to_string(),
         repo: repo.to_string(),
     })
@@ -108,6 +121,7 @@ fn parse_scp_url(full: &str, at_pos: usize) -> Result<RemoteInfo> {
 
     Ok(RemoteInfo {
         host: host.to_string(),
+        api_host: host.to_string(),
         owner: owner.to_string(),
         repo: repo.to_string(),
     })
@@ -157,9 +171,9 @@ pub fn detect_forge(remote_url: &str) -> Result<Box<dyn Forge>> {
 
     match forge_id {
         ForgeId::GitHub => Ok(Box::new(GitHub::new(token, info.owner, info.repo))),
-        ForgeId::GitLab => Ok(Box::new(GitLab::new(token, info.host))),
-        ForgeId::Bitbucket => Ok(Box::new(Bitbucket::new(token, info.host))),
-        ForgeId::Forgejo => Ok(Box::new(Forgejo::new(token, info.host))),
+        ForgeId::GitLab => Ok(Box::new(GitLab::new(token, info.api_host))),
+        ForgeId::Bitbucket => Ok(Box::new(Bitbucket::new(token, info.api_host))),
+        ForgeId::Forgejo => Ok(Box::new(Forgejo::new(token, info.api_host))),
     }
 }
 
@@ -203,8 +217,23 @@ mod tests {
     fn parse_bitbucket_ssh_with_port() {
         let info = parse_remote_url("ssh://git@bitbucket.example.com:7999/PROJ/repo.git").unwrap();
         assert_eq!(info.host, "bitbucket.example.com:7999");
+        assert_eq!(info.api_host, "bitbucket.example.com");
         assert_eq!(info.owner, "PROJ");
         assert_eq!(info.repo, "repo");
+    }
+
+    #[test]
+    fn parse_ssh_api_host_uses_default_https_port() {
+        let info = parse_remote_url("ssh://git@gitlab.com:22/group/project.git").unwrap();
+        assert_eq!(info.host, "gitlab.com:22");
+        assert_eq!(info.api_host, "gitlab.com");
+    }
+
+    #[test]
+    fn parse_https_api_host_preserves_explicit_port() {
+        let info = parse_remote_url("https://gitlab.example.com:8443/group/project.git").unwrap();
+        assert_eq!(info.host, "gitlab.example.com:8443");
+        assert_eq!(info.api_host, "gitlab.example.com:8443");
     }
 
     #[test]
