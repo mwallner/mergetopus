@@ -155,6 +155,9 @@ pub struct PinnedBaseMerge {
     pub conflicts: BTreeSet<String>,
     /// Unmerged index entries emitted by merge-tree, grouped by path and stage.
     pub stages: BTreeMap<String, BTreeMap<usize, crate::models::StageBlob>>,
+    /// The merge-tree's own `CONFLICT (...)` description lines, so injected
+    /// conflicts keep their topology (rename correlation etc.) downstream.
+    pub messages: String,
 }
 
 /// Run `git merge-tree --write-tree --merge-base=<base> <ours> <theirs>`:
@@ -185,7 +188,11 @@ pub fn merge_tree_with_base(
 
     let mut conflicts = BTreeSet::new();
     let mut stages = BTreeMap::new();
+    let mut messages: Vec<String> = Vec::new();
     for line in lines {
+        if line.starts_with("CONFLICT") {
+            messages.push(line.to_string());
+        }
         // conflicted file info: "<mode> <oid> <stage>\t<path>"
         let Some((meta, path)) = line.split_once('\t') else {
             continue;
@@ -217,6 +224,7 @@ pub fn merge_tree_with_base(
         tree: tree.to_string(),
         conflicts,
         stages,
+        messages: messages.join("\n"),
     }))
 }
 
@@ -499,16 +507,22 @@ fn restore_worktree_from_index(paths: &[String]) -> Result<()> {
 /// have left them. Its full conflict set is returned, and newly conflicting
 /// paths receive the pinned merge's unmerged index stages.
 ///
-/// Returns the remaining conflicts. Falls back to the unchanged input set
-/// when git is too old for the pinned merge-tree probe.
+/// Returns the pinned conflict set plus the merge-tree's `CONFLICT (...)`
+/// lines (empty when nothing was injected), so callers can keep group
+/// topology for injected paths and detect that the set changed at all.
+/// Falls back to the unchanged input set when git is too old for the probe
+/// or only a single merge base exists.
 pub fn deconflict_against_base(
     conflicted: &[String],
     chosen_base: &str,
     ours_ref: &str,
     theirs_ref: &str,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, String)> {
+    // No skip for single-base histories: the raw conflict list may come from
+    // a merge run under a different strategy (HERE takes over manual merges,
+    // e.g. `-s ours`), so only the pinned ort run is authoritative here.
     let Some(pinned) = merge_tree_with_base(ours_ref, theirs_ref, chosen_base)? else {
-        return Ok(conflicted.to_vec());
+        return Ok((conflicted.to_vec(), String::new()));
     };
 
     let raw_conflicts = conflicted
@@ -532,7 +546,7 @@ pub fn deconflict_against_base(
         }
     }
     if to_settle.is_empty() {
-        return Ok(remaining);
+        return Ok((remaining, pinned.messages));
     }
 
     let entries = tree_entries(&pinned.tree, &to_settle)?;
@@ -552,7 +566,7 @@ pub fn deconflict_against_base(
 
     write_stages_to_staged_paths(&present)?;
     resolve_paths_as_deleted_batch(&deleted)?;
-    Ok(remaining)
+    Ok((remaining, pinned.messages))
 }
 
 fn materialize_pinned_conflict_stages(
@@ -1787,7 +1801,7 @@ mod tests {
 
         let default = test_helpers::with_repo_cwd(&repo, || merge_base(x.trim(), y.trim()))?;
         let base_f = test_helpers::git(&repo, &["show", &format!("{}:f.txt", default.trim())])?;
-        let remaining = test_helpers::with_repo_cwd(&repo, || {
+        let (remaining, _messages) = test_helpers::with_repo_cwd(&repo, || {
             deconflict_against_base(&raw, default.trim(), x.trim(), y.trim())
         })?;
         assert!(
@@ -1814,7 +1828,7 @@ mod tests {
         let head = test_helpers::git(&repo, &["rev-parse", "HEAD"])?;
         let feature = test_helpers::git(&repo, &["rev-parse", "feature"])?;
         let base = test_helpers::with_repo_cwd(&repo, || merge_base(head.trim(), feature.trim()))?;
-        let remaining = test_helpers::with_repo_cwd(&repo, || {
+        let (remaining, _messages) = test_helpers::with_repo_cwd(&repo, || {
             deconflict_against_base(&raw, base.trim(), head.trim(), feature.trim())
         })?;
         assert_eq!(
@@ -1850,10 +1864,14 @@ mod tests {
             "original conflict set should be empty: {raw:?}"
         );
 
-        let remaining = test_helpers::with_repo_cwd(&repo, || {
+        let (remaining, messages) = test_helpers::with_repo_cwd(&repo, || {
             deconflict_against_base(&raw, base.trim(), ours.trim(), feature.trim())
         })?;
         assert_eq!(remaining, vec!["f.txt"]);
+        assert!(
+            messages.contains("CONFLICT") && messages.contains("f.txt"),
+            "pinned conflict lines must accompany injected paths: {messages}"
+        );
 
         let map = test_helpers::with_repo_cwd(&repo, conflict_stage_map)?;
         let stages = map

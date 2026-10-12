@@ -109,17 +109,25 @@ pub fn here_command(
     // Re-evaluate the conflicted set against the ONE chosen merge base; with
     // multiple (criss-cross) bases git's virtual base can over-report, and
     // those paths settle exactly as a single-base merge would resolve them.
-    let conflicted_now = git_ops::deconflict_against_base(
+    let (conflicted_now, pinned_messages) = git_ops::deconflict_against_base(
         &raw_conflicts,
         &merge_base,
         &remembered_head,
         &source_sha,
     )?;
-    let merge_output = if conflicted_now.len() != raw_conflicts.len() {
-        planner::filter_conflict_lines(&merge_output, &conflicted_now)
-    } else {
-        merge_output
-    };
+    let merge_output =
+        if super::cmd_merge_workflow::conflict_set_changed(&raw_conflicts, &conflicted_now) {
+            let mut out = planner::filter_conflict_lines(&merge_output, &conflicted_now);
+            if !pinned_messages.is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&pinned_messages);
+            }
+            out
+        } else {
+            merge_output
+        };
     let stage_map = git_ops::conflict_stage_map()?;
     let conflict_groups =
         planner::build_conflict_groups(&merge_output, &conflicted_now, &stage_map);

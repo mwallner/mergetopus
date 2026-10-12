@@ -232,14 +232,21 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
     // merge bases; Mergetopus anchors to one concrete base instead. Re-evaluate
     // the conflict set against it so paths that a single-base merge would
     // auto-resolve are settled here and never become slices.
-    let conflicted_files = git_ops::deconflict_against_base(
+    let (conflicted_files, pinned_messages) = git_ops::deconflict_against_base(
         &raw_conflicts,
         &actual_merge_base,
         &actual_remembered_head,
         &actual_source_sha,
     )?;
-    let merge_output = if conflicted_files.len() != raw_conflicts.len() {
-        planner::filter_conflict_lines(&merge_output, &conflicted_files)
+    let merge_output = if conflict_set_changed(&raw_conflicts, &conflicted_files) {
+        let mut out = planner::filter_conflict_lines(&merge_output, &conflicted_files);
+        if !pinned_messages.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&pinned_messages);
+        }
+        out
     } else {
         merge_output
     };
@@ -600,4 +607,14 @@ pub(crate) fn create_consolidated_merge_commit_branch(
 
     git_ops::commit(&message)?;
     Ok(branch)
+}
+
+/// Whether re-evaluation against the chosen base changed the conflict set
+/// (compare as sets: a settle plus an injection of equal size is still a
+/// change the raw `CONFLICT (...)` lines must be re-filtered for).
+pub(crate) fn conflict_set_changed(before: &[String], after: &[String]) -> bool {
+    use std::collections::BTreeSet;
+    let a: BTreeSet<&str> = before.iter().map(String::as_str).collect();
+    let b: BTreeSet<&str> = after.iter().map(String::as_str).collect();
+    a != b
 }

@@ -298,7 +298,7 @@ pub fn resolve_command(
     // The merge itself consulted git's (possibly virtual) base selection;
     // re-evaluate the conflict set against the single chosen base so paths
     // that resolve cleanly relative to it never reach the conflict flow.
-    let conflicted_paths = git_ops::deconflict_against_base(
+    let (conflicted_paths, pinned_messages) = git_ops::deconflict_against_base(
         &raw_conflicts,
         &merge_base,
         &local_commit,
@@ -318,8 +318,14 @@ pub fn resolve_command(
         merge_output =
             git_ops::merge_conflict_messages(&local_commit, &remote_commit, Some(&merge_base))?;
     }
-    if conflicted_paths.len() != raw_conflicts.len() {
+    if super::cmd_merge_workflow::conflict_set_changed(&raw_conflicts, &conflicted_paths) {
         merge_output = planner::filter_conflict_lines(&merge_output, &conflicted_paths);
+        if !pinned_messages.is_empty() {
+            if !merge_output.is_empty() {
+                merge_output.push('\n');
+            }
+            merge_output.push_str(&pinned_messages);
+        }
     }
     let groups = planner::build_conflict_groups(&merge_output, &conflicted_paths, &stage_map);
     let mut settled: Vec<String> = Vec::new();
