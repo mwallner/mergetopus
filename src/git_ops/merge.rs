@@ -1,5 +1,20 @@
 use crate::git_ops::{run_git, run_git_allow_failure};
 use anyhow::{Context, Result, bail};
+use std::process::Command;
+
+fn run_git_allow_failure_c_locale(args: &[&str]) -> Result<(bool, String, String)> {
+    let output = Command::new("git")
+        .args(args)
+        .env("LC_ALL", "C")
+        .output()
+        .with_context(|| format!("failed to execute git {}", args.join(" ")))?;
+
+    Ok((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    ))
+}
 
 pub fn merge_in_progress() -> Result<bool> {
     let (ok, _, _) = run_git_allow_failure(&["rev-parse", "-q", "--verify", "MERGE_HEAD"])?;
@@ -14,7 +29,8 @@ pub fn merge_head_sha() -> Result<String> {
 /// Run `git merge --no-ff --no-commit <source>` and return its combined
 /// stdout/stderr so callers can parse `CONFLICT (...)` descriptions.
 pub fn merge_no_commit(source: &str) -> Result<String> {
-    let (ok, stdout, stderr) = run_git_allow_failure(&["merge", "--no-ff", "--no-commit", source])?;
+    let (ok, stdout, stderr) =
+        run_git_allow_failure_c_locale(&["merge", "--no-ff", "--no-commit", source])?;
     let combined = if stderr.is_empty() {
         stdout
     } else if stdout.is_empty() {
@@ -65,7 +81,7 @@ pub fn merge_conflict_messages(
         }
         args.push(commit_a);
         args.push(commit_b);
-        let (ok, stdout, _stderr) = run_git_allow_failure(&args)?;
+        let (ok, stdout, _stderr) = run_git_allow_failure_c_locale(&args)?;
         Ok((ok, stdout))
     };
 
