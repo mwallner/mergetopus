@@ -200,14 +200,11 @@ impl Forge for Bitbucket {
         };
 
         let version = self.fetch_version(project, repo, number)?;
-        // Closing a PR requires the dedicated /decline endpoint; PUT only
-        // updates details and ignores a state field.
+        // The decline endpoint requires the current version as a query parameter.
         let url = self.api_url(&format!(
-            "/projects/{project}/repos/{repo}/pull-requests/{number}/decline"
+            "/projects/{project}/repos/{repo}/pull-requests/{number}/decline?version={version}"
         ));
-        let body = serde_json::json!({
-            "version": version,
-        });
+        let body = serde_json::json!({});
         let resp: BitbucketPrResponse = self.api_post(&url, body)?;
         let web_url = self.pr_web_url(project, repo, resp.id);
         Ok(convert_pr(resp, web_url))
