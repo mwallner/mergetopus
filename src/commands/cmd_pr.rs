@@ -16,10 +16,12 @@ pub fn pr_command(
 ) -> Result<()> {
     let integration_branch = resolve_integration_branch(source, quiet, current_branch, tui_title)?;
 
-    let (safe_target, safe_source) = planner::parse_integration_branch(&integration_branch)
-        .ok_or_else(|| {
-            anyhow::anyhow!("'{}' is not a valid integration branch", integration_branch)
-        })?;
+    if planner::parse_integration_branch(&integration_branch).is_none() {
+        bail!("'{}' is not a valid integration branch", integration_branch);
+    }
+    // The forge needs the ORIGINAL refs (sanitized tokens are branch-name
+    // fragments only); recovered from the partial-merge commit trailers.
+    let (target, source) = planner::original_workflow_refs(&integration_branch)?;
 
     let remote = resolve_remote(None, quiet, tui_title)?;
     let remote_url = git_ops::get_remote_url(&remote)?;
@@ -31,8 +33,8 @@ pub fn pr_command(
         &info.owner,
         &info.repo,
         &integration_branch,
-        &safe_target,
-        &safe_source,
+        &target,
+        &source,
         &remote,
         action,
     )

@@ -302,7 +302,7 @@ pub fn run_merge_workflow(args: &Args, current_branch: &str, tui_title: &str) ->
         };
 
         let msg = format!(
-            "Mergetopus: partial merge '{actual_source_ref}' into '{actual_integration_branch}' (conflicts sliced)\n\nmerged:\n{merged_section}\n\nsliced:\n{sliced_section}\n\nauto-applied:\n{auto_applied_section}"
+            "Mergetopus: partial merge '{actual_source_ref}' into '{actual_integration_branch}' (conflicts sliced)\n\nmerged:\n{merged_section}\n\nsliced:\n{sliced_section}\n\nauto-applied:\n{auto_applied_section}\n\nMergetopus-Target: {target_branch_for_merge}\nMergetopus-Source: {actual_source_ref}"
         );
 
         git_ops::commit(&msg)?;

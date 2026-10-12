@@ -822,6 +822,60 @@ pub fn slice_branch_name(integration_branch: &str, index_one_based: usize) -> Re
     Ok(format!("{prefix}/slice{index_one_based}"))
 }
 
+/// Original (unsanitized) target and source refs for a workflow.
+///
+/// Integration branch names only carry sanitized tokens; the forge PR base
+/// and kokomeco metadata need the REAL refs (e.g. `release/1.4`, not
+/// `release_1.4`). They are recorded as `Mergetopus-Target/Source` trailers
+/// on the first partial-merge commit. Falls back to the sanitized tokens for
+/// workflows created before the trailers existed.
+pub fn original_workflow_refs(integration_branch: &str) -> Result<(String, String)> {
+    let (san_target, san_source) = parse_integration_branch(integration_branch)
+        .unwrap_or_else(|| (String::new(), String::new()));
+
+    let message = git_ops::first_mergetopus_partial_merge_commit(integration_branch)
+        .and_then(|commit| git_ops::commit_message(&commit))
+        .ok();
+    let (target, source) = match message.as_deref() {
+        Some(msg) => (
+            parse_trailer_line(msg, "Mergetopus-Target:").or_else(|| non_empty(&san_target)),
+            parse_trailer_line(msg, "Mergetopus-Source:")
+                .or_else(|| first_line_source(msg))
+                .or_else(|| non_empty(&san_source)),
+        ),
+        None => (non_empty(&san_target), non_empty(&san_source)),
+    };
+
+    Ok((
+        target.unwrap_or_else(|| integration_branch.to_string()),
+        source.unwrap_or_else(|| integration_branch.to_string()),
+    ))
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+fn parse_trailer_line(message: &str, key: &str) -> Option<String> {
+    message.lines().find_map(|line| {
+        line.trim_end()
+            .strip_prefix(key)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
+}
+
+fn first_line_source(message: &str) -> Option<String> {
+    let first = message.lines().next()?.trim();
+    let rest = first.strip_prefix("Mergetopus: partial merge '")?;
+    let end = rest.find("' into '")?;
+    non_empty(rest[..end].trim())
+}
+
 /// Conflicted paths that no explicit slice group covers, in conflict-list order.
 pub fn unassigned_paths<'a>(
     all_conflicts: &'a [String],
@@ -1439,6 +1493,57 @@ mod tests {
         let explicit = vec![vec!["a.txt".to_string()]];
 
         assert!(unassigned_paths(&conflicts, &explicit).is_empty());
+    }
+
+    #[test]
+    fn original_workflow_refs_prefers_trailers_then_falls_back() -> TestResult<()> {
+        let repo = test_helpers::init_repo()?;
+        test_helpers::git(&repo, &["branch", "-m", "release/1.4"])?;
+        test_helpers::write_file(&repo, "f.txt", "x\n")?;
+        test_helpers::commit_all(&repo, "base")?;
+        test_helpers::git(&repo, &["checkout", "-qb", "feature/x"])?;
+        test_helpers::write_file(&repo, "g.txt", "y\n")?;
+        test_helpers::commit_all(&repo, "feature work")?;
+        let integration = integration_branch_name("release/1.4", "feature/x");
+        test_helpers::git(
+            &repo,
+            &["checkout", "-qb", integration.as_str(), "release/1.4"],
+        )?;
+
+        // No partial-merge commit yet: sanitized fallback.
+        test_helpers::with_repo_cwd(&repo, || {
+            let (target, source) = original_workflow_refs(&integration)?;
+            assert_eq!(target, parse_integration_branch(&integration).unwrap().0);
+            assert_eq!(source, parse_integration_branch(&integration).unwrap().1);
+            Ok(())
+        })?;
+
+        // A real partial-merge commit (two parents) records the refs.
+        let msg = format!(
+            "Mergetopus: partial merge 'feature/x' into '{integration}' (conflicts sliced)\n\nmerged:\n* g.txt\n\nsliced:\n* (none)\n\nauto-applied:\n* (none)\n\nMergetopus-Target: release/1.4\nMergetopus-Source: feature/x"
+        );
+        std::fs::write(repo.join("m.txt"), &msg)?;
+        test_helpers::git(
+            &repo,
+            &[
+                "merge",
+                "--no-ff",
+                "--no-commit",
+                "-F",
+                "m.txt",
+                "feature/x",
+            ],
+        )?;
+        test_helpers::git(&repo, &["commit", "-F", "m.txt"])?;
+        std::fs::remove_file(repo.join("m.txt")).ok();
+
+        test_helpers::with_repo_cwd(&repo, || {
+            let (target, source) = original_workflow_refs(&integration)?;
+            assert_eq!(target, "release/1.4");
+            assert_eq!(source, "feature/x");
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]

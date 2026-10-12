@@ -75,8 +75,10 @@ fn resolve_integration_and_source(
     current_branch: &str,
     source: Option<&str>,
 ) -> Result<(String, String)> {
-    if let Some((_target, source)) = planner::parse_integration_branch(current_branch) {
-        // Already on an integration branch — use it directly.
+    if let Some((_target, _san_source)) = planner::parse_integration_branch(current_branch) {
+        // Already on an integration branch — use it directly, but recover the
+        // ORIGINAL source ref (sanitized tokens break trailer/PR metadata).
+        let (_target, source) = planner::original_workflow_refs(current_branch)?;
         return Ok((current_branch.to_string(), source));
     }
 

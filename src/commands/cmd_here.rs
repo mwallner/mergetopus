@@ -169,7 +169,7 @@ pub fn here_command(
         };
 
         let msg = format!(
-            "Mergetopus: partial merge '{source_ref}' into '{integration_branch}' (conflicts sliced)\n\nmerged:\n{merged_section}\n\nsliced:\n{sliced_section}\n\nTakeover: HERE"
+            "Mergetopus: partial merge '{source_ref}' into '{integration_branch}' (conflicts sliced)\n\nmerged:\n{merged_section}\n\nsliced:\n{sliced_section}\n\nTakeover: HERE\n\nMergetopus-Target: {current_branch}\nMergetopus-Source: {source_ref}"
         );
         git_ops::commit(&msg)?;
     }

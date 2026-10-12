@@ -31,26 +31,28 @@ pub fn push_command(
     let remote = resolve_remote(remote_arg, quiet, tui_title)?;
 
     // --- Step 3: Parse target and source from integration branch name ---
-    let (safe_target, safe_source) = planner::parse_integration_branch(&integration_branch)
-        .ok_or_else(|| {
-            anyhow::anyhow!("'{}' is not a valid integration branch", integration_branch)
-        })?;
+    if planner::parse_integration_branch(&integration_branch).is_none() {
+        bail!("'{}' is not a valid integration branch", integration_branch);
+    }
+    // Real refs, not the sanitized tokens embedded in the branch name:
+    // remote existence checks and PR bases must address actual branches.
+    let (target, source) = planner::original_workflow_refs(&integration_branch)?;
 
     // Verify source and target exist on remote (check remote-tracking refs)
-    let remote_target_ref = format!("{remote}/{safe_target}");
+    let remote_target_ref = format!("{remote}/{target}");
     if !git_ops::remote_branch_exists(&remote_target_ref)? {
         bail!(
             "target branch '{}' not found on remote '{}' — push it first",
-            safe_target,
+            target,
             remote
         );
     }
 
-    let remote_source_ref = format!("{remote}/{safe_source}");
+    let remote_source_ref = format!("{remote}/{source}");
     if !git_ops::remote_branch_exists(&remote_source_ref)? {
         bail!(
             "source branch '{}' not found on remote '{}' — push it first",
-            safe_source,
+            source,
             remote
         );
     }
@@ -100,8 +102,8 @@ pub fn push_command(
             &remote,
             &integration_branch,
             &slices,
-            &safe_target,
-            &safe_source,
+            &target,
+            &source,
             quiet,
         )?;
     }
