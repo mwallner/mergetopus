@@ -1243,6 +1243,128 @@ fn initial_partial_merge_detection_ignores_task_branch_merge_between_slice_merge
     Ok(())
 }
 
+/// Status must not walk (or warn about) the target branch's pre-existing merge
+/// commits: the integration branch inherits the whole target history, but only
+/// Mergetopus-added commits belong to the initial-partial-merge search.
+#[test]
+fn status_ignores_merge_commits_inherited_from_target() -> TestResult<()> {
+    let repo = test_helpers::setup_two_conflicts_repo()?;
+
+    // Grow main with ordinary merge commits before the workflow starts, so the
+    // integration branch inherits them in its first-parent history.
+    for i in 0..5 {
+        let task = format!("Task-{i}");
+        test_helpers::git(&repo, &["checkout", "-b", &task])?;
+        test_helpers::write_file(&repo, &format!("task/{i}.txt"), "task payload\n")?;
+        test_helpers::commit_all(&repo, &format!("{task} change"))?;
+        test_helpers::git(&repo, &["checkout", "main"])?;
+        test_helpers::git(
+            &repo,
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                &format!("Merge branch '{task}'"),
+                &task,
+            ],
+        )?;
+    }
+
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        create.status.success(),
+        "initial mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+    test_helpers::git(&repo, &["checkout", "main"])?;
+
+    let source_sha = test_helpers::git(&repo, &["rev-parse", "feature"])?;
+    let status = test_helpers::mergetopus(&repo, &["--quiet", "status", "feature"])?;
+    assert!(
+        status.status.success(),
+        "status command failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        !stderr.contains("does not match expected Mergetopus prefix"),
+        "status must not warn about merge commits inherited from the target:\n{stderr}"
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains(&format!("Source SHA: {source_sha}")),
+        "status must report the current workflow's source commit:\n{stdout}"
+    );
+
+    Ok(())
+}
+
+/// When the target's first-parent history already contains an older Mergetopus
+/// partial-merge commit (target fast-forwarded onto a finished integration
+/// branch), status must report the current workflow's source, not the stale one.
+#[test]
+fn status_prefers_current_partial_merge_over_stale_target_history() -> TestResult<()> {
+    let repo = test_helpers::setup_single_conflict_repo()?;
+
+    let create = test_helpers::mergetopus(&repo, &["feature", "--quiet"])?;
+    assert!(
+        create.status.success(),
+        "initial mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+
+    // Fast-forward main onto the integration branch so the stale partial-merge
+    // commit sits on main's first-parent chain.
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    test_helpers::git(&repo, &["merge", "--ff-only", integration_branch()])?;
+
+    // Second workflow with a different source.
+    test_helpers::write_file(&repo, "other.txt", "base other\n")?;
+    test_helpers::commit_all(&repo, "base other")?;
+    test_helpers::git(&repo, &["checkout", "-b", "feature2"])?;
+    test_helpers::write_file(&repo, "other.txt", "feature other\n")?;
+    test_helpers::commit_all(&repo, "feature2 change")?;
+    test_helpers::git(&repo, &["checkout", "main"])?;
+    test_helpers::write_file(&repo, "other.txt", "main other\n")?;
+    test_helpers::commit_all(&repo, "main change")?;
+
+    let create2 = test_helpers::mergetopus(&repo, &["feature2", "--quiet"])?;
+    assert!(
+        create2.status.success(),
+        "second mergetopus run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create2.stdout),
+        String::from_utf8_lossy(&create2.stderr)
+    );
+    test_helpers::git(&repo, &["checkout", "main"])?;
+
+    let status = test_helpers::mergetopus(&repo, &["--quiet", "status", "feature2"])?;
+    assert!(
+        status.status.success(),
+        "status command failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("Source ref: feature2"),
+        "status must report the current workflow's source:\n{stdout}"
+    );
+    assert!(
+        !stdout
+            .lines()
+            .any(|l| l.trim_end() == "Source ref: feature"),
+        "stale partial merge inherited from the target must not be used:\n{stdout}"
+    );
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // resolve: trustExitCode / conflict marker detection
 // ---------------------------------------------------------------------------
