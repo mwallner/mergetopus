@@ -6,29 +6,26 @@ use mergetopus::forges;
 use mergetopus::git_ops;
 use mergetopus::planner;
 
-/// Removes resolved Mergetopus integration/slice branches that already have a
-/// corresponding kokomeco branch, after interactive confirmation.
-pub fn cleanup_command(
-    close_prs: bool,
-    quiet: bool,
-    current_branch: &str,
-    tui_title: &str,
-) -> Result<()> {
-    let all_local = git_ops::list_local_branches()?;
-    // Preload the ref inventory once; the original loop spent 1-2
-    // subprocesses per branch (and per slice on Separate-policy runs).
+/// Pure selection over a preloaded ref inventory: the local branches eligible
+/// for cleanup — integration branches whose consolidated kokomeco branch
+/// exists locally **or** on any remote-tracking ref — plus their locally
+/// present slices. Kokomeco branches themselves are never returned (they are
+/// retained), and remote-only branches are never candidates because cleanup
+/// deletes local branches only.
+///
+/// Preloading matters: the original loop spent 1-2 subprocesses per branch
+/// (and per slice on Separate-policy runs). Results are sorted and deduped.
+fn cleanup_candidates(all_local: &[String], remote_refs: &[String]) -> Vec<String> {
     let local_set: std::collections::BTreeSet<&str> =
         all_local.iter().map(String::as_str).collect();
-    let remote_refs = git_ops::list_remote_refs()?;
     let all_ref_names: Vec<&str> = all_local
         .iter()
         .map(String::as_str)
         .chain(remote_refs.iter().map(String::as_str))
         .collect();
 
-    let mut branches_to_delete: Vec<String> = Vec::new();
-
-    for branch in &all_local {
+    let mut candidates: Vec<String> = Vec::new();
+    for branch in all_local {
         if planner::parse_integration_branch(branch).is_none() {
             continue;
         }
@@ -41,15 +38,34 @@ pub fn cleanup_command(
             continue;
         }
 
-        branches_to_delete.push(branch.clone());
+        candidates.push(branch.clone());
 
         let slices = git_ops::slice_branch_names_from_refs(all_ref_names.iter().copied(), branch);
         for slice in slices {
             if local_set.contains(slice.as_str()) {
-                branches_to_delete.push(slice);
+                candidates.push(slice);
             }
         }
     }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+/// Removes resolved Mergetopus integration/slice branches that already have a
+/// corresponding kokomeco branch, after interactive confirmation.
+pub fn cleanup_command(
+    close_prs: bool,
+    quiet: bool,
+    current_branch: &str,
+    tui_title: &str,
+) -> Result<()> {
+    // Preload the ref inventory once; see `cleanup_candidates`.
+    let all_local = git_ops::list_local_branches()?;
+    let remote_refs = git_ops::list_remote_refs()?;
+
+    let branches_to_delete = cleanup_candidates(&all_local, &remote_refs);
 
     if branches_to_delete.is_empty() {
         color::print_info(
@@ -62,9 +78,6 @@ pub fn cleanup_command(
         );
         return Ok(());
     }
-
-    branches_to_delete.sort();
-    branches_to_delete.dedup();
 
     let do_delete = if quiet {
         bail!("cleanup requires interactive confirmation; re-run without --quiet to proceed");
@@ -156,4 +169,98 @@ fn close_prs_for_branches(branches: &[String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn remote_only_kokomeco_selects_integration_and_local_slices() {
+        // Regression for limitation #4: cleanup must recognize a kokomeco
+        // branch that exists only as a remote-tracking ref.
+        let all_local = names(&[
+            "main",
+            "_mmm/main/feature/integration",
+            "_mmm/main/feature/slice1",
+            "_mmm/main/feature/slice2",
+        ]);
+        let remote = names(&["origin/_mmm/main/feature/kokomeco"]);
+
+        let got = cleanup_candidates(&all_local, &remote);
+
+        assert_eq!(
+            got,
+            names(&[
+                "_mmm/main/feature/integration",
+                "_mmm/main/feature/slice1",
+                "_mmm/main/feature/slice2",
+            ])
+        );
+    }
+
+    #[test]
+    fn local_kokomeco_selects_and_kokomeco_is_retained() {
+        let all_local = names(&[
+            "_mmm/main/feature/integration",
+            "_mmm/main/feature/slice1",
+            "_mmm/main/feature/kokomeco",
+        ]);
+
+        let got = cleanup_candidates(&all_local, &[]);
+
+        assert_eq!(
+            got,
+            names(&["_mmm/main/feature/integration", "_mmm/main/feature/slice1"])
+        );
+        assert!(
+            !got.iter().any(|b| b.ends_with("/kokomeco")),
+            "kokomeco branch must never be a cleanup candidate: {got:?}"
+        );
+    }
+
+    #[test]
+    fn no_kokomeco_anywhere_selects_nothing() {
+        let all_local = names(&["_mmm/main/feature/integration", "_mmm/main/feature/slice1"]);
+
+        assert!(cleanup_candidates(&all_local, &[]).is_empty());
+        assert!(
+            cleanup_candidates(
+                &all_local,
+                &names(&["origin/_mmm/main/feature/integration"])
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn remote_only_branches_are_not_candidates() {
+        // Only local branches are deleted; a remote-only slice must not
+        // appear even when its integration qualifies.
+        let all_local = names(&["_mmm/main/feature/integration"]);
+        let remote = names(&[
+            "origin/_mmm/main/feature/kokomeco",
+            "origin/_mmm/main/feature/slice1",
+        ]);
+
+        assert_eq!(
+            cleanup_candidates(&all_local, &remote),
+            names(&["_mmm/main/feature/integration"])
+        );
+    }
+
+    #[test]
+    fn remote_integration_only_is_not_a_candidate() {
+        // With no local integration branch there is nothing local to delete.
+        let remote = names(&[
+            "origin/_mmm/main/feature/integration",
+            "origin/_mmm/main/feature/kokomeco",
+        ]);
+
+        assert!(cleanup_candidates(&[], &remote).is_empty());
+    }
 }
