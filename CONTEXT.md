@@ -1,6 +1,6 @@
 # Mergetopus - Architecture Overview
 
-**Version:** 0.7.0  
+**Version:** 0.8.0  
 **Language:** Rust (Edition 2024)  
 **Purpose:** Git merge orchestration tool for splitting large, conflict-heavy merges into manageable, parallelizable tasks
 
