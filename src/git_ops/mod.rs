@@ -1357,13 +1357,57 @@ fn is_slice_branch_ref(reference: &str) -> bool {
 /// Return the first Mergetopus partial-merge commit on the integration branch
 /// first-parent history.
 pub fn first_mergetopus_partial_merge_commit(integration_branch: &str) -> Result<String> {
-    let out = run_git(&[
+    if let Some(target_ref) = integration_target_ref(integration_branch) {
+        // A failed bounded walk is not fatal: the unbounded fallback below
+        // reproduces the previous behavior for the same history.
+        if let Ok(Some(sha)) =
+            find_first_partial_merge_commit(integration_branch, Some(&target_ref))
+        {
+            return Ok(sha);
+        }
+    }
+
+    if let Some(sha) = find_first_partial_merge_commit(integration_branch, None)? {
+        return Ok(sha);
+    }
+
+    bail!(
+        "failed to locate initial mergetopus partial-merge commit on integration branch '{}'",
+        integration_branch
+    )
+}
+
+/// Resolve the target branch of `_mmm/<target>/<source>/integration` to a ref
+/// that exists locally or as a remote-tracking ref.
+fn integration_target_ref(integration_branch: &str) -> Option<String> {
+    let (target, _) = crate::planner::parse_integration_branch(integration_branch)?;
+    best_ref_for_local_branch(&target).ok().flatten()
+}
+
+/// Scan the integration branch first-parent history oldest-first for the first
+/// merge commit that does not come from a slice branch and whose subject
+/// carries the Mergetopus partial-merge prefix. `exclude` adds a `--not <rev>`
+/// boundary so history inherited from the target branch is skipped. Returns
+/// `Ok(None)` when the range holds no matching commit.
+fn find_first_partial_merge_commit(
+    integration_branch: &str,
+    exclude: Option<&str>,
+) -> Result<Option<String>> {
+    let integration = integration_branch.to_string();
+    let excluded = exclude.map(str::to_string);
+    let mut args = vec![
         "log",
-        integration_branch,
+        integration.as_str(),
         "--first-parent",
         "--reverse",
         "--format=%H%x1f%P%x1f%s",
-    ])?;
+    ];
+    if let Some(excluded) = excluded.as_deref() {
+        args.push("--not");
+        args.push(excluded);
+    }
+
+    let out = run_git(&args)?;
 
     for line in out.lines() {
         let mut parts = line.splitn(3, '\u{1f}');
@@ -1399,13 +1443,10 @@ pub fn first_mergetopus_partial_merge_commit(integration_branch: &str) -> Result
             continue;
         }
 
-        return Ok(sha.to_string());
+        return Ok(Some(sha.to_string()));
     }
 
-    bail!(
-        "failed to locate initial mergetopus partial-merge commit on integration branch '{}'",
-        integration_branch
-    )
+    Ok(None)
 }
 
 /// Return the SHA of the first parent of `rev` (i.e. `rev^`).

@@ -12,10 +12,9 @@ use mergetopus::win32_path::to_fs_path;
 
 /// RAII guard that creates a temporary directory on construction and deletes
 /// it (including all contents) when the guard is dropped, covering all exit
-/// paths: normal return, early bail, panic unwind, and Ctrl-C.
+/// paths: normal return, early bail, and panic unwind.
 struct MergetopusTempDir {
     path: PathBuf,
-    cleaned: bool,
 }
 
 impl MergetopusTempDir {
@@ -40,32 +39,30 @@ impl MergetopusTempDir {
         };
         std::fs::create_dir_all(&path)
             .context("failed to create temporary directory for merge tool files")?;
-        Ok(MergetopusTempDir {
-            path,
-            cleaned: false,
-        })
+        Ok(MergetopusTempDir { path })
     }
 
     fn path(&self) -> &Path {
         &self.path
     }
-
-    /// Mark the directory as successfully cleaned — prevents the Drop handler
-    /// from printing a warning on normal exit paths.
-    fn clean(&mut self) {
-        self.cleaned = true;
-    }
 }
 
 impl Drop for MergetopusTempDir {
     fn drop(&mut self) {
-        if self.cleaned {
-            return;
-        }
-        if let Err(e) = std::fs::remove_dir_all(&self.path) {
+        // Removal runs unconditionally on every exit path — a short-circuit
+        // flag here previously left the directory behind on the success path.
+        let result = std::fs::remove_dir_all(&self.path).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                // One retry to ride out transient file locks (e.g. a merge
+                // tool that has just exited but still holds a handle).
+                std::fs::remove_dir_all(&self.path)
+            }
+        });
+        if let Err(e) = result {
             // Only warn on actual errors (not "not found" — that's fine).
             if e.kind() != std::io::ErrorKind::NotFound {
-                let _ = std::fs::remove_dir_all(&self.path);
                 eprintln!(
                     "warning: failed to remove temporary directory '{}': {e}",
                     self.path.display()
@@ -449,7 +446,7 @@ pub fn resolve_command(
         || tool_cmd.contains("${MERGED}")
         || tool_cmd.contains("%MERGED%");
 
-    let mut tmp_dir = MergetopusTempDir::new()?;
+    let tmp_dir = MergetopusTempDir::new()?;
 
     let mut skipped_paths: Vec<String> = Vec::new();
     let mut to_stage: Vec<String> = Vec::new();
@@ -673,7 +670,6 @@ pub fn resolve_command(
         );
     }
 
-    tmp_dir.clean();
     Ok(())
 }
 
@@ -728,6 +724,16 @@ mod tests {
         // Closing before opening — should not match
         let path = write_temp_file(">>>>>>> branch\n=======\n<<<<<<< HEAD\n");
         assert!(!has_conflict_markers(&path));
+    }
+
+    #[test]
+    fn temp_dir_removed_on_drop() {
+        let tmp = MergetopusTempDir::new().expect("temp dir should be created");
+        let path = tmp.path().to_path_buf();
+        std::fs::write(path.join("file.LOCAL"), "content").unwrap();
+        assert!(path.exists());
+        drop(tmp);
+        assert!(!path.exists(), "temp dir must be removed on drop");
     }
 
     #[test]

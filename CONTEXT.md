@@ -1,6 +1,6 @@
 # Mergetopus - Architecture Overview
 
-**Version:** 0.7.0  
+**Version:** 0.8.0  
 **Language:** Rust (Edition 2024)  
 **Purpose:** Git merge orchestration tool for splitting large, conflict-heavy merges into manageable, parallelizable tasks
 
@@ -701,10 +701,10 @@ mergetopus license
 
 ### Known Limitations (from TODO.md)
 
-1. Temp directory cleanup in resolve command
+1. ~~Temp directory cleanup in resolve command~~ (fixed: RAII guard now removes the dir on every exit path, including success)
 2. Branch name collision via sanitization (rare)
 3. HERE command ambiguity with multiple refs at same commit
-4. Cleanup only checks local kokomeco branches (not remote)
+4. ~~Cleanup only checks local kokomeco branches (not remote)~~ (fixed: `cleanup_candidates` detects remote-tracking kokomeco refs; regression tests in `cmd_cleanup.rs`)
 5. Command parsing doesn't handle backslash-escaped quotes
 6. Overlay scroll position u16 truncation (very long diffs)
 7. File content trimming in show_file_at
@@ -728,5 +728,5 @@ mergetopus license
 
 ---
 
-**Last Updated:** 2026-10-09  
+**Last Updated:** 2026-10-19  
 **For LLMs:** This document provides comprehensive context for code understanding, modification, and extension tasks.
